@@ -107,4 +107,47 @@ public enum Coordinates {
             height: rect.size.height / scale
         )
     }
+
+    /// Convert a **window-local** point (Client Space, I-3: physical pixels,
+    /// origin at the proxy window's top-left, Y **down**) to an **AX global
+    /// point** (points, top-left origin, Y down) — the space `CGEventPost` uses
+    /// for mouse locations. This is the whole coordinate chain for input (issue
+    /// #7):
+    ///
+    /// ```
+    /// CS (window-local, physical px)
+    ///   + window origin (VDS px)   -> VDS (physical px)
+    ///   / backingScaleFactor       -> AX points  (+ display origin)
+    ///   -> CGEventPost
+    /// ```
+    ///
+    /// It is the exact composition of "translate into VDS" then the `/ scale`
+    /// half of ``axGlobalRect(fromDisplayPixels:displayOriginPoints:scale:)``, so
+    /// the scale *division* stays in this one file (I-2, I-3). **Y is down the
+    /// whole way** — CS, VDS, and AX/CoreGraphics global space all put the origin
+    /// top-left with Y increasing downward, so there is deliberately no flip here.
+    /// A flip would be the vertically-mirrored bug I-3 warns about.
+    ///
+    /// - Parameters:
+    ///   - local: the click/move point in window-local physical pixels (CS).
+    ///   - windowOriginVDS: the window's top-left in VDS pixels — i.e. the
+    ///     `x`/`y` of the rect the host last reported for this window.
+    ///   - displayOriginPoints: the target display's origin in AX global points
+    ///     (`CGDisplayBounds(id).origin`; `.zero` when the display is main, the
+    ///     Transom virtual-display case).
+    ///   - scale: the display's backing scale factor (pixels per point). On a 2x
+    ///     display a point-vs-pixel error is exactly a factor of two.
+    public static func axGlobalPoint(
+        fromWindowLocalPixels local: CGPoint,
+        windowOriginVDS: CGPoint,
+        displayOriginPoints: CGPoint,
+        scale: Double
+    ) -> CGPoint {
+        let vdsX = windowOriginVDS.x + local.x
+        let vdsY = windowOriginVDS.y + local.y
+        return CGPoint(
+            x: displayOriginPoints.x + vdsX / scale,
+            y: displayOriginPoints.y + vdsY / scale
+        )
+    }
 }

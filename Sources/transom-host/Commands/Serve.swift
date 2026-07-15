@@ -53,6 +53,16 @@ struct Serve: AsyncParsableCommand {
     @Option(name: .long, help: "Auto-stop after N seconds (default: run until Ctrl-C).")
     var seconds: Double?
 
+    @Flag(
+        name: .long,
+        help:
+            "Map Windows modifiers namesake (Ctrl→Control) instead of the default swap (Ctrl→Command)."
+    )
+    var namesakeModifiers: Bool = false
+
+    @Flag(name: .long, help: "Print the full translation chain for every injected input event.")
+    var logInput: Bool = false
+
     func run() async throws {
         // Stream output live: stdout is block-buffered to a pipe/file, so without
         // this the status lines never appear while the long-running server runs.
@@ -70,7 +80,8 @@ struct Serve: AsyncParsableCommand {
         let config = HostConfig(
             target: target, display: disp, host: host, controlPort: controlPort,
             videoPort: videoPort, gutter: gutter, tile: tile, video: video,
-            bitrateMbps: bitrate, fps: fps)
+            bitrateMbps: bitrate, fps: fps, namesakeModifiers: namesakeModifiers, logInput: logInput
+        )
         let session = HostSession(config: config)
 
         print(

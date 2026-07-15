@@ -48,9 +48,17 @@ public final class WindowRegistry: @unchecked Sendable {
         }
     }
 
-    /// The AX element behind an id, for driving AX writes (Phase 4).
+    /// The AX element behind an id, for driving AX writes (Phase 4) and input
+    /// injection / window raising (Phase 5).
     public func element(for id: UInt64) -> AXUIElement? {
         lock.withLock { elementByID[id] }
+    }
+
+    /// The current recorded state for an id (its VDS rect + title), or nil if the
+    /// id is unknown. Input injection reads the rect to translate a window-local
+    /// click into VDS/AX space (issue #7).
+    public func entry(for id: UInt64) -> Entry? {
+        lock.withLock { entries[id] }
     }
 
     public func record(id: UInt64, rect: WireRect, title: String) {

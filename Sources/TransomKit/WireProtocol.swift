@@ -92,6 +92,10 @@ public enum ClientMessage: Sendable, Equatable {
     case requestResize(id: UInt64, size: WireSize, phase: ResizePhase)
     case requestFocus(id: UInt64)
     case requestClose(id: UInt64)
+    /// A click/type/scroll targeted at window `id` (issue #7). `event` carries
+    /// window-local physical pixels / Windows VK codes (see `InputEvent`); `ts` is
+    /// the client's monotonic timestamp in milliseconds, opaque to the host in v1.
+    case input(id: UInt64, event: InputEvent, ts: UInt64)
 }
 
 // MARK: - Codable (explicit, cross-language JSON)
@@ -184,7 +188,7 @@ extension ControlMessage: Codable {
 
 extension ClientMessage: Codable {
     private enum Key: String, CodingKey {
-        case type, id, size, phase
+        case type, id, size, phase, event, ts
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -201,6 +205,11 @@ extension ClientMessage: Codable {
         case .requestClose(let id):
             try c.encode("requestClose", forKey: .type)
             try c.encode(id, forKey: .id)
+        case .input(let id, let event, let ts):
+            try c.encode("input", forKey: .type)
+            try c.encode(id, forKey: .id)
+            try c.encode(event, forKey: .event)
+            try c.encode(ts, forKey: .ts)
         }
     }
 
@@ -217,6 +226,11 @@ extension ClientMessage: Codable {
             self = .requestFocus(id: try c.decode(UInt64.self, forKey: .id))
         case "requestClose":
             self = .requestClose(id: try c.decode(UInt64.self, forKey: .id))
+        case "input":
+            self = .input(
+                id: try c.decode(UInt64.self, forKey: .id),
+                event: try c.decode(InputEvent.self, forKey: .event),
+                ts: try c.decode(UInt64.self, forKey: .ts))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .type, in: c, debugDescription: "unknown ClientMessage type \"\(type)\"")

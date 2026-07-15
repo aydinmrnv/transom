@@ -201,10 +201,19 @@ public final class TCPListener: @unchecked Sendable {
 
         let continuation = self.continuation
         let queue = self.queue
+        // `TRANSOM_NET_DEBUG=1` traces inbound connection state to stderr. Added
+        // while diagnosing the port-7000/AirPlay collision (architecture.md §8):
+        // when another process owns the port, `newConnection` simply never fires,
+        // and that silence is otherwise invisible. Off by default, zero cost.
+        let debug = ProcessInfo.processInfo.environment["TRANSOM_NET_DEBUG"] != nil
         listener.newConnectionHandler = { connection in
+            if debug { FileHandle.standardError.write(Data("net: newConnection\n".utf8)) }
             // Hand the transport out only once the connection is actually ready,
             // so the first send/receive doesn't queue against a half-open socket.
             connection.stateUpdateHandler = { state in
+                if debug {
+                    FileHandle.standardError.write(Data("net: conn state \(state)\n".utf8))
+                }
                 switch state {
                 case .ready:
                     continuation.yield(TCPTransport(connection: connection))

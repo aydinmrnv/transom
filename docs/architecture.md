@@ -501,6 +501,22 @@ this.
 And does macOS behave sanely with a main display much larger than any physical
 one? Unknown.
 
+### Input findings (issue #7, Phase 5)
+
+> **PHASE 5 FINDING (2026-07-15, Mac Studio, macOS 26): `CGEventPost` mouse
+> locations are POINT space, top-left origin, Y down.**
+>
+> Measured by `transom-host inject`, which posts a click at a known window-local
+> pixel, computes the expected AX point via the single I-3 conversion, and reads
+> the cursor straight back (`CGEvent(source: nil)?.location`). On the 2x display a
+> click at window-local `(400,300) px` in a window at VDS `(300,240)` produced a
+> cursor at exactly `(350,270) pt` — `Δ (0,0)`. So the input chain is
+> `CS px + window origin → VDS px → / scale → AX points → CGEventPost`, and the
+> `/ scale` step is mandatory. Posting VDS **pixels** would land at `(700,540)`,
+> off by exactly the scale factor — the factor-of-two trap the issue warned about.
+> `.cghidEventTap` is used; the real cursor moves and SCK captures it (protocol.md
+> §8), so no cursor is synthesized.
+
 ### Operational finding: the default control port 7000 collides with AirPlay Receiver
 
 > **M2 FINDING (2026-07-15, Mac Studio, macOS 26): TCP 7000 is taken by
@@ -512,13 +528,16 @@ one? Unknown.
 > default, so the host's listener could not own the port and the client's socket
 > landed on AirPlay instead. `lsof -nP -iTCP:7000 -sTCP:LISTEN` shows
 > `ControlCe … TCP *:7000 (LISTEN)`. The **video** channel (7001) was unaffected.
+> (The mechanism is that the host binds with `allowLocalEndpointReuse = true`, so
+> the bind *succeeds* rather than failing loudly with the port already owned.)
 >
-> This is not a Transom bug — it reproduces identically on the M1 (#5) code — but
-> it will bite anyone using the defaults. Mitigations: disable AirPlay Receiver
-> (System Settings › General › AirDrop & Handoff), or bind the control channel to
-> a free port (`serve --control-port 8770`, or the port field in the host app).
-> The host app surfaces this near its port fields. A future change may move the
-> default off 7000; left as-is for now to not silently change #5's CLI contract.
+> This is not a Transom bug — it reproduces identically on the M1 (#5) code, and
+> was hit independently while verifying input (#7) — but it will bite anyone using
+> the defaults. Mitigations: disable AirPlay Receiver (System Settings › General ›
+> AirDrop & Handoff), or bind the control channel to a free port
+> (`serve --control-port 8770`, or the port field in the host app). The host app
+> surfaces this near its port fields. A future change may move the default off
+> 7000; left as-is for now to not silently change #5's CLI contract.
 
 ---
 

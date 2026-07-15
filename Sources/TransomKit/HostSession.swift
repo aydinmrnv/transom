@@ -16,6 +16,11 @@ public struct HostConfig: Sendable {
     public var video: Bool
     public var bitrateMbps: Int
     public var fps: Int
+    /// Map Windows modifiers namesake (Ctrl→Control) instead of the default swap
+    /// (Ctrl→Command). The Cmd-vs-Ctrl product decision for input (issue #7).
+    public var namesakeModifiers: Bool
+    /// Print the full coordinate/keycode chain for each injected input event.
+    public var logInput: Bool
 
     public init(
         target: TargetApp,
@@ -27,7 +32,9 @@ public struct HostConfig: Sendable {
         tile: Bool = true,
         video: Bool = true,
         bitrateMbps: Int = 40,
-        fps: Int = 60
+        fps: Int = 60,
+        namesakeModifiers: Bool = false,
+        logInput: Bool = false
     ) {
         self.target = target
         self.display = display
@@ -39,6 +46,8 @@ public struct HostConfig: Sendable {
         self.video = video
         self.bitrateMbps = bitrateMbps
         self.fps = fps
+        self.namesakeModifiers = namesakeModifiers
+        self.logInput = logInput
     }
 }
 
@@ -118,6 +127,7 @@ public final class HostSession: @unchecked Sendable {
     private var encoder: HEVCEncoder?
     private var eventSink: AsyncStream<WindowWatcher.WindowEvent>.Continuation?
     private var clientSink: AsyncStream<ClientMessage>.Continuation?
+    private var injector: InputInjector?
     private var tasks: [Task<Void, Never>] = []
 
     // Everything a background callback writes lives behind this lock.
@@ -215,6 +225,17 @@ public final class HostSession: @unchecked Sendable {
         let resize = ResizeService(
             registry: registry, display: disp, gutter: config.gutter,
             emit: { event in eventSink.yield(event) })
+
+        // Phase 5 (issue #7): input injection. Client Input/RequestFocus become
+        // CGEvents + AX raises, translating window-local pixels through the one
+        // coordinate function (I-3). Modifier mapping is the Cmd-vs-Ctrl decision
+        // (default swaps Ctrl→Command). Shared by the CLI and the host app.
+        let injector = InputInjector(
+            display: disp, registry: registry,
+            modifierMap: config.namesakeModifiers ? .namesake : .swap)
+        if config.logInput { injector.onTrace = { line in print("  \(line)") } }
+        self.injector = injector
+
         let (clientMessages, clientSink) = AsyncStream.makeStream(of: ClientMessage.self)
         self.clientSink = clientSink
 
@@ -222,6 +243,8 @@ public final class HostSession: @unchecked Sendable {
         await controlServer.setOnClientMessage { message in clientSink.yield(message) }
         await controlServer.setOnConnectionChange { [weak self] connected in
             self?.statsLock.withLock { self?.controlConnected = connected }
+            // A dropped client leaves no modifier held for the next one (issue #7).
+            if !connected { injector.resetModifiers() }
         }
         let controlListener = try TCPListener(
             host: config.host, port: config.controlPort, label: "control")
@@ -256,9 +279,12 @@ public final class HostSession: @unchecked Sendable {
         tasks.append(
             Task {
                 for await message in clientMessages {
-                    if case let .requestResize(id, size, phase) = message {
+                    switch message {
+                    case let .requestResize(id, size, phase):
                         await resize.handle(id: id, size: size, phase: phase)
-                    } else {
+                    case .input, .requestFocus:
+                        injector.handle(message)
+                    case .requestClose:
                         Log.general.notice(
                             "control: client -> \(String(describing: message), privacy: .public)")
                     }
@@ -344,6 +370,7 @@ public final class HostSession: @unchecked Sendable {
         encoder = nil
         eventSink = nil
         clientSink = nil
+        injector = nil
 
         statsLock.withLock {
             isRunning = false

@@ -16,12 +16,13 @@ public actor ControlServer {
     private let registry: WindowRegistry
     private var active: TCPTransport?
 
-    /// Called for every decoded client→host message (e.g. `requestResize`). Phase
-    /// 4 wires this to AX; Phase 3 just surfaces it.
+    /// Called for every decoded client→host message (e.g. `requestResize`,
+    /// `input`). Phase 5 wires this to AX + `CGEventPost` via `InputInjector`.
     public var onClientMessage: (@Sendable (ClientMessage) -> Void)?
 
     /// Called with `true` when a client connects and `false` when it disconnects
-    /// or is dropped, so a status UI can show whether a client is attached. Fired
+    /// or is dropped, so a status UI can show whether a client is attached and the
+    /// input layer can reset held modifiers between sessions (issue #7). Fired
     /// from the actor; the closure must be thread-safe.
     public var onConnectionChange: (@Sendable (Bool) -> Void)?
 

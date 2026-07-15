@@ -15,6 +15,7 @@ public enum Log {
     public static let ax = Logger(subsystem: subsystem, category: "accessibility")
     public static let app = Logger(subsystem: subsystem, category: "app")
     public static let encode = Logger(subsystem: subsystem, category: "encode")
+    public static let input = Logger(subsystem: subsystem, category: "input")
 
     /// Signposter for the capture→encode hot path, so latency is measured in
     /// Instruments rather than guessed (issue #3 quality bar). Intervals:

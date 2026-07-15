@@ -138,6 +138,62 @@ Input          { id: u64, event: InputEvent, ts: u64 }
 `WM_SIZING` / `WM_EXITSIZEMOVE`. The host throttles `Live` to ~10Hz and treats
 `End` as the authoritative 1:1 snap (architecture.md 2.1).
 
+### Input events (`Input`) — issue #7
+
+`Input` carries one `InputEvent` as a nested object under `event`. On the wire
+the outer message uses the usual `"type":"input"` discriminator; the nested event
+uses its own `"kind"` discriminator. `ts` is the client's monotonic timestamp in
+**milliseconds**, opaque to the host in v1 (logged, not otherwise used).
+
+```
+mouseDown { kind:"mouseDown", x:u32, y:u32, button:"left"|"right"|"middle" }
+mouseUp   { kind:"mouseUp",   x:u32, y:u32, button:"left"|"right"|"middle" }
+mouseMove { kind:"mouseMove", x:u32, y:u32 }
+scroll    { kind:"scroll",    x:u32, y:u32, dx:i32, dy:i32 }   // signed line deltas
+keyDown   { kind:"keyDown",   vk:u32 }                         // Windows VK code
+keyUp     { kind:"keyUp",     vk:u32 }
+```
+
+Concrete bytes on the wire (one framed control message):
+
+```
+00 00 00 5e  {"type":"input","id":7,"event":{"kind":"mouseDown","x":400,"y":300,"button":"left"},"ts":12897}
+```
+
+- **`x`/`y` are window-local physical pixels** (CS, invariants I-2/I-3): origin at
+  the proxy window's top-left, **Y down**. The client sends CS and nothing else —
+  translating CS → VDS → AX points is entirely the host's job (it knows the
+  window's VDS rect and the display scale). The client never learns about VDS, AX,
+  points, or the scale factor.
+- **`vk` is a Windows virtual-key code, not a macOS keycode.** The client sends
+  what its physical keyboard reports; the host maps VK → macOS keycode. **Unmapped
+  VKs are reported (logged) and dropped, never silently swallowed.** The table
+  covers letters, digits, whitespace/editing, arrows, navigation, F1–F12, the OEM
+  punctuation, and the numeric keypad, for the **US/ANSI** layout; the character a
+  key produces depends on the Mac's active layout.
+
+**Modifier state is tracked on the host, not sent per-event.** The client sends
+raw `keyDown`/`keyUp` for modifier keys too (e.g. `VK_CONTROL`); the host keeps a
+small modifier state machine and stamps the resulting flags onto every event it
+posts (key **and** mouse), so a held ⌘ stays held across multiple keydowns. The
+client does **not** attach per-event modifier flags.
+
+**Key repeat: the client sends repeats** (one `keyDown` per OS key-repeat tick).
+The host does **not** synthesize repeats. Pick one, not both — this is the one.
+
+**Cmd vs Ctrl (resolved):** the host maps Windows modifiers to macOS with a
+**swap** by default — **Ctrl → ⌘ Command, Win → ⌃ Control, Alt → ⌥ Option, Shift →
+⇧** — so `Ctrl+C` on the PC is `⌘C` (copy) on the Mac, matching muscle memory.
+`serve --namesake-modifiers` switches to the literal 1:1 mapping (Ctrl → ⌃, Win →
+⌘). This is a **host-side policy**: the wire always carries raw Windows VK codes,
+so the client is unaffected by the choice and needs no changes if it flips.
+
+**Focus/raise.** `RequestFocus` raises the target Mac window (AX raise + activate
+its app). A `mouseDown` on a window that is not frontmost also raises it first, so
+the click lands in the right place. Raising changes the Mac's one frontmost app
+and key window; a client-"focused" window may still render unfocused until the
+raise happens (accepted, see issue #7 / invariants I-4).
+
 ### Types
 
 ```
