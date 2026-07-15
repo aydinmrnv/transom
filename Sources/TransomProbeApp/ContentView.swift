@@ -19,103 +19,171 @@ struct ContentView: View {
     private let identity = CodeIdentity.current()
     private let permTimer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
 
+    // Persisted settings (edited in the Settings window, Cmd-,).
+    @AppStorage(ProbeSettings.storageKeys.fps) private var fps = 60
+    @AppStorage(ProbeSettings.storageKeys.pollHz) private var pollHz = 10
+    @AppStorage(ProbeSettings.storageKeys.showWindowRects) private var showWindowRects = true
+    @AppStorage(ProbeSettings.storageKeys.showMenuRects) private var showMenuRects = true
+    @AppStorage(ProbeSettings.storageKeys.showLabels) private var showLabels = true
+
+    private var permissionsReady: Bool { screenRecording && accessibility }
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                permissionsSection
-                Divider()
-                displaysSection
-                Divider()
-                liveProbeSection
-                Divider()
-                geometrySection
+            VStack(alignment: .leading, spacing: 22) {
+                header
+                setupCard
+                if permissionsReady {
+                    liveProbeSection
+                    Divider()
+                    geometrySection
+                    Divider()
+                    displaysSection
+                }
             }
-            .padding(20)
+            .padding(22)
+            .frame(maxWidth: 1100, alignment: .leading)
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                SettingsLink { Label("Settings", systemImage: "gearshape") }
+            }
         }
         .onAppear(perform: refreshAll)
         .onReceive(permTimer) { _ in refreshPermissions() }
+        .onChange(of: showWindowRects) { _, new in probe.settings.showWindowRects = new }
+        .onChange(of: showMenuRects) { _, new in probe.settings.showMenuRects = new }
+        .onChange(of: showLabels) { _, new in probe.settings.showLabels = new }
     }
 
-    // MARK: - 1. Permissions
+    // MARK: - Header
 
-    private var permissionsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Permissions").font(.title2).bold()
-            HStack(spacing: 24) {
-                statusPill("Screen Recording", screenRecording)
-                statusPill("Accessibility", accessibility)
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Transom Probe").font(.largeTitle).bold()
+            Text(
+                "A diagnostic instrument — not a product. It answers one question: "
+                    + "do macOS menus and popups show up in a ScreenCaptureKit capture, "
+                    + "and does the Accessibility API report them?"
+            )
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - Setup / onboarding card
+
+    private var setupCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(
+                    systemName: permissionsReady
+                        ? "checkmark.seal.fill" : "list.number"
+                )
+                .foregroundStyle(permissionsReady ? Color.green : Color.accentColor)
+                Text(permissionsReady ? "You're set up" : "Getting started")
+                    .font(.title2).bold()
             }
-            HStack {
-                Button("Open Screen Recording settings") {
+
+            step(
+                1, "Grant Screen Recording", done: screenRecording,
+                help: "Lets the probe capture the display with ScreenCaptureKit."
+            ) {
+                Button("Open settings") {
                     open(
                         "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
                     )
                 }
-                Button("Open Accessibility settings") {
+            }
+            step(
+                2, "Grant Accessibility", done: accessibility,
+                help: "Lets the probe read window/menu frames via the AX API."
+            ) {
+                Button("Open settings") {
                     open(
                         "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
                     )
                 }
+            }
+            step(
+                3, "Relaunch after granting", done: permissionsReady,
+                help: "macOS applies a new grant to this app on its next launch. "
+                    + "If a toggle above stays red after you flip it in System Settings, quit and reopen."
+            ) {
                 Button("Refresh", action: refreshPermissions)
             }
+            step(
+                4, "Pick an app and display, then press Start", done: false,
+                help:
+                    "In the Live probe below, choose a target app (e.g. Xcode) and the display it's on.",
+                showCheck: false
+            ) { EmptyView() }
+            step(
+                5, "Open the app's menu and watch", done: false,
+                help: "Open a menu, sheet, or completion popup in the target app. "
+                    + "You want to see it appear in the capture with an orange outline around it — that's the answer.",
+                showCheck: false
+            ) { EmptyView() }
+
+            identityFootnote
+        }
+        .padding(16)
+        .background(Color.secondary.opacity(0.07))
+        .cornerRadius(10)
+    }
+
+    @ViewBuilder
+    private func step<Trailing: View>(
+        _ n: Int, _ title: String, done: Bool, help: String, showCheck: Bool = true,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle().fill(done ? Color.green : Color.secondary.opacity(0.25))
+                    .frame(width: 22, height: 22)
+                if showCheck && done {
+                    Image(systemName: "checkmark").font(.caption2).bold().foregroundStyle(.white)
+                } else {
+                    Text("\(n)").font(.caption2).bold()
+                        .foregroundStyle(done ? .white : .secondary)
+                }
+            }
             VStack(alignment: .leading, spacing: 2) {
-                Text("This app's TCC identity (which identity holds the grant):")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("bundle id:  \(identity.identifier ?? "—")")
-                    .font(.system(.caption, design: .monospaced))
-                Text(
-                    "cdhash:     \(identity.cdhash ?? "—")\(identity.isAdHoc ? "  (AD-HOC — TCC will re-prompt every build)" : "")"
-                )
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(identity.isAdHoc ? Color.orange : Color.secondary)
+                Text(title).bold()
+                Text(help).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(8)
-            .background(Color.secondary.opacity(0.08))
-            .cornerRadius(6)
+            Spacer()
+            trailing()
         }
     }
 
-    private func statusPill(_ label: String, _ ok: Bool) -> some View {
-        HStack(spacing: 6) {
-            Circle().fill(ok ? Color.green : Color.red).frame(width: 10, height: 10)
-            Text(label)
-            Text(ok ? "granted" : "NOT granted").foregroundStyle(.secondary)
-        }
-    }
-
-    // MARK: - 2. Displays
-
-    private var displaysSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Displays").font(.title2).bold()
-                Button("Refresh", action: refreshAll)
-            }
-            ForEach(displays, id: \.id) { d in
-                Text(
-                    "id \(d.id)\(d.isMain ? "  [main]" : "")   "
-                        + "\(d.pixelWidth)x\(d.pixelHeight) px   "
-                        + "\(Int(d.sizePoints.width))x\(Int(d.sizePoints.height)) pt   "
-                        + "scale \(String(format: "%.2f", d.scale))x"
-                )
-                .font(.system(.body, design: .monospaced))
+    private var identityFootnote: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("This app's TCC identity (which identity holds the grant):")
+                .font(.caption2).foregroundStyle(.secondary)
+            Text(
+                "\(identity.identifier ?? "—")  ·  cdhash \(identity.cdhash?.prefix(16).description ?? "—")…"
+            )
+            .font(.system(.caption2, design: .monospaced))
+            .foregroundStyle(.secondary)
+            if identity.isAdHoc {
+                Text("Ad-hoc signed — macOS will re-prompt for permissions on every rebuild.")
+                    .font(.caption2).foregroundStyle(.orange)
             }
         }
+        .padding(.top, 4)
     }
 
-    // MARK: - 3. Live probe (the important one)
+    // MARK: - Live probe (the important one)
 
     private var liveProbeSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Live probe  ·  OQ-1").font(.title2).bold()
-            Text(
-                "Pick an app + display, Start, then open the app's menus. Watch whether the menu appears in the capture and whether AX draws a rect (orange) around it."
-            )
-            .font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Live probe", "OQ-1", "the kill question")
 
             HStack {
                 Picker("App", selection: $selectedAppPID) {
-                    Text("—").tag(pid_t(0))
+                    Text("Choose…").tag(pid_t(0))
                     ForEach(apps, id: \.pid) { Text($0.name).tag($0.pid) }
                 }.frame(width: 260)
                 Picker("Display", selection: $selectedDisplayID) {
@@ -123,50 +191,92 @@ struct ContentView: View {
                     ForEach(displays, id: \.id) {
                         Text("\($0.id)\($0.isMain ? " (main)" : "")").tag($0.id)
                     }
-                }.frame(width: 160)
+                }.frame(width: 150)
                 Button("Reload apps") { apps = AppResolver.runningApps() }
+                Spacer()
                 if probe.running {
-                    Button("Stop") { probe.stop() }
+                    Button("Stop", role: .destructive) { probe.stop() }
                 } else {
                     Button("Start", action: startProbe)
+                        .keyboardShortcut(.defaultAction)
                         .disabled(selectedAppPID == 0 || selectedDisplayID == 0)
                 }
             }
 
+            legend
+
             if let err = probe.lastError {
-                Text(err).foregroundStyle(.red).font(.caption)
+                Label(err, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red).font(.caption)
             }
-            Text(probe.statsLine).font(.system(.caption, design: .monospaced))
+            if !probe.statsLine.isEmpty {
+                Text(probe.statsLine).font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
 
             HStack(alignment: .top, spacing: 12) {
-                ZStack {
-                    Rectangle().fill(Color.black.opacity(0.85))
-                    if let img = probe.frameImage {
-                        Image(nsImage: img).resizable().scaledToFit()
-                    } else {
-                        Text(probe.running ? "waiting for frames…" : "not running")
-                            .foregroundStyle(.white.opacity(0.6))
-                    }
-                }
-                .frame(height: 360)
-                .frame(maxWidth: .infinity)
-                .cornerRadius(6)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Event log").font(.headline)
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 1) {
-                            ForEach(probe.events) { e in
-                                Text(String(format: "%7.2f  %@  %@", e.t, e.kind, e.detail))
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(color(for: e.kind))
-                            }
-                        }
-                    }
-                }
-                .frame(width: 320, height: 360)
+                capturePane
+                eventLogPane
             }
         }
+    }
+
+    private var legend: some View {
+        HStack(spacing: 16) {
+            legendDot(.red, "app windows")
+            legendDot(.orange, "open menu / popup (the thing OQ-1 is about)")
+            Text("Tip: pick your app, Start, then open its menu and watch this pane.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func legendDot(_ c: Color, _ label: String) -> some View {
+        HStack(spacing: 5) {
+            RoundedRectangle(cornerRadius: 2).stroke(c, lineWidth: 2)
+                .frame(width: 14, height: 10)
+            Text(label).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var capturePane: some View {
+        ZStack {
+            Rectangle().fill(Color.black.opacity(0.88))
+            if let img = probe.frameImage {
+                Image(nsImage: img).resizable().scaledToFit()
+            } else {
+                VStack(spacing: 6) {
+                    Image(systemName: probe.running ? "hourglass" : "play.circle")
+                        .font(.largeTitle).foregroundStyle(.white.opacity(0.5))
+                    Text(probe.running ? "waiting for frames…" : "press Start to capture")
+                        .foregroundStyle(.white.opacity(0.6)).font(.callout)
+                }
+            }
+        }
+        .frame(height: 380)
+        .frame(maxWidth: .infinity)
+        .cornerRadius(8)
+    }
+
+    private var eventLogPane: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Event log").font(.headline)
+            Text("menu-opened → AX saw a menu").font(.caption2).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 1) {
+                    if probe.events.isEmpty {
+                        Text("no events yet").font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(probe.events) { e in
+                        Text(String(format: "%7.2f  %@  %@", e.t, e.kind, e.detail))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(color(for: e.kind))
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(width: 340, height: 380)
     }
 
     private func color(for kind: String) -> Color {
@@ -179,11 +289,11 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - 4. Geometry test
+    // MARK: - Geometry test
 
     private var geometrySection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Geometry test  ·  OQ-2").font(.title2).bold()
+            sectionHeader("Geometry test", "OQ-2", "are AX writes honored?")
             Text(
                 "Set a window's position/size via AX, read it back, and compare. The delta is the answer (I-4)."
             )
@@ -205,40 +315,44 @@ struct ContentView: View {
                     .disabled(selectedAppPID == 0 || geometry.windows.isEmpty)
             }
             if let r = geometry.result {
-                Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 2) {
-                    GridRow {
-                        Text("").font(.caption)
-                        Text("requested").font(.caption).bold()
-                        Text("actual").font(.caption).bold()
-                        Text("delta").font(.caption).bold()
-                    }
-                    GridRow {
-                        Text("pos").font(.system(.caption, design: .monospaced))
-                        Text("(\(i(r.requestedPosition.x)),\(i(r.requestedPosition.y)))")
-                            .font(.system(.caption, design: .monospaced))
-                        Text(r.actualPosition.map { "(\(i($0.x)),\(i($0.y)))" } ?? "—")
-                            .font(.system(.caption, design: .monospaced))
-                        Text(r.positionDelta.map { "(\(i($0.x)),\(i($0.y)))" } ?? "—")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(
-                                deltaColor(r.positionDelta.map { $0 == .zero } ?? false))
-                    }
-                    GridRow {
-                        Text("size").font(.system(.caption, design: .monospaced))
-                        Text("\(i(r.requestedSize.width))x\(i(r.requestedSize.height))")
-                            .font(.system(.caption, design: .monospaced))
-                        Text(r.actualSize.map { "\(i($0.width))x\(i($0.height))" } ?? "—")
-                            .font(.system(.caption, design: .monospaced))
-                        Text(r.sizeDelta.map { "\(i($0.width))x\(i($0.height))" } ?? "—")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(deltaColor(r.sizeDelta.map { $0 == .zero } ?? false))
-                    }
-                }
-                Text("OQ-2: honored exactly? \(r.exact ? "YES" : "NO — clamped/rounded")")
-                    .font(.caption).bold()
-                    .foregroundStyle(r.exact ? Color.green : Color.orange)
+                geometryResult(r)
             }
         }
+    }
+
+    @ViewBuilder
+    private func geometryResult(_ r: PlacementResult) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 2) {
+            GridRow {
+                Text("").font(.caption)
+                Text("requested").font(.caption).bold()
+                Text("actual").font(.caption).bold()
+                Text("delta").font(.caption).bold()
+            }
+            GridRow {
+                Text("pos").font(.system(.caption, design: .monospaced))
+                Text("(\(i(r.requestedPosition.x)),\(i(r.requestedPosition.y)))")
+                    .font(.system(.caption, design: .monospaced))
+                Text(r.actualPosition.map { "(\(i($0.x)),\(i($0.y)))" } ?? "—")
+                    .font(.system(.caption, design: .monospaced))
+                Text(r.positionDelta.map { "(\(i($0.x)),\(i($0.y)))" } ?? "—")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(deltaColor(r.positionDelta.map { $0 == .zero } ?? false))
+            }
+            GridRow {
+                Text("size").font(.system(.caption, design: .monospaced))
+                Text("\(i(r.requestedSize.width))x\(i(r.requestedSize.height))")
+                    .font(.system(.caption, design: .monospaced))
+                Text(r.actualSize.map { "\(i($0.width))x\(i($0.height))" } ?? "—")
+                    .font(.system(.caption, design: .monospaced))
+                Text(r.sizeDelta.map { "\(i($0.width))x\(i($0.height))" } ?? "—")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(deltaColor(r.sizeDelta.map { $0 == .zero } ?? false))
+            }
+        }
+        Text("OQ-2: honored exactly? \(r.exact ? "YES" : "NO — clamped/rounded")")
+            .font(.caption).bold()
+            .foregroundStyle(r.exact ? Color.green : Color.orange)
     }
 
     private func field(_ label: String, _ binding: Binding<String>) -> some View {
@@ -248,10 +362,49 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Displays
+
+    private var displaysSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                sectionHeader("Displays", nil, nil)
+                Button("Refresh", action: refreshAll)
+            }
+            ForEach(displays, id: \.id) { d in
+                Text(
+                    "id \(d.id)\(d.isMain ? "  [main]" : "")   "
+                        + "\(d.pixelWidth)x\(d.pixelHeight) px   "
+                        + "\(Int(d.sizePoints.width))x\(Int(d.sizePoints.height)) pt   "
+                        + "scale \(String(format: "%.2f", d.scale))x"
+                )
+                .font(.system(.body, design: .monospaced))
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func sectionHeader(_ title: String, _ tag: String?, _ subtitle: String?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(title).font(.title2).bold()
+            if let tag {
+                Text(tag).font(.caption).bold().padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.accentColor.opacity(0.15)).cornerRadius(4)
+            }
+            if let subtitle {
+                Text(subtitle).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private func deltaColor(_ exact: Bool) -> Color { exact ? .green : .orange }
     private func i(_ v: CGFloat) -> Int { Int(v.rounded()) }
 
-    // MARK: - actions
+    private var currentSettings: ProbeSettings {
+        ProbeSettings(
+            fps: fps, pollHz: pollHz, showWindowRects: showWindowRects,
+            showMenuRects: showMenuRects, showLabels: showLabels)
+    }
 
     private func refreshAll() {
         displays = Displays.all()
@@ -272,7 +425,7 @@ struct ContentView: View {
             let disp = displays.first(where: { $0.id == selectedDisplayID })
         else { return }
         geometry.reload(pid: app.pid)
-        probe.start(app: app, display: disp)
+        probe.start(app: app, display: disp, settings: currentSettings)
     }
 
     private func open(_ urlString: String) {
@@ -293,7 +446,10 @@ final class GeometryModel: ObservableObject {
     @Published var result: PlacementResult?
 
     func reload(pid: pid_t) {
-        guard pid != 0 else { windows = []; return }
+        guard pid != 0 else {
+            windows = []
+            return
+        }
         windows = AXWindow.windows(pid: pid).map { $0.info() }
         if !windows.contains(where: { $0.index == windowIndex }) {
             windowIndex = windows.first?.index ?? 0

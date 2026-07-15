@@ -13,6 +13,25 @@ struct ProbeEvent: Identifiable {
     let detail: String
 }
 
+/// User-tunable probe settings, persisted in `UserDefaults` via `@AppStorage`
+/// on the view side and handed to the model at Start. The overlay toggles apply
+/// live; `fps` and `pollHz` take effect on the next Start.
+struct ProbeSettings: Equatable {
+    var fps: Int = 60
+    var pollHz: Int = 10
+    var showWindowRects: Bool = true
+    var showMenuRects: Bool = true
+    var showLabels: Bool = true
+
+    static let storageKeys = (
+        fps: "settings.fps",
+        pollHz: "settings.pollHz",
+        showWindowRects: "settings.showWindowRects",
+        showMenuRects: "settings.showMenuRects",
+        showLabels: "settings.showLabels"
+    )
+}
+
 /// Drives the live probe: an SCK capture of a chosen display, AX window rects
 /// polled at ~10Hz and drawn on top, and an event log fed by an AXObserver that
 /// catches menu open/close and window create/destroy.
@@ -28,6 +47,10 @@ final class ProbeModel: ObservableObject {
     @Published var events: [ProbeEvent] = []
     @Published var overlayCount = 0
     @Published var lastError: String?
+
+    /// Live-tunable settings. Overlay toggles are read every tick; fps/pollHz are
+    /// captured at `start`.
+    var settings = ProbeSettings()
 
     private var capture: DisplayCapture?
     private var display: DisplayInfo?
@@ -52,14 +75,15 @@ final class ProbeModel: ObservableObject {
 
     private static let menuColor = CGColor(red: 1, green: 0.55, blue: 0.0, alpha: 1)
 
-    func start(app: TargetApp, display: DisplayInfo) {
+    func start(app: TargetApp, display: DisplayInfo, settings: ProbeSettings) {
         stop()
         lastError = nil
+        self.settings = settings
         self.display = display
         self.pid = app.pid
         self.appElement = AXWindow.application(pid: app.pid)
 
-        let capture = DisplayCapture(display: display, fps: 60)
+        let capture = DisplayCapture(display: display, fps: settings.fps)
         self.capture = capture
 
         Task { @MainActor in
@@ -98,7 +122,8 @@ final class ProbeModel: ObservableObject {
     // MARK: - Timer / overlay
 
     private func startTimer() {
-        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+        let interval = 1.0 / Double(max(1, settings.pollHz))
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -111,24 +136,31 @@ final class ProbeModel: ObservableObject {
         var overlays: [OverlayRect] = []
 
         // Standard AX windows.
-        for w in AXWindow.windows(pid: pid) {
-            guard let f = w.frame() else { continue }
-            let px = Coordinates.displayPixels(
-                fromAXRect: f, displayOriginPoints: display.originPoints, scale: display.scale)
-            overlays.append(
-                OverlayRect(
-                    rect: px, label: "[\(w.index)] \(w.role)/\(w.subrole)",
-                    color: Self.palette[w.index % Self.palette.count]))
+        if settings.showWindowRects {
+            for w in AXWindow.windows(pid: pid) {
+                guard let f = w.frame() else { continue }
+                let px = Coordinates.displayPixels(
+                    fromAXRect: f, displayOriginPoints: display.originPoints, scale: display.scale)
+                overlays.append(
+                    OverlayRect(
+                        rect: px,
+                        label: settings.showLabels ? "[\(w.index)] \(w.role)/\(w.subrole)" : "",
+                        color: Self.palette[w.index % Self.palette.count]))
+            }
         }
 
         // Transient elements (open menus/popovers) — the OQ-1 payload.
-        for el in transientElements {
-            let w = AXWindow(element: el, index: -1)
-            guard let f = w.frame() else { continue }
-            let px = Coordinates.displayPixels(
-                fromAXRect: f, displayOriginPoints: display.originPoints, scale: display.scale)
-            overlays.append(
-                OverlayRect(rect: px, label: "\(w.role)/\(w.subrole)", color: Self.menuColor))
+        if settings.showMenuRects {
+            for el in transientElements {
+                let w = AXWindow(element: el, index: -1)
+                guard let f = w.frame() else { continue }
+                let px = Coordinates.displayPixels(
+                    fromAXRect: f, displayOriginPoints: display.originPoints, scale: display.scale)
+                overlays.append(
+                    OverlayRect(
+                        rect: px, label: settings.showLabels ? "\(w.role)/\(w.subrole)" : "",
+                        color: Self.menuColor))
+            }
         }
 
         overlayCount = overlays.count

@@ -20,6 +20,45 @@ struct TransomProbeApp: App {
                 .frame(minWidth: 900, minHeight: 640)
         }
         .windowResizability(.contentMinSize)
+
+        // Standard macOS Settings window (Cmd-,).
+        Settings {
+            SettingsView()
+        }
+    }
+}
+
+/// The Settings window (Cmd-,). Values persist in UserDefaults via @AppStorage
+/// and are read back by ContentView when starting the probe.
+struct SettingsView: View {
+    @AppStorage(ProbeSettings.storageKeys.fps) private var fps = 60
+    @AppStorage(ProbeSettings.storageKeys.pollHz) private var pollHz = 10
+    @AppStorage(ProbeSettings.storageKeys.showWindowRects) private var showWindowRects = true
+    @AppStorage(ProbeSettings.storageKeys.showMenuRects) private var showMenuRects = true
+    @AppStorage(ProbeSettings.storageKeys.showLabels) private var showLabels = true
+
+    var body: some View {
+        Form {
+            Section("Capture") {
+                Picker("Capture frame rate", selection: $fps) {
+                    ForEach([15, 30, 60], id: \.self) { Text("\($0) fps").tag($0) }
+                }
+                Picker("AX overlay poll rate", selection: $pollHz) {
+                    ForEach([5, 10, 20, 30], id: \.self) { Text("\($0) Hz").tag($0) }
+                }
+                Text("Frame rate and poll rate apply the next time you press Start.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Overlay") {
+                Toggle("Outline app windows", isOn: $showWindowRects)
+                Toggle("Outline open menus / popovers (orange)", isOn: $showMenuRects)
+                Toggle("Show role/subrole labels", isOn: $showLabels)
+                Text("Overlay toggles apply live while the probe is running.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 420, height: 340)
     }
 }
 

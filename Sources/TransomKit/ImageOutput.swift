@@ -37,8 +37,13 @@ public enum ImageOutput {
 
     /// Draw colored outlines (with labels) on top of a captured frame.
     ///
-    /// The context is flipped to a top-left origin so it shares SCK pixel space
-    /// with the incoming rects: no Y flip games, no mirrored-frame bug (I-3).
+    /// The base image from SCK is upright (row 0 = top of screen). A bitmap
+    /// `CGContext` is bottom-left origin, Y up, and drawing the image with no
+    /// transform preserves that upright orientation. The incoming rects are in
+    /// SCK/AX pixel space (top-left origin, Y **down**), so each rect's Y is
+    /// converted to the context's bottom-left space exactly once here — the one
+    /// conversion site, and NOT a global context flip (a global flip mirrors the
+    /// whole frame, which is the upside-down bug this replaces).
     public static func overlay(base: CGImage, rects: [OverlayRect]) -> CGImage? {
         let width = base.width
         let height = base.height
@@ -50,43 +55,49 @@ public enum ImageOutput {
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
 
-        // Flip to top-left origin, Y down, matching SCK/AX pixel space.
-        ctx.translateBy(x: 0, y: CGFloat(height))
-        ctx.scaleBy(x: 1, y: -1)
-
+        // Upright: no transform.
         ctx.draw(base, in: CGRect(x: 0, y: 0, width: width, height: height))
 
         let lineWidth = max(2.0, CGFloat(width) / 800.0)
         for r in rects {
+            // Top-left/Y-down rect -> bottom-left/Y-up rect.
+            let flipped = CGRect(
+                x: r.rect.origin.x,
+                y: CGFloat(height) - r.rect.origin.y - r.rect.size.height,
+                width: r.rect.size.width,
+                height: r.rect.size.height)
             ctx.setStrokeColor(r.color)
             ctx.setLineWidth(lineWidth)
-            ctx.stroke(r.rect)
-            drawLabel(r.label, at: r.rect.origin, color: r.color, in: ctx, scale: width)
+            ctx.stroke(flipped)
+            // Label baseline just inside the rect's top edge (top edge in screen
+            // space = flipped.maxY in this context).
+            drawLabel(
+                r.label, atX: r.rect.origin.x + 3,
+                baselineY: flipped.maxY - lineWidth - labelFontSize(width),
+                color: r.color, in: ctx, scale: width)
         }
         return ctx.makeImage()
     }
 
-    /// Draw a text label. CoreText draws with a bottom-left baseline, so within
-    /// our flipped (top-left) context we flip locally just around the glyph run.
+    private static func labelFontSize(_ width: Int) -> CGFloat {
+        max(11.0, CGFloat(width) / 130.0)
+    }
+
+    /// Draw an upright text label at a baseline in the context's (bottom-left,
+    /// Y up) space. No local flip is needed because the context is not flipped.
     private static func drawLabel(
-        _ text: String, at point: CGPoint, color: CGColor, in ctx: CGContext, scale: Int
+        _ text: String, atX x: CGFloat, baselineY: CGFloat, color: CGColor,
+        in ctx: CGContext, scale: Int
     ) {
-        let fontSize = max(11.0, CGFloat(scale) / 130.0)
-        let font = CTFontCreateWithName("Menlo" as CFString, fontSize, nil)
+        let font = CTFontCreateWithName("Menlo" as CFString, labelFontSize(scale), nil)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: color,
         ]
         let attributed = NSAttributedString(string: text, attributes: attrs)
         let line = CTLineCreateWithAttributedString(attributed)
-
-        ctx.saveGState()
-        // Undo the global flip locally so glyphs render upright.
-        ctx.translateBy(x: point.x + 3, y: point.y + fontSize + 3)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.textPosition = .zero
+        ctx.textPosition = CGPoint(x: x, y: baselineY)
         CTLineDraw(line, ctx)
-        ctx.restoreGState()
     }
 }
 
