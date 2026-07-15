@@ -65,4 +65,34 @@ public enum Coordinates {
     public static func vdsPixels(fromAXPoints points: Double, scale: Double) -> Double {
         points * scale
     }
+
+    /// The inverse of `displayPixels(fromAXRect:…)`: a display-local pixel rect
+    /// (VDS/SCK space) back to an **AX global-point** rect, ready to hand to
+    /// `AXUIElementSetAttributeValue`.
+    ///
+    /// Writing geometry crosses the same AX↔VDS boundary as reading it, just the
+    /// other way, so the scale *division* lives here rather than being sprinkled
+    /// at call sites — the mirror of the multiplication in `displayPixels`. If you
+    /// find a `/ scale` on a coordinate anywhere else, it is a bug (I-2, I-3).
+    ///
+    /// - Parameters:
+    ///   - rect: rectangle in the target display's local pixels (VDS when that
+    ///     display is the virtual display).
+    ///   - displayOriginPoints: the target display's origin in AX global points
+    ///     (`CGDisplayBounds(id).origin`).
+    ///   - scale: the target display's backing scale factor (pixels per point).
+    public static func axGlobalRect(
+        fromDisplayPixels rect: CGRect,
+        displayOriginPoints: CGPoint,
+        scale: Double
+    ) -> CGRect {
+        let globalX = displayOriginPoints.x + rect.origin.x / scale
+        let globalY = displayOriginPoints.y + rect.origin.y / scale
+        return CGRect(
+            x: globalX,
+            y: globalY,
+            width: rect.size.width / scale,
+            height: rect.size.height / scale
+        )
+    }
 }

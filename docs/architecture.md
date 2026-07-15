@@ -162,6 +162,18 @@ handles on this hardware.
 > overlapping. This number decides how far Transom scales. Compute it for your
 > real window set before committing to a display size.
 
+**Gutters are part of the budget.** The tiler leaves ~200px of dead space between
+tiles (and does not pack them flush). The reason is transient UI: a
+code-completion popup or a dropdown opened near a window's edge can overhang past
+that window's rect. On a flush-tiled display that overhang would land on a
+*neighbour's* tile and corrupt the neighbour's crop, because the client blits each
+window's sub-rect 1:1 and has no idea a stray popup bled into it. A gutter catches
+the overhang in dead space where it hurts nothing. This is a constant cost — `n`
+windows in a row cost `(n-1) × gutter` of width plus a gutter per extra shelf — and
+it must be added to the budget above before choosing a virtual-display size. The
+gutter is a pure input to the tiler (`Tiler.layout(windows:display:gutter:)`), so
+its cost is explicit and testable, not hidden.
+
 ### 3.4 Deferred: the encoder pool
 
 If the window count ever outgrows a single tiled display, the fallback is a pool
@@ -317,6 +329,19 @@ back and **report the delta**. The delta is the entire point of that command.
 > the actual size. It must place, read back, and treat the **actual** rect as
 > truth (I-4), and the tiler must re-pack from actual sizes or it will overlap.
 > The tiling budget (3.3) must be computed from post-clamp sizes.
+
+> **PHASE 1 FINDING (issue #3, 2026-07-14): position is also clamped — the top
+> row cannot start at y=0.** Tiling two TextEdit windows to the top of the main
+> virtual display via `tile TextEdit 7 --gutter 200`: both were requested at
+> `y=0` and read back at **`y=60px` (30pt)** — the menu-bar band. AX will not let
+> a window's title bar rise under the menu bar, and because the virtual display
+> **is** main (3.2) the menu bar lives on it, so the usable top edge for tiling is
+> `menuBarHeight` down, not 0. Sizes were honoured exactly here (`Δ size 0`) and
+> non-overlap held. Consequence: the tiler's usable region excludes the menu-bar
+> band at the top; either inset the first shelf by it or accept the readback
+> delta and report the **actual** rect to the client (I-4), which is what `tile`
+> does today. This is one more reason the client must key off actual geometry,
+> never requested.
 
 ### OQ-3: Is there a stable window identity across AX and SCK?
 

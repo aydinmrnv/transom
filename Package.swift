@@ -43,5 +43,18 @@ let package = Package(
                 .swiftLanguageMode(.v6)
             ]
         ),
+        // Unit tests for the PURE logic — the tiler and the coordinate-space
+        // conversions (I-3). These need no Mac, no AX, and no display, so they run
+        // anywhere including CI. The Mac-only behaviour (SCK, AX writes, encode)
+        // is verified by running the CLI on the target machine (I-7), not here.
+        .testTarget(
+            name: "TransomKitTests",
+            dependencies: [
+                "TransomKit"
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        ),
     ]
 )
