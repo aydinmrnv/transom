@@ -43,6 +43,20 @@ let package = Package(
                 .swiftLanguageMode(.v6)
             ]
         ),
+        // The SwiftUI host app: a one-window control panel over `serve` (issue #8).
+        // A thin shell — it drives the SAME `TransomKit.HostSession` the CLI does,
+        // never a fork of the capture/tile/AX/wire code. Wrapped into
+        // `Transom Host.app` (bundle id one.nullstack.transom.host, its OWN TCC
+        // identity, distinct from the probe's) by scripts/make-app.sh.
+        .executableTarget(
+            name: "TransomHostApp",
+            dependencies: [
+                "TransomKit"
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        ),
         // Unit tests for the PURE logic — the tiler and the coordinate-space
         // conversions (I-3). These need no Mac, no AX, and no display, so they run
         // anywhere including CI. The Mac-only behaviour (SCK, AX writes, encode)
