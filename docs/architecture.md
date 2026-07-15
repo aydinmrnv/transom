@@ -419,6 +419,25 @@ this.
 And does macOS behave sanely with a main display much larger than any physical
 one? Unknown.
 
+### Operational finding: the default control port 7000 collides with AirPlay Receiver
+
+> **M2 FINDING (2026-07-15, Mac Studio, macOS 26): TCP 7000 is taken by
+> AirPlay Receiver.** While verifying `serve`/`HostSession` end to end, the
+> control channel (default port **7000**) silently failed to accept a client: a
+> mock client's `connect()` *succeeded* but no framed bytes ever arrived, and the
+> host's control listener never reported a connection. Cause: macOS **AirPlay
+> Receiver** (Control Center, process `ControlCenter`) listens on `*:7000` by
+> default, so the host's listener could not own the port and the client's socket
+> landed on AirPlay instead. `lsof -nP -iTCP:7000 -sTCP:LISTEN` shows
+> `ControlCe … TCP *:7000 (LISTEN)`. The **video** channel (7001) was unaffected.
+>
+> This is not a Transom bug — it reproduces identically on the M1 (#5) code — but
+> it will bite anyone using the defaults. Mitigations: disable AirPlay Receiver
+> (System Settings › General › AirDrop & Handoff), or bind the control channel to
+> a free port (`serve --control-port 8770`, or the port field in the host app).
+> The host app surfaces this near its port fields. A future change may move the
+> default off 7000; left as-is for now to not silently change #5's CLI contract.
+
 ---
 
 ## 9. Decision log
