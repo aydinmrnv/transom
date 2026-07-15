@@ -3,6 +3,9 @@
 .swiftpm/
 Package.resolved
 
+# Assembled app bundle + release artifacts (scripts/make-app.sh, release.sh)
+/build/
+
 # Xcode (we do not use an Xcode project, but tooling may still litter)
 *.xcodeproj
 *.xcworkspace
