@@ -69,8 +69,11 @@ struct Doctor: AsyncParsableCommand {
     private func checkAccessibility() -> Bool {
         let trusted: Bool
         if promptForAccessibility {
-            let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-            let options = [key: true] as CFDictionary
+            // Use the literal key rather than the imported global
+            // `kAXTrustedCheckOptionPrompt`: under Swift 6 strict concurrency,
+            // referencing that mutable global is an error. Its value is the
+            // stable constant string "AXTrustedCheckOptionPrompt".
+            let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
             trusted = AXIsProcessTrustedWithOptions(options)
         } else {
             trusted = AXIsProcessTrusted()

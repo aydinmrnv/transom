@@ -22,7 +22,7 @@ jobs:
           xcodebuild -version
 
       - name: Build
-        run: swift build -v
+        run: swift build
 
       - name: Lint (swift-format)
         run: swift format lint --recursive Sources Package.swift
