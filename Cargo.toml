@@ -1,0 +1,31 @@
+[package]
+name = "transom-client"
+version = "0.0.1-alpha"
+edition = "2021"
+rust-version = "1.74"
+license = "AGPL-3.0-or-later"
+description = "Windows client for the Transom seamless remote windowing system (pre-alpha)."
+repository = "https://github.com/aydinmrnv/transom-client"
+readme = "README.md"
+publish = false
+
+[[bin]]
+name = "transom-client"
+path = "src/main.rs"
+
+[dependencies]
+# The ONLY runtime dependency. Ask before adding others.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
+] }
+
+[build-dependencies]
+# Pre-approved: embeds the application manifest so Per-Monitor-V2 DPI awareness
+# is declared before the first window exists.
+embed-resource = "2.4"
