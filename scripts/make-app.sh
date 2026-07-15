@@ -45,6 +45,38 @@ done
 
 BUILD_DIR="$(swift build -c release --show-bin-path)"
 
+# The Transom logo, committed to the repo. make_icns turns it into the .icns the
+# bundle references via CFBundleIconFile (Info.plist), so the Dock/Finder show it.
+ICON_SOURCE="$REPO_ROOT/Resources/AppIcon.png"
+
+# make_icns <dest.icns> — build a macOS .icns from ICON_SOURCE via an .iconset.
+# The source is a single square PNG; sips rescales it to each required slot.
+make_icns() {
+  local DEST="$1"
+  if [[ ! -f "$ICON_SOURCE" ]]; then
+    echo "warning: icon source not found at $ICON_SOURCE — bundle will have no icon" >&2
+    return 0
+  fi
+  local ICONSET
+  ICONSET="$(mktemp -d)/AppIcon.iconset"
+  mkdir -p "$ICONSET"
+  # size:filename pairs iconutil expects (@2x is the same pixel size as the next slot up).
+  local slots=(
+    "16:icon_16x16.png"    "32:icon_16x16@2x.png"
+    "32:icon_32x32.png"    "64:icon_32x32@2x.png"
+    "128:icon_128x128.png" "256:icon_128x128@2x.png"
+    "256:icon_256x256.png" "512:icon_256x256@2x.png"
+    "512:icon_512x512.png" "1024:icon_512x512@2x.png"
+  )
+  local slot px name
+  for slot in "${slots[@]}"; do
+    px="${slot%%:*}"; name="${slot##*:}"
+    sips -z "$px" "$px" "$ICON_SOURCE" --out "$ICONSET/$name" >/dev/null
+  done
+  iconutil -c icns "$ICONSET" -o "$DEST"
+  rm -rf "$(dirname "$ICONSET")"
+}
+
 # build_bundle <bundle_id> <app_name> <executable> <version> <build> <category>
 build_bundle() {
   local BUNDLE_ID="$1" APP_NAME="$2" EXECUTABLE="$3" VERSION="$4" BUILD="$5" CATEGORY="$6"
@@ -76,6 +108,7 @@ build_bundle() {
     <key>CFBundleInfoDictionaryVersion</key>      <string>6.0</string>
     <key>CFBundleName</key>                        <string>${APP_NAME}</string>
     <key>CFBundleDisplayName</key>                 <string>${APP_NAME}</string>
+    <key>CFBundleIconFile</key>                     <string>AppIcon</string>
     <key>CFBundlePackageType</key>                 <string>APPL</string>
     <key>CFBundleShortVersionString</key>          <string>${VERSION}</string>
     <key>CFBundleVersion</key>                     <string>${BUILD}</string>
@@ -86,6 +119,9 @@ build_bundle() {
 </dict>
 </plist>
 PLIST
+
+  echo "==> generating AppIcon.icns"
+  make_icns "$APP_DIR/Contents/Resources/AppIcon.icns"
 
   echo "==> codesigning ${APP_NAME} with identity: ${CODESIGN_IDENTITY}"
   codesign --force \
