@@ -1,7 +1,4 @@
-import ApplicationServices
 import ArgumentParser
-import CoreGraphics
-import CoreMedia
 import Foundation
 import TransomKit
 
@@ -12,8 +9,10 @@ import TransomKit
 /// connects by IP. With `--video`, it also captures + HEVC-encodes the display
 /// and streams it on a second connection.
 ///
-/// There is **no auth and no encryption** (see the README security note), so the
-/// host refuses to bind to anything but a private address.
+/// The whole pipeline lives in `TransomKit.HostSession`; this command is a thin
+/// CLI driver over it, and the SwiftUI host app (issue #8) is another. There is
+/// **no auth and no encryption** (see the README security note), so `HostSession`
+/// refuses to bind to anything but a private address.
 struct Serve: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "serve",
@@ -59,17 +58,6 @@ struct Serve: AsyncParsableCommand {
         // this the status lines never appear while the long-running server runs.
         setvbuf(stdout, nil, _IONBF, 0)
 
-        guard AXIsProcessTrusted() else {
-            throw ProbeError(
-                "Accessibility is not granted. Run `transom-host doctor` for guidance.")
-        }
-        if video && !CGPreflightScreenCaptureAccess() {
-            throw ProbeError("Screen Recording is not granted, required for --video. See `doctor`.")
-        }
-        guard PrivateAddress.isPrivateIPv4(host) else {
-            throw ProbeError(TransportError.refusedPublicBind(host).description)
-        }
-
         let target: TargetApp
         switch AppResolver.resolve(app) {
         case .success(let t): target = t
@@ -79,126 +67,78 @@ struct Serve: AsyncParsableCommand {
             throw ProbeError("no active display with id \(display). See `displays`.")
         }
 
+        let config = HostConfig(
+            target: target, display: disp, host: host, controlPort: controlPort,
+            videoPort: videoPort, gutter: gutter, tile: tile, video: video,
+            bitrateMbps: bitrate, fps: fps)
+        let session = HostSession(config: config)
+
         print(
             "serve: \(target.name) on display \(display) (\(disp.pixelWidth)x\(disp.pixelHeight) px)"
         )
         print(
             "  control: \(host):\(controlPort)   video: \(video ? "\(host):\(videoPort)" : "off")")
 
-        if tile {
-            switch TileService.tile(pid: target.pid, display: disp, gutter: gutter) {
-            case .success(let n): print("  tiled \(n) window(s), gutter=\(gutter)px")
-            case .failure(let e): print("  tiling skipped: \(e)")
-            }
+        // start() throws on a missing grant or a public bind before anything binds.
+        try await session.start()
+
+        // Report the startup tiling result (requested-vs-actual deltas, I-4/OQ-2).
+        let started = session.status()
+        if let tileError = started.tileError {
+            print("  tiling failed: \(tileError)")
+        } else if started.tilePlacements.isEmpty {
+            print("  tiled 0 window(s)")
+        } else {
+            print("  tiled \(started.tilePlacements.count) window(s), gutter=\(gutter)px:")
+            for p in started.tilePlacements { printPlacement(p) }
         }
-
-        let registry = WindowRegistry()
-        let vdsSize = WireSize(w: UInt32(disp.pixelWidth), h: UInt32(disp.pixelHeight))
-
-        // Control channel: events -> broadcast in order via one AsyncStream.
-        let (events, eventSink) = AsyncStream.makeStream(of: WindowWatcher.WindowEvent.self)
-        let watcher = WindowWatcher(pid: target.pid, display: disp, registry: registry)
-        watcher.onEvent = { event in eventSink.yield(event) }
-
-        let controlServer = ControlServer(vdsSize: vdsSize, registry: registry)
-        await controlServer.setOnClientMessage { message in
-            // Phase 4 wires requestResize -> AX. For now, surface it.
-            Log.general.notice(
-                "control: client -> \(String(describing: message), privacy: .public)")
-        }
-        let controlListener = try TCPListener(host: host, port: controlPort, label: "control")
-
-        // Start the AX watcher on its own run-loop thread and wait until it has
-        // registered + seeded the registry, so a client that connects immediately
-        // gets a complete resync. The continuation resumes after start() but before
-        // CFRunLoopRun() takes over the thread.
-        let ctx = WatcherThread()
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            let watcherThread = Thread {
-                ctx.runLoop = CFRunLoopGetCurrent()
-                do {
-                    try watcher.start()
-                    cont.resume()
-                } catch {
-                    cont.resume(throwing: error)
-                }
-                CFRunLoopRun()
-            }
-            watcherThread.stackSize = 1 << 20
-            watcherThread.start()
-        }
-
-        let controlTask = Task { await controlServer.serve(listener: controlListener) }
-        let forwardTask = Task {
-            for await event in events { await controlServer.broadcast(event) }
-        }
-        controlListener.start()
-
-        // Optional video channel.
-        var videoListener: TCPListener?
-        var capture: DisplayCapture?
-        var encoder: HEVCEncoder?
-        var videoTask: Task<Void, Never>?
-        var frameTask: Task<Void, Never>?
         if video {
-            let enc = try HEVCEncoder(
-                config: HEVCEncoder.Config(
-                    width: disp.pixelWidth, height: disp.pixelHeight, fps: fps,
-                    bitrateBitsPerSecond: bitrate * 1_000_000, maxKeyFrameInterval: fps * 2))
-            enc.extractFrameData = true
-            let videoServer = VideoServer(hvccProvider: { enc.parameterSetsHVCC })
-            let listener = try TCPListener(host: host, port: videoPort, label: "video")
-
-            let (frames, frameSink) = AsyncStream.makeStream(
-                of: HEVCEncoder.EncodedFrame.self, bufferingPolicy: .bufferingNewest(4))
-            enc.onEncodedFrame = { frame in frameSink.yield(frame) }
-
-            let cap = DisplayCapture(display: disp, fps: fps)
-            let frameDuration = CMTimeMake(value: 1, timescale: Int32(fps))
-            cap.onPixelBuffer = { pixelBuffer, pts in
-                try? enc.encode(pixelBuffer, pts: pts, duration: frameDuration)
-            }
-            try await cap.start()
-
-            videoTask = Task { await videoServer.serve(listener: listener) }
-            frameTask = Task { for await f in frames { await videoServer.send(f) } }
-            listener.start()
-            print("  video: hardware=\(enc.usingHardware), streaming HEVC 4:4:4 10-bit")
-
-            videoListener = listener
-            capture = cap
-            encoder = enc
+            print("  video: hardware=\(started.usingHardware), streaming HEVC 4:4:4 10-bit")
         }
-
         print(
             "  ready. waiting for a client to connect\(seconds.map { " (auto-stop in \($0)s)" } ?? " (Ctrl-C to stop)")."
         )
 
         if let seconds {
             try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            await session.stop()
+            print("serve: stopped.")
         } else {
-            // Run until the process is interrupted.
-            while true { try await Task.sleep(nanoseconds: 60 * 1_000_000_000) }
+            // Run until the process is interrupted. Print a live status line each
+            // second so fps/bitrate/encoder mode/clients are visible without a UI.
+            while true {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                printStatusLine(session.status())
+            }
         }
-
-        // Clean shutdown (only reached in --seconds mode).
-        controlListener.stop()
-        videoListener?.stop()
-        if let capture { await capture.stop() }
-        encoder?.finish()
-        eventSink.finish()
-        controlTask.cancel()
-        forwardTask.cancel()
-        videoTask?.cancel()
-        frameTask?.cancel()
-        if let runLoop = ctx.runLoop { CFRunLoopStop(runLoop) }
-        print("serve: stopped.")
     }
-}
 
-/// Cross-thread handoff for the watcher run-loop thread: its `CFRunLoop`, so the
-/// command can stop it on shutdown. The continuation in `run()` orders the write
-/// (on the thread) before any read (on the caller).
-private final class WatcherThread: @unchecked Sendable {
-    var runLoop: CFRunLoop?
+    private func printStatusLine(_ s: HostStatus) {
+        guard s.videoEnabled else {
+            print(
+                "  status: control-client=\(s.controlClientConnected ? "yes" : "no")  "
+                    + "windows=\(s.liveWindowCount)")
+            return
+        }
+        let mode = s.encoderIs444Hardware ? "4:4:4 10-bit HW" : "FALLBACK (not 4:4:4 HW)"
+        print(
+            String(
+                format:
+                    "  status: clients ctrl=%@ video=%@  %.0ffps  %.1fMbps  enc-lat %.1fms  [%@]",
+                s.controlClientConnected ? "yes" : "no",
+                s.videoClientConnected ? "yes" : "no",
+                s.measuredFPS, s.measuredBitrateMbps, s.encodeLatencyMillis, mode))
+    }
+
+    private func printPlacement(_ p: TilePlacement) {
+        let req = "(\(p.requested.x),\(p.requested.y)) \(p.requested.width)x\(p.requested.height)"
+        guard let a = p.actual, let pd = p.positionDelta, let sd = p.sizeDelta else {
+            print("    window[\(p.index)] \"\(p.title)\"  requested \(req)  actual (AX refused)")
+            return
+        }
+        let act = "(\(a.x),\(a.y)) \(a.width)x\(a.height)"
+        let delta =
+            p.isExact ? "[exact]" : "[Δ pos (\(pd.dx),\(pd.dy))  Δ size (\(sd.dw),\(sd.dh))]"
+        print("    window[\(p.index)] \"\(p.title)\"  requested \(req)  actual \(act)  \(delta)")
+    }
 }

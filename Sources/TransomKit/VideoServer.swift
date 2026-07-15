@@ -14,10 +14,19 @@ public actor VideoServer {
     private var seq: UInt64 = 0
     private let hvccProvider: @Sendable () -> Data?
 
+    /// Called with `true` when a client connects and `false` when it disconnects
+    /// or is dropped, so a status UI can show whether the video client is attached.
+    /// Fired from the actor; the closure must be thread-safe.
+    public var onConnectionChange: (@Sendable (Bool) -> Void)?
+
     /// - Parameter hvccProvider: returns the encoder's `hvcC` parameter sets once
     ///   the first frame has been encoded (nil before then).
     public init(hvccProvider: @escaping @Sendable () -> Data?) {
         self.hvccProvider = hvccProvider
+    }
+
+    public func setOnConnectionChange(_ handler: @escaping @Sendable (Bool) -> Void) {
+        self.onConnectionChange = handler
     }
 
     public func serve(listener: TCPListener) async {
@@ -30,6 +39,7 @@ public actor VideoServer {
         active = transport
         sentConfig = false
         Log.encode.notice("video: client connected")
+        onConnectionChange?(true)
         // The client sends nothing on this channel; the receive loop just detects
         // disconnect so the host can stop targeting a dead socket.
         do {
@@ -39,6 +49,7 @@ public actor VideoServer {
         }
         Log.encode.notice("video: client disconnected")
         if active === transport { active = nil }
+        onConnectionChange?(false)
         await transport.close()
     }
 
@@ -59,6 +70,7 @@ public actor VideoServer {
             seq += 1
         } catch {
             self.active = nil
+            onConnectionChange?(false)
         }
     }
 }

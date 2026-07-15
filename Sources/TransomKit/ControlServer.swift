@@ -20,6 +20,11 @@ public actor ControlServer {
     /// 4 wires this to AX; Phase 3 just surfaces it.
     public var onClientMessage: (@Sendable (ClientMessage) -> Void)?
 
+    /// Called with `true` when a client connects and `false` when it disconnects
+    /// or is dropped, so a status UI can show whether a client is attached. Fired
+    /// from the actor; the closure must be thread-safe.
+    public var onConnectionChange: (@Sendable (Bool) -> Void)?
+
     public init(vdsSize: WireSize, registry: WindowRegistry) {
         self.vdsSize = vdsSize
         self.registry = registry
@@ -27,6 +32,10 @@ public actor ControlServer {
 
     public func setOnClientMessage(_ handler: @escaping @Sendable (ClientMessage) -> Void) {
         self.onClientMessage = handler
+    }
+
+    public func setOnConnectionChange(_ handler: @escaping @Sendable (Bool) -> Void) {
+        self.onConnectionChange = handler
     }
 
     /// Accept connections forever (one active at a time). Each `handle` runs until
@@ -49,12 +58,14 @@ public actor ControlServer {
                 "control: send failed, dropping client: \(error.localizedDescription, privacy: .public)"
             )
             self.active = nil
+            onConnectionChange?(false)
         }
     }
 
     private func handle(_ transport: TCPTransport) async {
         active = transport
         Log.general.notice("control: client connected")
+        onConnectionChange?(true)
 
         do {
             try await sendResync(to: transport)
@@ -62,6 +73,7 @@ public actor ControlServer {
             Log.general.notice(
                 "control: resync failed: \(error.localizedDescription, privacy: .public)")
             if active === transport { active = nil }
+            onConnectionChange?(false)
             await transport.close()
             return
         }
@@ -82,6 +94,7 @@ public actor ControlServer {
 
         Log.general.notice("control: client disconnected")
         if active === transport { active = nil }
+        onConnectionChange?(false)
         await transport.close()
     }
 
