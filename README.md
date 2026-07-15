@@ -65,11 +65,13 @@ hunting for a "transom-host" checkbox that will never appear.
 
 ## ⚠️ Security: none
 
-**There is no authentication and no encryption.** Anyone on the LAN who can reach
-the port gets a live video feed of the Mac and the ability to inject keystrokes
-and mouse events. That is acceptable for a **wired home LAN** and **completely
-unacceptable anywhere else** — do not port-forward it, do not run it on a network
-you do not trust, do not put it on the internet.
+**There is no authentication and no encryption.** As of issue #7 the host also
+**injects input**: anyone on the LAN who can reach the control port can move the
+mouse and **type into your Mac** (`CGEventPost`), not just watch a live video feed
+of it. The threat model is now "type into your machine," not merely "watch your
+screen." That is acceptable for a **wired home LAN** and **completely unacceptable
+anywhere else** — do not port-forward it, do not run it on a network you do not
+trust, do not put it on the internet.
 
 As a guardrail (not a security boundary), `serve` **refuses to bind to anything
 but a private address** (`10/8`, `172.16/12`, `192.168/16`, `127/8`, `169.254/16`)
@@ -88,9 +90,16 @@ Auth and encryption are explicitly out of scope until designed properly.
 | `capture` | **real** | run the shared ScreenCaptureKit stream, verify no scaling (I-1) |
 | `encodeprobe` | **real** | probe HEVC 4:4:4 hardware encode (OQ-4) |
 | `encode` | **real** | capture + HEVC 4:4:4 10-bit hardware encode; report fps/bitrate |
-| `serve` | **real** | tile + watch an app and serve rects (+ optional video) over TCP |
+| `serve` | **real** | tile + watch an app, serve rects (+ optional video), and **inject client input** over TCP |
+| `inject` | **real** | post a click/text/chord into a window locally; log the full coordinate chain |
+| `mock-client` | **real** | stand-in client: connect to `serve` and post input events (issue #7 verification) |
 | `probe` | **real** | architecture de-risking experiments |
 | `menuwatch` | **real** | stream the focused app's windows/menus (answers OQ-1) |
+
+> **Port gotcha:** the default control port `7000` collides with macOS **AirPlay
+> Receiver** (Control Center binds `*:7000`). If a client connects but gets no
+> resync, either pass `serve --control-port <free>` or disable AirPlay Receiver.
+> See `docs/architecture.md` §8.
 
 ## License
 

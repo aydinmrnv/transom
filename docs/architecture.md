@@ -419,6 +419,34 @@ this.
 And does macOS behave sanely with a main display much larger than any physical
 one? Unknown.
 
+### Input findings (issue #7, Phase 5)
+
+> **PHASE 5 FINDING (2026-07-15, Mac Studio, macOS 26): `CGEventPost` mouse
+> locations are POINT space, top-left origin, Y down.**
+>
+> Measured by `transom-host inject`, which posts a click at a known window-local
+> pixel, computes the expected AX point via the single I-3 conversion, and reads
+> the cursor straight back (`CGEvent(source: nil)?.location`). On the 2x display a
+> click at window-local `(400,300) px` in a window at VDS `(300,240)` produced a
+> cursor at exactly `(350,270) pt` — `Δ (0,0)`. So the input chain is
+> `CS px + window origin → VDS px → / scale → AX points → CGEventPost`, and the
+> `/ scale` step is mandatory. Posting VDS **pixels** would land at `(700,540)`,
+> off by exactly the scale factor — the factor-of-two trap the issue warned about.
+> `.cghidEventTap` is used; the real cursor moves and SCK captures it (protocol.md
+> §8), so no cursor is synthesized.
+
+> **PHASE 5 FINDING (2026-07-15): control port 7000 collides with macOS AirPlay
+> Receiver.** With AirPlay Receiver enabled, **Control Center already listens on
+> `*:7000`** (seen via `lsof -i :7000` → `ControlCe`). Because the host binds with
+> `allowLocalEndpointReuse = true`, `serve`'s bind to `127.0.0.1:7000` *succeeds*
+> but AirPlay wins the inbound connections — a client connects, gets zero bytes,
+> and no resync ever arrives. It looks like a control-server bug and is not one.
+> Workarounds: run `serve --control-port <free>` (verification used 7010), or turn
+> off **System Settings → General → AirDrop & Handoff → AirPlay Receiver**. The
+> protocol default stays 7000 (it is the client contract, protocol.md §1); this is
+> a deployment note, not a protocol change. A future `serve` could preflight the
+> port and warn instead of binding silently.
+
 ---
 
 ## 9. Decision log
