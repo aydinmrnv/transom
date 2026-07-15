@@ -272,6 +272,29 @@ windows with usable frames?
 **If menus do not appear in the capture, there is no product.** Answer this
 before writing anything else. Host milestone M0, `menuwatch`.
 
+> **M0 FINDING (2026-07-14, Mac Studio, macOS 26): OQ-1 PASSES.**
+>
+> Measured with the M0 probe against Finder's menu bar menus (Xcode was not
+> running; the mechanism is the same — a WindowServer-level `NSMenu`).
+>
+> 1. **Menus DO land in the SCK capture.** A full-display SCK capture taken
+>    while a menu bar menu was open shows the entire `NSMenu` popup in the
+>    frame, pixel-for-pixel, with no special handling.
+> 2. **AX reports them with usable frames** — but **only via
+>    `kAXMenuOpenedNotification`**, whose element has role **`AXMenu`** and a
+>    correct global-point frame (e.g. File menu `(99,31) 337x629 pt` →
+>    `674x1258 px` at 2x). The subrole is empty (`AXMenu` alone distinguishes it
+>    from `AXWindow`/`AXStandardWindow`).
+> 3. **Menus are NOT in the app's `kAXWindowsAttribute` list and do NOT fire
+>    `kAXWindowCreatedNotification`.** So the rect-metadata path must subscribe
+>    to `kAXMenuOpened`/`kAXMenuClosed` explicitly; polling the window list will
+>    silently miss every menu. On `kAXMenuClosed` the element's frame reads back
+>    as `(0,1080) 0x0` (already torn down) — capture the frame on *open*.
+>
+> Implication for I-5 / the tiler: a menu is a separate transient element the
+> app positions itself; it can land on top of a tiled window. Handling is still
+> open (see I-5), but the capture-and-report half is proven to work.
+
 ### OQ-2: Are AX geometry writes honored exactly?
 
 When we set `AXPosition` and `AXSize`, does macOS honor them, or does it clamp to
@@ -280,6 +303,20 @@ Xcode may refuse sizes below some floor.
 
 Any clamping constrains the entire tiling design. The `place` command must read
 back and **report the delta**. The delta is the entire point of that command.
+
+> **M0 FINDING (2026-07-14): position exact, size CLAMPED.**
+>
+> `place` against a Finder window on the 2x main display:
+> - **`AXPosition` was honored exactly** in every trial (delta `(0,0)`).
+> - **`AXSize` is clamped, not rounded.** Requesting `1280x800` yielded
+>   `1280x653`; requesting `300x200` yielded `470x280` — i.e. the app enforces a
+>   **minimum window size** (~`470x280` for Finder) and, in some positions, a
+>   maximum height. Clamping is per-app and must be discovered at runtime.
+>
+> Consequence for the design: the host cannot assume a requested tile size is
+> the actual size. It must place, read back, and treat the **actual** rect as
+> truth (I-4), and the tiler must re-pack from actual sizes or it will overlap.
+> The tiling budget (3.3) must be computed from post-clamp sizes.
 
 ### OQ-3: Is there a stable window identity across AX and SCK?
 
@@ -306,6 +343,19 @@ Rect metadata arriving a frame late relative to the pixels is a visible shear
 during window motion. How many frames? Does it need explicit
 timestamp correlation, or is best-effort good enough? Host M0 `probe` answers
 this.
+
+> **M0 PARTIAL FINDING (2026-07-14): static alignment is pixel-exact.**
+>
+> With a window at rest, the AX rect (converted AX-points → display-pixels by
+> the single I-3 conversion) sits exactly on the window's pixels in the SCK
+> frame — verified from `probe`'s overlaid PNGs. The `px` values in the JSONL
+> are a clean `pt * 2` of the `pt` values, confirming the conversion.
+>
+> The **lag under motion** is not yet quantified: `probe` writes a full 8 MP PNG
+> per tick, so PNG encode (~300 ms) dominates and the effective poll rate is
+> ~3 Hz, not the requested 10 Hz — too coarse to count frames of shear during a
+> drag. To measure lag properly, decouple AX polling from PNG encode (timestamp
+> rects in a tight loop; encode frames off the hot path, or drop to raw dumps).
 
 ### OQ-6: What is the largest virtual display BetterDisplay will create?
 
