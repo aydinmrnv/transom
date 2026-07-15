@@ -337,6 +337,38 @@ Testable in an afternoon with `VTCopySupportedPropertyDictionaryForEncoder` plus
 a test encode. If 4:4:4 is software-only on this host, the quality ceiling drops
 and section 6 needs rewriting.
 
+> **PHASE 0 FINDING (issue #3, 2026-07-14, Mac Studio M1 Max, macOS 26): YES,
+> via the 10-bit path.** Measured by `transom-host encodeprobe`, which runs a
+> real test encode per chroma mode requiring hardware, and reads back
+> VideoToolbox's own `UsingHardwareAcceleratedVideoEncoder` flag.
+>
+> 1. **HEVC 4:4:4 encodes in HARDWARE — but only 10-bit.** A `v410`
+>    (`kCVPixelFormatType_444YpCbCr10`, 4:4:4 10-bit) IOSurface-backed frame
+>    encoded on the hardware encoder (`usingHardware:true`, real bitstream out).
+> 2. **8-bit 4:4:4 is rejected.** A `v308`
+>    (`kCVPixelFormatType_444YpCbCr8`) frame fails with
+>    `kVTPixelTransferNotSupportedErr (-12905)` on both the require-HW and the
+>    allow-SW config. The Apple HEVC encoder has no 8-bit 4:4:4 input path; its
+>    only 4:4:4 profile is **Main 4:4:4 10**. This is fine — 10-bit is *better*
+>    than 8-bit for text (no banding on gradients/antialiasing).
+> 3. **There is no public `kVTProfileLevel_HEVC_Main444*` constant.** The SDK
+>    exposes only `HEVC_Main`, `HEVC_Main10`, `HEVC_Main42210`, and the
+>    monochrome variants. VideoToolbox **auto-derives** the 4:4:4 profile from
+>    the `v410` source pixel format when `ProfileLevel` is left unset, so the
+>    encoder must feed a 4:4:4-typed buffer and **not** set `ProfileLevel`
+>    (setting `Main42210` would silently force 4:2:2).
+> 4. Two HEVC encoders are advertised: `…ave.hevc` (hardware) and `…hevc.vcp`
+>    (software). Also confirmed hardware on this host for completeness:
+>    **4:2:0 8-bit** (Main) and **4:2:2 10-bit** (Main 4:2:2 10).
+>
+> **Consequence for section 6 and the pipeline (Phase 2):** target HEVC
+> **4:4:4 10-bit**. SCK delivers `BGRA` (or 10-bit RGB), so the capture→encoder
+> path needs a `BGRA → v410` conversion first. That is a **color-space
+> conversion, not a spatial resample** — 4:4:4 keeps chroma at full resolution,
+> so it does not violate I-1 — but it must stay on the media engine / zero-copy
+> to hold the latency budget. Getting that transfer right is the open Phase 2
+> work, not an OQ-4 blocker.
+
 ### OQ-5: What is the metadata lag?
 
 Rect metadata arriving a frame late relative to the pixels is a visible shear
