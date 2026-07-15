@@ -72,4 +72,72 @@ struct CoordinatesTests {
         #expect(ax.size.width == 200)
         #expect(ax.size.height == 150)
     }
+
+    // MARK: - Input: window-local pixels -> AX global point (issue #7)
+
+    @Test("window-local click adds window origin, then divides by scale")
+    func windowLocalToAXPoint() {
+        // Window at VDS (1512, 60) on a 2x main display (origin 0,0). A click
+        // 200px right, 100px down from the window's top-left is VDS (1712, 160),
+        // which is AX point (856, 80).
+        let ax = Coordinates.axGlobalPoint(
+            fromWindowLocalPixels: CGPoint(x: 200, y: 100),
+            windowOriginVDS: CGPoint(x: 1512, y: 60),
+            displayOriginPoints: .zero,
+            scale: 2.0)
+        #expect(ax.x == 856)
+        #expect(ax.y == 80)
+    }
+
+    @Test("the window's top-left maps to the window origin in points")
+    func windowLocalOrigin() {
+        // Local (0,0) is the window's top-left: VDS == window origin, / scale.
+        let ax = Coordinates.axGlobalPoint(
+            fromWindowLocalPixels: .zero,
+            windowOriginVDS: CGPoint(x: 800, y: 600),
+            displayOriginPoints: .zero,
+            scale: 2.0)
+        #expect(ax.x == 400)
+        #expect(ax.y == 300)
+    }
+
+    @Test("Y is not flipped: a larger local-y yields a larger AX-y")
+    func windowLocalYIsDown() {
+        // The vertically-mirrored bug I-3 warns about would make this decrease.
+        let top = Coordinates.axGlobalPoint(
+            fromWindowLocalPixels: CGPoint(x: 0, y: 0),
+            windowOriginVDS: .zero, displayOriginPoints: .zero, scale: 2.0)
+        let lower = Coordinates.axGlobalPoint(
+            fromWindowLocalPixels: CGPoint(x: 0, y: 1000),
+            windowOriginVDS: .zero, displayOriginPoints: .zero, scale: 2.0)
+        #expect(lower.y > top.y)
+    }
+
+    @Test("a non-main display offsets the click by its point origin")
+    func windowLocalNonMainDisplay() {
+        // Display origin (100,50) pt; window at VDS (200,100) px on a 2x display;
+        // local (40,60) px -> VDS (240,160) px -> (120,80) pt -> +origin (220,130).
+        let ax = Coordinates.axGlobalPoint(
+            fromWindowLocalPixels: CGPoint(x: 40, y: 60),
+            windowOriginVDS: CGPoint(x: 200, y: 100),
+            displayOriginPoints: CGPoint(x: 100, y: 50),
+            scale: 2.0)
+        #expect(ax.x == 220)
+        #expect(ax.y == 130)
+    }
+
+    @Test("input point is consistent with the rect conversion for the same corner")
+    func windowLocalMatchesRectOrigin() {
+        // The AX point for a window's local (0,0) must equal the AX origin the
+        // rect round-trip produces for that same window rect — the two coordinate
+        // paths cannot disagree about where a window's top-left is.
+        let windowVDS = CGRect(x: 640, y: 200, width: 1280, height: 800)
+        let axRect = Coordinates.axGlobalRect(
+            fromDisplayPixels: windowVDS, displayOriginPoints: .zero, scale: 2.0)
+        let axPoint = Coordinates.axGlobalPoint(
+            fromWindowLocalPixels: .zero,
+            windowOriginVDS: windowVDS.origin, displayOriginPoints: .zero, scale: 2.0)
+        #expect(axPoint.x == axRect.origin.x)
+        #expect(axPoint.y == axRect.origin.y)
+    }
 }

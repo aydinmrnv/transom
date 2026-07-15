@@ -47,10 +47,48 @@ struct WireProtocolTests {
             .requestResize(id: 1, size: WireSize(w: 2560, h: 1440), phase: .end),
             .requestFocus(id: 3),
             .requestClose(id: 3),
+            .input(id: 7, event: .mouseDown(x: 12, y: 34, button: .left), ts: 1000),
+            .input(id: 7, event: .mouseUp(x: 12, y: 34, button: .right), ts: 1001),
+            .input(id: 7, event: .mouseMove(x: 640, y: 480), ts: 1002),
+            .input(id: 7, event: .scroll(x: 10, y: 20, dx: -3, dy: 5), ts: 1003),
+            .input(id: 7, event: .keyDown(vk: 0x41), ts: 1004),
+            .input(id: 7, event: .keyUp(vk: 0x41), ts: 1005),
         ]
         for m in messages {
             #expect(try roundTrip(m) == m)
         }
+    }
+
+    @Test("every InputEvent kind round-trips")
+    func inputEventRoundTrips() throws {
+        let events: [InputEvent] = [
+            .mouseDown(x: 1, y: 2, button: .middle),
+            .mouseUp(x: 3, y: 4, button: .left),
+            .mouseMove(x: 5, y: 6),
+            .scroll(x: 7, y: 8, dx: 9, dy: -10),
+            .keyDown(vk: 0x1B),
+            .keyUp(vk: 0x1B),
+        ]
+        let enc = JSONEncoder()
+        let dec = JSONDecoder()
+        for e in events {
+            #expect(try dec.decode(InputEvent.self, from: enc.encode(e)) == e)
+        }
+    }
+
+    @Test("input serialises to the documented nested shape")
+    func inputShape() throws {
+        let data = try WireCodec.encode(
+            .input(id: 7, event: .mouseDown(x: 100, y: 200, button: .left), ts: 4242))
+        let obj = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(obj["type"] as? String == "input")
+        #expect(obj["id"] as? UInt64 == 7)
+        #expect(obj["ts"] as? UInt64 == 4242)
+        let event = try #require(obj["event"] as? [String: Any])
+        #expect(event["kind"] as? String == "mouseDown")
+        #expect(event["x"] as? Int == 100)
+        #expect(event["y"] as? Int == 200)
+        #expect(event["button"] as? String == "left")
     }
 
     // MARK: JSON shape (the actual contract the Rust side sees)
