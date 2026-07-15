@@ -23,13 +23,17 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, DEVMODEW, ENUM_CURRENT_SETTINGS,
-    HDC, HMONITOR, MONITORINFO, MONITORINFOEXW, MONITORINFOF_PRIMARY,
+    HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
 };
 use windows::Win32::UI::HiDpi::{
     AreDpiAwarenessContextsEqual, GetDpiForMonitor, GetThreadDpiAwarenessContext, MDT_EFFECTIVE_DPI,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     DPI_AWARENESS_CONTEXT_SYSTEM_AWARE, DPI_AWARENESS_CONTEXT_UNAWARE,
 };
+
+/// The primary monitor sets this bit in `MONITORINFO::dwFlags`. windows-rs does
+/// not always emit it as a constant, so define it locally.
+const MONITORINFOF_PRIMARY: u32 = 0x0000_0001;
 
 pub fn run() -> ExitCode {
     println!("transom-client doctor");
