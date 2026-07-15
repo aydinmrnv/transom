@@ -41,6 +41,15 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     /// Used by the app's live view. Leave nil for the CLI's poll-on-demand model.
     public var onFrame: (@Sendable (CGImage) -> Void)?
 
+    /// Optional per-frame hook, called on the capture queue with the **raw**
+    /// IOSurface-backed pixel buffer and its presentation timestamp — the
+    /// zero-copy entry point for the encoder (issue #3 Phase 2). Unlike `onFrame`,
+    /// this never touches `CGImage`, so nothing round-trips through the CPU (I-1
+    /// pipeline note). The buffer belongs to SCK's pool; use it **synchronously**
+    /// (encode it now). Do not retain it past the call or the pool may recycle it
+    /// underneath you.
+    public var onPixelBuffer: (@Sendable (CVPixelBuffer, CMTime) -> Void)?
+
     public init(display: DisplayInfo, fps: Int = 60) {
         self.display = display
         self.fps = fps
@@ -132,17 +141,30 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             pixelFormat: fmt,
             matchesNativePixels: dw == display.pixelWidth && dh == display.pixelHeight)
 
-        let (ctx, hook): (CIContext, (@Sendable (CGImage) -> Void)?) = lock.withLock {
-            latestPixelBuffer = pixelBuffer
-            _stats = stats
-            return (ciContext, onFrame)
+        let (ctx, frameHook, pixelHook):
+            (
+                CIContext, (@Sendable (CGImage) -> Void)?,
+                (@Sendable (CVPixelBuffer, CMTime) -> Void)?
+            ) = lock.withLock {
+                latestPixelBuffer = pixelBuffer
+                _stats = stats
+                return (ciContext, onFrame, onPixelBuffer)
+            }
+
+        // Zero-copy tap first: hand the raw IOSurface buffer straight to the
+        // encoder before spending anything on the CGImage path (I-1). Signposted
+        // so the capture→handoff interval is measurable in Instruments.
+        if let pixelHook {
+            let signpostState = Log.signposter.beginInterval("capture")
+            pixelHook(pixelBuffer, sampleBuffer.presentationTimeStamp)
+            Log.signposter.endInterval("capture", signpostState)
         }
 
-        if let hook {
+        if let frameHook {
             let image = ctx.createCGImage(
                 CIImage(cvPixelBuffer: pixelBuffer),
                 from: CGRect(x: 0, y: 0, width: dw, height: dh))
-            if let image { hook(image) }
+            if let image { frameHook(image) }
         }
     }
 }

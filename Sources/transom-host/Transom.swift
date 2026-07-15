@@ -32,6 +32,7 @@ struct Transom: AsyncParsableCommand {
             Probe.self,
             MenuWatch.self,
             EncodeProbe.self,
+            Encode.self,
         ],
         defaultSubcommand: Doctor.self
     )

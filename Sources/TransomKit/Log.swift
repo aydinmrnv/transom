@@ -14,4 +14,10 @@ public enum Log {
     public static let capture = Logger(subsystem: subsystem, category: "capture")
     public static let ax = Logger(subsystem: subsystem, category: "accessibility")
     public static let app = Logger(subsystem: subsystem, category: "app")
+    public static let encode = Logger(subsystem: subsystem, category: "encode")
+
+    /// Signposter for the capture→encode hot path, so latency is measured in
+    /// Instruments rather than guessed (issue #3 quality bar). Intervals:
+    /// `capture` (frame delivered → handed off) and `encode` (transfer + encode).
+    public static let signposter = OSSignposter(subsystem: subsystem, category: "pipeline")
 }
