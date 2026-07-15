@@ -34,6 +34,7 @@ struct Transom: AsyncParsableCommand {
             EncodeProbe.self,
             Encode.self,
             Serve.self,
+            MockResize.self,
             Inject.self,
             MockClient.self,
         ],

@@ -18,6 +18,16 @@ struct CoordinatesTests {
         #expect(Coordinates.vdsPixels(fromAXPoints: 0, scale: 2.0) == 0)
     }
 
+    @Test("axPoints is the exact inverse of vdsPixels (a resize size crossing back)")
+    func axPointsIsInverseOfVdsPixels() {
+        // A RequestResize arrives in physical pixels; AX takes points. 1280px at
+        // 2x is 640pt going in, and the pair round-trips exactly.
+        #expect(Coordinates.axPoints(fromVDSPixels: 1280, scale: 2.0) == 640)
+        #expect(Coordinates.axPoints(fromVDSPixels: 100, scale: 1.0) == 100)
+        let px = 1337.0
+        #expect(Coordinates.vdsPixels(fromAXPoints: Coordinates.axPoints(fromVDSPixels: px, scale: 2.0), scale: 2.0) == px)
+    }
+
     @Test("on the main display (origin 0,0) AX points scale straight to pixels")
     func mainDisplayScale() {
         // The exact numbers from the M0 OQ-1 finding: File menu (99,31) 337x629 pt

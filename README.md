@@ -78,6 +78,33 @@ but a private address** (`10/8`, `172.16/12`, `192.168/16`, `127/8`, `169.254/16
 and defaults to `127.0.0.1`. Pass `--host <LAN-ip>` to expose it to a real client.
 Auth and encryption are explicitly out of scope until designed properly.
 
+> **Heads-up: the default control port `7000` collides with macOS AirPlay
+> Receiver** (Control Center listens on `*:7000`). If a control client connects
+> but never receives anything, either turn AirPlay Receiver off (System Settings ›
+> General › AirDrop & Handoff) or pass `--control-port <n>` (e.g. `8770`). The
+> video channel (`7001`) is unaffected. See `docs/architecture.md` §8.
+
+## The apps
+
+Two SwiftUI apps wrap the library in real bundles with **stable, distinct** bundle
+ids, so each gets its own TCC (Screen Recording / Accessibility) identity — a CLI
+run from a terminal has those grants attributed to the *terminal*, not the binary.
+
+| App | Bundle id | What it is |
+| --- | --- | --- |
+| **Transom Host** | `one.nullstack.transom.host` | One-window control panel over `serve`: permissions, pick a display + app, Start, and live status (client connected, fps/bitrate, encoder mode, tile layout with post-clamp deltas). |
+| **Transom Probe** | `one.nullstack.transom.probe` | The M0 diagnostic probe (OQ-1/OQ-2/OQ-5). |
+
+Build and package both signed bundles (hardened runtime), then run one:
+
+```sh
+scripts/make-app.sh            # builds build/Transom Host.app and build/Transom Probe.app
+open "build/Transom Host.app"
+```
+
+`scripts/release.sh host` (or `probe`) cuts the matching GitHub prerelease. Neither
+app is notarized.
+
 ## Command surface
 
 | Command | Status | Purpose |
@@ -90,16 +117,12 @@ Auth and encryption are explicitly out of scope until designed properly.
 | `capture` | **real** | run the shared ScreenCaptureKit stream, verify no scaling (I-1) |
 | `encodeprobe` | **real** | probe HEVC 4:4:4 hardware encode (OQ-4) |
 | `encode` | **real** | capture + HEVC 4:4:4 10-bit hardware encode; report fps/bitrate |
-| `serve` | **real** | tile + watch an app, serve rects (+ optional video), and **inject client input** over TCP |
+| `serve` | **real** | tile + watch an app, serve rects (+ optional video), drive the resize roundtrip (throttled AX writes, readback, I-4), and **inject client input** over TCP |
+| `mockresize` | **real** | mock client: drive a Live/End resize drag against `serve` and measure the ~10Hz throttle |
 | `inject` | **real** | post a click/text/chord into a window locally; log the full coordinate chain |
 | `mock-client` | **real** | stand-in client: connect to `serve` and post input events (issue #7 verification) |
 | `probe` | **real** | architecture de-risking experiments |
 | `menuwatch` | **real** | stream the focused app's windows/menus (answers OQ-1) |
-
-> **Port gotcha:** the default control port `7000` collides with macOS **AirPlay
-> Receiver** (Control Center binds `*:7000`). If a client connects but gets no
-> resync, either pass `serve --control-port <free>` or disable AirPlay Receiver.
-> See `docs/architecture.md` §8.
 
 ## License
 

@@ -1,6 +1,5 @@
 import ArgumentParser
 import Foundation
-import Network
 import TransomKit
 
 /// `mock-client` — a stand-in for the not-yet-existent Rust client, so input can
@@ -58,7 +57,7 @@ struct MockClient: AsyncParsableCommand {
     func run() async throws {
         setvbuf(stdout, nil, _IONBF, 0)
 
-        let transport = try await connect()
+        let transport = try await TCPTransport.connect(host: host, port: controlPort)
         print("mock-client: connected to \(host):\(controlPort)")
 
         let windows = try await readResync(transport)
@@ -173,53 +172,5 @@ struct MockClient: AsyncParsableCommand {
             }
         }
         return windows
-    }
-
-    /// Open an outbound TCP connection and hand back a framed transport once it is
-    /// ready. `TCP_NODELAY` matches the server (protocol.md §1).
-    private func connect() async throws -> TCPTransport {
-        let tcp = NWProtocolTCP.Options()
-        tcp.noDelay = true
-        let params = NWParameters(tls: nil, tcp: tcp)
-        guard let nwPort = NWEndpoint.Port(rawValue: controlPort) else {
-            throw ProbeError("invalid port \(controlPort)")
-        }
-        let connection = NWConnection(
-            host: NWEndpoint.Host(host), port: nwPort, using: params)
-        let queue = DispatchQueue(label: "one.transom.host.mock-client")
-
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            let resumed = OneShot()
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if resumed.fire() { cont.resume() }
-                case .failed(let error):
-                    if resumed.fire() { cont.resume(throwing: error) }
-                case .cancelled:
-                    if resumed.fire() {
-                        cont.resume(throwing: ProbeError("connection cancelled before ready"))
-                    }
-                default:
-                    break
-                }
-            }
-            connection.start(queue: queue)
-        }
-        return TCPTransport(connection: connection)
-    }
-}
-
-/// Guards a `CheckedContinuation` against a double-resume when `NWConnection`
-/// reports multiple terminal states.
-private final class OneShot: @unchecked Sendable {
-    private let lock = NSLock()
-    private var done = false
-    func fire() -> Bool {
-        lock.withLock {
-            if done { return false }
-            done = true
-            return true
-        }
     }
 }

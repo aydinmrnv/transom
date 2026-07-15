@@ -66,6 +66,18 @@ public enum Coordinates {
         points * scale
     }
 
+    /// The inverse of `vdsPixels(fromAXPoints:scale:)`: a length in VDS/SCK pixels
+    /// back to AX **points** (`ax_points = vds_pixels / scale`).
+    ///
+    /// A resize request arrives on the wire in physical pixels (I-2), but AX takes
+    /// a point-valued `AXSize`, so the size crosses the AX↔VDS boundary the same
+    /// way a rect does — just as a scalar with no origin. Keeping the division here
+    /// means the scale factor still only ever touches a coordinate in this file
+    /// (I-3). If you find a `/ scale` on a size anywhere else, it is a bug.
+    public static func axPoints(fromVDSPixels pixels: Double, scale: Double) -> Double {
+        pixels / scale
+    }
+
     /// The inverse of `displayPixels(fromAXRect:…)`: a display-local pixel rect
     /// (VDS/SCK space) back to an **AX global-point** rect, ready to hand to
     /// `AXUIElementSetAttributeValue`.

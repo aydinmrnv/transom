@@ -27,6 +27,14 @@ sockets.
 | **Control** | TCP | 7000 | Ordered, reliable. Window lifecycle, geometry, input |
 | **Video** | TCP | 7001 | Lowest latency achievable on TCP. Frames may be dropped, never delayed |
 
+> **Deployment trap (measured, issue #6):** macOS's **AirPlay Receiver listens on
+> port 7000** (`ControlCenter`, on all interfaces). A client connecting to the Mac
+> on 7000 can reach AirPlay instead of the host, which accepts the TCP handshake
+> and then speaks no Transom protocol (looks like "connected but no `hello`").
+> Either disable AirPlay Receiver (System Settings → General → AirDrop & Handoff)
+> or run the host on another port (`serve --control-port 7010`). The port numbers
+> here are defaults, not wire constants.
+
 ### Why TCP for v1 (not UDP)
 
 `docs/protocol.md` used to say custom UDP for video. **That is the M3 target, not
@@ -215,6 +223,20 @@ The one flow worth getting right, because it is the whole product:
 **Step 4 and 5 are non-negotiable.** The host reports what macOS actually did,
 never what was asked for. AX writes can be clamped or rounded (OQ-2), and the
 client must handle "asked 2560x1440, got 2560x1438" without breaking.
+
+There are **two** reasons a `windowMoved` can come back smaller than the
+`RequestResize` asked for, and the client treats them identically (it just uses
+the actual rect):
+
+1. **App minimum size.** The Mac app refuses to go below its own floor (OQ-2).
+2. **Non-overlap clamp.** Growth would collide with a neighbour on the virtual
+   display, so the host stops it a gutter short (I-5; architecture.md 2.2). At one
+   window this never happens.
+
+The host throttles `Live` to ~10Hz (a roundtrip is 30ms+, past a drag's frame
+budget); intermediate `Live` requests are coalesced, and the newest is still
+applied so a paused drag catches up. `End` is never throttled — it is the
+authoritative 1:1 snap and always produces a final `windowMoved`.
 
 ---
 

@@ -96,6 +96,63 @@ That is 30ms or more, far past the frame budget of a smooth drag.
 This is what RDP's dynamic resolution does. Build it in from the start rather
 than discovering it later.
 
+### 2.2 The re-tile question: what happens when a resize breaks non-overlap
+
+Windows on the virtual display must never overlap (**I-5**). A resize can grow a
+window into its neighbour. Gutters (~200px, 3.3) absorb small growth; large growth
+does not fit in a gutter. So when a requested resize would collide with a
+neighbour, what does the host do? Three options, none free:
+
+1. **Re-tile everything.** Correct, but the other windows slide across the screen
+   for no reason the user can see — they did not touch those windows. Jarring, and
+   it cascades (moving B to make room for A may push B into C).
+2. **Clamp the growth at the collision** and report the clamped size back, exactly
+   as the host already reports an app-level size clamp (OQ-2).
+3. **Grow the virtual display.** Disruptive, and it **invalidates the capture
+   stream size**, which is a fixed hard constraint (the display is captured at one
+   size by one encoder; changing it means tearing down and rebuilding the whole
+   pipeline mid-drag).
+
+**Decision: Option 2 — clamp and report.** Reasoning:
+
+- It **reuses machinery that already exists**. The host already writes geometry,
+  reads it back, and reports the *actual* rect (I-4); an app that enforces a
+  minimum size already produces "asked 1280×800, got 1280×653". A non-overlap
+  clamp is the same shape of result on the wire — a `windowMoved` smaller than the
+  `RequestResize` asked for — so **the client needs no new behaviour**: it already
+  must tolerate clamped resizes (I-4), and this is one more source of a clamp.
+- Option 1 violates the principle that **the client owns geometry** (I-4). The host
+  moving windows the user did not touch is the host asserting window-manager
+  authority it is not supposed to have. The one sanctioned exception in I-4 (the
+  host re-tiling to satisfy non-overlap) is a heavier hammer than this problem
+  needs, and it trades a legible outcome ("the window stopped growing") for an
+  illegible one ("three other windows jumped").
+- Option 3 breaks a stated invariant of this phase ("the capture stream size does
+  not change") and OQ-6 (we do not even know the largest display BetterDisplay
+  will make). Off the table for now.
+
+**How the clamp works.** A window resizes from its **top-left anchor** (matching
+AX `setSize`, which leaves `AXPosition` alone, and the tiler's shelf origin), so it
+only ever grows right and down — only neighbours to the right or below can block
+it. Growth stops one gutter short of the nearest blocking neighbour, preserving the
+popup-overhang budget, and at the display edge. This is a **pure function**
+(`ResizeClamp.clamp`, unit-tested with no Mac); the impure `ResizeService` calls it
+just before the AX write.
+
+**What it costs.** At N≥2, you cannot grow a window past a neighbour; the resize
+stops there and the client sees a smaller `windowMoved` than it asked for. To
+actually get more room the **client** (which owns geometry) must move or close a
+window — the host will not do it unbidden. There is also a residual edge case: the
+non-overlap clamp runs *before* the AX write, but macOS may then clamp the size
+*up* to an app minimum larger than the overlap-safe size (app-min > gutter gap). In
+that case the read-back rect can still overlap a neighbour. The host reports the
+actual rect regardless (I-4) and the client copes; a fully general fix is deferred
+because it does not arise at the real target.
+
+**At N=1 this whole question evaporates.** The actual primary use case is a single
+Conductor window; with no neighbours the clamp is just a display-edge clamp. This
+is deliberately not over-engineered: correct at N=1, sane at N=2–3.
+
 ---
 
 ## 3. The virtual display as a sprite sheet
@@ -343,6 +400,31 @@ back and **report the delta**. The delta is the entire point of that command.
 > does today. This is one more reason the client must key off actual geometry,
 > never requested.
 
+> **PHASE 4 FINDING (issue #6, 2026-07-15, Mac Studio M1 Max, macOS 26): the
+> resize roundtrip, throttle, and both clamps measured end to end** via `serve`
+> plus the `mockresize` mock client (no Windows client exists yet; #5's approach).
+>
+> 1. **Throttle holds ~10Hz.** A `mockresize` drag firing ~50 `RequestResize`/s
+>    (60Hz nominal, network + AX slows the loop) produced **~10 AX writes/s** —
+>    measured server-side: `92 request(s) in, 18 AX write(s) out` over 1.8s;
+>    `122 in, 24 out` over 2.4s. The leading-edge + trailing-flush throttle
+>    (`ResizeThrottle`, unit-tested) is what the client sees as ~10 `windowMoved`/s.
+> 2. **App-minimum clamp still bites and is reported as actual (I-4).** TextEdit's
+>    width floor is **115pt (230px)**; a drag toward `150x100px` read back as
+>    `230x100px` and the client got the clamped rect, not the request.
+> 3. **The non-overlap clamp (the 2.2 decision) works live.** A left window at VDS
+>    `x=0` grown toward `3200px` wide, with a neighbour at VDS `x=2800`, clamped to
+>    exactly `2600px` = `2800 − 200` (neighbour left edge minus one gutter). It grew
+>    to the boundary and stopped; non-overlap (I-5) held; the client got `2600`, not
+>    `3200`. Same wire shape as an app clamp, so no new client behaviour (2.2).
+> 4. **`End` is authoritative.** The final `windowMoved` is always the `End`
+>    read-back — exact when unclamped (`320x240 → 320x240`), the clamped actual
+>    otherwise. It is never throttled away.
+>
+> Deployment note surfaced while testing: **port 7000 collides with macOS's AirPlay
+> Receiver** (`ControlCenter` listens on `*:7000`), so a client connecting to the
+> Mac on 7000 can reach AirPlay instead of `serve`. Recorded in protocol.md §1.
+
 ### OQ-3: Is there a stable window identity across AX and SCK?
 
 SCK's `SCWindow` exposes a `CGWindowID`. AX exposes `AXUIElement`. Correlating
@@ -435,17 +517,27 @@ one? Unknown.
 > `.cghidEventTap` is used; the real cursor moves and SCK captures it (protocol.md
 > §8), so no cursor is synthesized.
 
-> **PHASE 5 FINDING (2026-07-15): control port 7000 collides with macOS AirPlay
-> Receiver.** With AirPlay Receiver enabled, **Control Center already listens on
-> `*:7000`** (seen via `lsof -i :7000` → `ControlCe`). Because the host binds with
-> `allowLocalEndpointReuse = true`, `serve`'s bind to `127.0.0.1:7000` *succeeds*
-> but AirPlay wins the inbound connections — a client connects, gets zero bytes,
-> and no resync ever arrives. It looks like a control-server bug and is not one.
-> Workarounds: run `serve --control-port <free>` (verification used 7010), or turn
-> off **System Settings → General → AirDrop & Handoff → AirPlay Receiver**. The
-> protocol default stays 7000 (it is the client contract, protocol.md §1); this is
-> a deployment note, not a protocol change. A future `serve` could preflight the
-> port and warn instead of binding silently.
+### Operational finding: the default control port 7000 collides with AirPlay Receiver
+
+> **M2 FINDING (2026-07-15, Mac Studio, macOS 26): TCP 7000 is taken by
+> AirPlay Receiver.** While verifying `serve`/`HostSession` end to end, the
+> control channel (default port **7000**) silently failed to accept a client: a
+> mock client's `connect()` *succeeded* but no framed bytes ever arrived, and the
+> host's control listener never reported a connection. Cause: macOS **AirPlay
+> Receiver** (Control Center, process `ControlCenter`) listens on `*:7000` by
+> default, so the host's listener could not own the port and the client's socket
+> landed on AirPlay instead. `lsof -nP -iTCP:7000 -sTCP:LISTEN` shows
+> `ControlCe … TCP *:7000 (LISTEN)`. The **video** channel (7001) was unaffected.
+> (The mechanism is that the host binds with `allowLocalEndpointReuse = true`, so
+> the bind *succeeds* rather than failing loudly with the port already owned.)
+>
+> This is not a Transom bug — it reproduces identically on the M1 (#5) code, and
+> was hit independently while verifying input (#7) — but it will bite anyone using
+> the defaults. Mitigations: disable AirPlay Receiver (System Settings › General ›
+> AirDrop & Handoff), or bind the control channel to a free port
+> (`serve --control-port 8770`, or the port field in the host app). The host app
+> surfaces this near its port fields. A future change may move the default off
+> 7000; left as-is for now to not silently change #5's CLI contract.
 
 ---
 
@@ -463,5 +555,7 @@ one? Unknown.
 | AGPL-3.0 | Genuinely client-server software, so the network clause has teeth. Keeps dual-licensing open |
 | Physical pixels everywhere on the wire | See `invariants.md` |
 | Live resize resamples, snaps on exit | A roundtrip is 30ms+, past a drag's frame budget (2.1) |
+| Resize collision clamps, does not re-tile | Reuses I-4 readback machinery; client already tolerates clamps; re-tiling moves windows the user did not touch, growing the display invalidates the capture stream (2.2) |
+| `Live` throttled ~10Hz, `End` authoritative | AX cannot keep up with `WM_SIZING`; the last live is coalesced and flushed, never dropped; `End` is the 1:1 snap (2.1, ResizeThrottle) |
 | Accept the DWM frame | Many-windows requirement forecloses exclusive fullscreen (5) |
 | Encoder pool deferred | Solves a problem we do not have at 2-3 windows (3.4) |

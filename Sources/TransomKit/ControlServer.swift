@@ -20,9 +20,11 @@ public actor ControlServer {
     /// `input`). Phase 5 wires this to AX + `CGEventPost` via `InputInjector`.
     public var onClientMessage: (@Sendable (ClientMessage) -> Void)?
 
-    /// Called when the active client disconnects, so input state (held modifiers)
-    /// can be reset before the next client connects (issue #7).
-    public var onClientDisconnect: (@Sendable () -> Void)?
+    /// Called with `true` when a client connects and `false` when it disconnects
+    /// or is dropped, so a status UI can show whether a client is attached and the
+    /// input layer can reset held modifiers between sessions (issue #7). Fired
+    /// from the actor; the closure must be thread-safe.
+    public var onConnectionChange: (@Sendable (Bool) -> Void)?
 
     public init(vdsSize: WireSize, registry: WindowRegistry) {
         self.vdsSize = vdsSize
@@ -33,8 +35,8 @@ public actor ControlServer {
         self.onClientMessage = handler
     }
 
-    public func setOnClientDisconnect(_ handler: @escaping @Sendable () -> Void) {
-        self.onClientDisconnect = handler
+    public func setOnConnectionChange(_ handler: @escaping @Sendable (Bool) -> Void) {
+        self.onConnectionChange = handler
     }
 
     /// Accept connections forever (one active at a time). Each `handle` runs until
@@ -57,12 +59,14 @@ public actor ControlServer {
                 "control: send failed, dropping client: \(error.localizedDescription, privacy: .public)"
             )
             self.active = nil
+            onConnectionChange?(false)
         }
     }
 
     private func handle(_ transport: TCPTransport) async {
         active = transport
         Log.general.notice("control: client connected")
+        onConnectionChange?(true)
 
         do {
             try await sendResync(to: transport)
@@ -70,6 +74,7 @@ public actor ControlServer {
             Log.general.notice(
                 "control: resync failed: \(error.localizedDescription, privacy: .public)")
             if active === transport { active = nil }
+            onConnectionChange?(false)
             await transport.close()
             return
         }
@@ -90,7 +95,7 @@ public actor ControlServer {
 
         Log.general.notice("control: client disconnected")
         if active === transport { active = nil }
-        onClientDisconnect?()
+        onConnectionChange?(false)
         await transport.close()
     }
 

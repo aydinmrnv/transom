@@ -168,7 +168,44 @@ public struct PlacementResult: Sendable {
     }
 }
 
+/// The outcome of a size-only AX write (issue #6 Phase 4): what we asked for and
+/// what AX gave back. A resize keeps the window's position, so the client's
+/// `RequestResize` carries only a size; we still read the position back because a
+/// resize can shift the origin (some apps anchor growth at the bottom-left, so the
+/// top-left moves), and the client needs the actual rect (I-4).
+public struct ResizeReadback: Sendable {
+    public let requestedSize: CGSize
+    public let actualPosition: CGPoint?
+    public let actualSize: CGSize?
+    public let setSizeError: AXError
+
+    public var sizeDelta: CGSize? {
+        guard let a = actualSize else { return nil }
+        return CGSize(
+            width: a.width - requestedSize.width,
+            height: a.height - requestedSize.height)
+    }
+
+    /// True only if AX accepted the write and read-back size equals the request.
+    public var exact: Bool { sizeDelta == CGSize.zero }
+}
+
 extension AXWindow {
+    /// Set `AXSize` only, then read position **and** size back, and report the
+    /// delta (I-4). The resize roundtrip's non-negotiable steps 3–5
+    /// (protocol.md §5): write, read back, report the *actual* size — clamped to an
+    /// app minimum or not (OQ-2), never the requested one.
+    public func resize(to size: CGSize) -> ResizeReadback {
+        let err = setSize(size)
+        let actualPos = self.position()
+        let actualSize = self.size()
+        return ResizeReadback(
+            requestedSize: size,
+            actualPosition: actualPos,
+            actualSize: actualSize,
+            setSizeError: err)
+    }
+
     /// Write position + size, then read both back, and report the delta.
     ///
     /// AX ordering matters: some apps clamp position against the *current* size,

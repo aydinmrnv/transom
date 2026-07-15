@@ -121,6 +121,54 @@ public actor TCPTransport: PacketTransport {
     public func close() {
         connection.cancel()
     }
+
+    /// Open an outbound TCP connection and return it once it is ready. Used by the
+    /// host-side mock client that drives the resize roundtrip in verification
+    /// (`mockresize`); the real client is a separate Rust codebase. `TCP_NODELAY`
+    /// matches the server so the measured round-trip isn't Nagle-inflated.
+    public static func connect(host: String, port: UInt16) async throws -> TCPTransport {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            throw TransportError.badPort(port)
+        }
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        let params = NWParameters(tls: nil, tcp: tcp)
+        let connection = NWConnection(
+            host: NWEndpoint.Host(host), port: nwPort, using: params)
+
+        let gate = ConnectGate()
+        try await withCheckedThrowingContinuation {
+            (cont: CheckedContinuation<Void, Error>) in
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    if gate.finish() { cont.resume() }
+                case .failed(let error):
+                    if gate.finish() { cont.resume(throwing: error) }
+                case .cancelled:
+                    if gate.finish() { cont.resume(throwing: CancellationError()) }
+                default:
+                    break
+                }
+            }
+            connection.start(queue: .global())
+        }
+        return TCPTransport(connection: connection)
+    }
+}
+
+/// One-shot latch so an `NWConnection` state handler resumes its continuation
+/// exactly once even though it fires for several states.
+private final class ConnectGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    func finish() -> Bool {
+        lock.withLock {
+            if done { return false }
+            done = true
+            return true
+        }
+    }
 }
 
 /// Accepts TCP connections on a private address and hands each one back as a
