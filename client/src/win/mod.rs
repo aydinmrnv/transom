@@ -89,7 +89,12 @@ pub fn run(args: &[String]) -> ExitCode {
 fn parse(args: &[String]) -> Result<Args, String> {
     let mut host: Option<String> = None;
     let mut control_port = DEFAULT_CONTROL_PORT;
-    let mut video_port: Option<u16> = None;
+    // Video is ON by default: `run` is the real window manager, and with video off
+    // every window shows only the placeholder checkerboard, which reads as "the app
+    // is broken." `--no-video` opts out for control-plane-only debugging. The video
+    // channel is best-effort (see `Session::connect`), so defaulting it on can't
+    // stop the client from managing windows when the host has no video.
+    let mut video_port: Option<u16> = Some(DEFAULT_VIDEO_PORT);
     let mut checkerboard = false;
 
     let mut i = 0;
@@ -105,6 +110,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--video" => {
                 video_port.get_or_insert(DEFAULT_VIDEO_PORT);
+            }
+            "--no-video" => {
+                video_port = None;
             }
             "--video-port" => {
                 i += 1;
@@ -144,11 +152,12 @@ fn print_usage() {
          \n\
          OPTIONS:\n    \
          --control-port <n>   control channel port (default 7000; 7010 dodges AirPlay)\n    \
-         --video              open the video channel on the default port (7001)\n    \
+         --video              open the video channel on the default port (7001) [on by default]\n    \
+         --no-video           control-plane only; every window shows the placeholder\n    \
          --video-port <n>     open the video channel on <n>\n    \
          --checkerboard       draw a 1px checkerboard test pattern in each window (M0 probe)\n\
          \n\
          EXAMPLE:\n    \
-         transom-client run 192.168.1.20 --control-port 7010 --video"
+         transom-client run 192.168.1.20 --control-port 7010"
     );
 }

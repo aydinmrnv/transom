@@ -91,20 +91,32 @@ impl Session {
             );
         }
 
-        // Video reader (optional).
+        // Video reader (optional, and best-effort). The control channel is the
+        // essential one — it is the window manager. If the video port isn't
+        // listening (e.g. the host was started without `--video`), we log and run
+        // control-only rather than failing the whole session, which would leave the
+        // client managing no windows at all.
         let video_stream = match video_port {
-            Some(port) => {
-                let stream = net::connect(host, port)?;
-                let read = stream.try_clone()?;
-                let tx = tx.clone();
-                threads.push(
-                    thread::Builder::new()
-                        .name("transom-video".into())
-                        .spawn(move || video_loop(read, tx))
-                        .expect("spawn video thread"),
-                );
-                Some(stream)
-            }
+            Some(port) => match net::connect(host, port) {
+                Ok(stream) => {
+                    let read = stream.try_clone()?;
+                    let tx = tx.clone();
+                    threads.push(
+                        thread::Builder::new()
+                            .name("transom-video".into())
+                            .spawn(move || video_loop(read, tx))
+                            .expect("spawn video thread"),
+                    );
+                    Some(stream)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "video channel connect to {host}:{port} failed: {e}; \
+                         continuing control-only (windows will show the placeholder)"
+                    );
+                    None
+                }
+            },
             None => None,
         };
 

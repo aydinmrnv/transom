@@ -65,6 +65,12 @@ pub struct App {
     cascade: u32,
     reconnect_at: Option<Instant>,
     now_epoch: Instant,
+    /// Video-health counters. If access units keep arriving but none ever decode
+    /// (the tell-tale of the in-box HEVC decoder rejecting the host's 4:4:4 10-bit
+    /// stream), we warn once instead of silently showing the placeholder forever.
+    video_in: u64,
+    video_decoded: u64,
+    warned_no_decode: bool,
 }
 
 impl App {
@@ -82,6 +88,9 @@ impl App {
             cascade: 0,
             reconnect_at: None,
             now_epoch: Instant::now(),
+            video_in: 0,
+            video_decoded: 0,
+            warned_no_decode: false,
         }
     }
 
@@ -204,10 +213,30 @@ impl App {
                 }
             }
             VideoEvent::Frame { data, .. } => {
+                self.video_in += 1;
                 if let (Some(dec), Some(src)) = (self.decoder.as_mut(), self.source.as_ref()) {
                     if let Some(bgra) = dec.decode(&data) {
                         src.update_bgra(&self.gpu, &bgra);
+                        self.video_decoded += 1;
                     }
+                }
+                // Access units are arriving but nothing has decoded. The usual cause
+                // is the in-box Media Foundation HEVC decoder refusing the host's
+                // 4:4:4 10-bit stream (it tops out at Main10 4:2:0). Say so once, so
+                // the placeholder checkerboard isn't a silent mystery.
+                if !self.warned_no_decode && self.video_decoded == 0 && self.video_in >= 120 {
+                    self.warned_no_decode = true;
+                    eprintln!(
+                        "video: received {} access units but decoded 0 frames — the window \
+                         will stay on the placeholder. The in-box HEVC decoder likely can't \
+                         handle the host's 4:4:4 10-bit stream (decoder init {}).",
+                        self.video_in,
+                        if self.decoder.is_some() {
+                            "succeeded, but every ProcessOutput failed"
+                        } else {
+                            "failed; see the earlier 'decoder init failed' line"
+                        }
+                    );
                 }
             }
         }
@@ -238,6 +267,22 @@ impl App {
         // Cascade the initial desktop position so windows don't stack exactly.
         let offset = (self.cascade % 8) * 48;
         self.cascade += 1;
+        let spawn_x = 40 + offset as i32;
+        let spawn_y = 40 + offset as i32;
+
+        // Fit the initial window to the client monitor. `source` is in the host's
+        // physical pixels (a Retina 2x window is ~3840x1954 — bigger than most
+        // client monitors); creating a borderless window that size leaves it
+        // off-screen and unmovable, which is exactly the "takes up the whole
+        // screen, can't touch it" failure. Clamp size and keep it fully on-screen.
+        let wa = super::dpi::work_area_at(spawn_x, spawn_y);
+        let max_w = (wa.right - wa.left).max(1) as u32;
+        let max_h = (wa.bottom - wa.top).max(1) as u32;
+        let win_w = source.w.clamp(1, max_w);
+        let win_h = source.h.clamp(1, max_h);
+        let clamped = win_w != source.w || win_h != source.h;
+        let x = spawn_x.min(wa.right - win_w as i32).max(wa.left);
+        let y = spawn_y.min(wa.bottom - win_h as i32).max(wa.top);
 
         let hwnd = unsafe {
             CreateWindowExW(
@@ -245,10 +290,10 @@ impl App {
                 CLASS_NAME,
                 w!("Transom"),
                 WS_OVERLAPPEDWINDOW,
-                40 + offset as i32,
-                40 + offset as i32,
-                source.w.max(1) as i32,
-                source.h.max(1) as i32,
+                x,
+                y,
+                win_w as i32,
+                win_h as i32,
                 None,
                 None,
                 HINSTANCE(instance.0),
@@ -268,20 +313,50 @@ impl App {
             );
         }
 
-        let proxy = Proxy::new(&self.gpu, hwnd, source, self.cfg.checkerboard)?;
+        let mut proxy = Proxy::new(&self.gpu, hwnd, source, self.cfg.checkerboard)?;
+        // The window's client rect is the fitted size, not the source size, so bring
+        // the swapchain to match up front (the creation-time WM_SIZE fires before the
+        // proxy is registered and is ignored). Until the host relayouts, the fitted
+        // window shows the whole source scaled to fit — the same transient resample
+        // accepted during a live drag; the roundtrip below snaps it back to 1:1.
+        proxy.resize_swapchain(&self.gpu, win_w, win_h);
         self.hwnd_to_id.insert(hwnd.0 as isize, id);
         self.proxies.insert(id, proxy);
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
 
-        // Always-visible diagnostic: the DPI/scale the window landed on, so a
+        // If we had to shrink the window to fit the monitor, ask the host to resize
+        // the Mac window to the fitted size. The host relayouts natively and reports
+        // back the ACTUAL geometry (I-4), which snaps the swapchain to an exact 1:1
+        // blit — the product's geometry-mirroring, applied at birth instead of only
+        // on a user drag.
+        if clamped {
+            self.send(&ClientMessage::RequestResize {
+                id,
+                size: Size {
+                    w: win_w,
+                    h: win_h,
+                },
+                phase: ResizePhase::End,
+            });
+        }
+
+        // Always-visible diagnostic: the source size, the fitted window size, and
+        // the DPI/scale the window landed on, so an oversize-source clamp or a
         // resampling regression (window on a scaled monitor) is easy to spot.
         let win_dpi = super::dpi::dpi_for_window(hwnd);
         println!(
-            "window {id}: {}x{} px proxy on {} DPI ({:.2}x scale)",
+            "window {id}: source {}x{} px -> {}x{} px proxy{} on {} DPI ({:.2}x scale)",
             source.w,
             source.h,
+            win_w,
+            win_h,
+            if clamped {
+                " [clamped to monitor, requested host resize]"
+            } else {
+                ""
+            },
             win_dpi,
             super::dpi::scale_for_dpi(win_dpi)
         );
