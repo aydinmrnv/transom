@@ -20,7 +20,7 @@ windows you can move, resize, and fullscreen. This repo is the Windows side.
 decides where windows are, how big they are, and which is focused; the host obeys
 and reports back what macOS actually did (invariants I-4).
 
-The other half lives in `transom-host` (Swift, macOS). You will never see it, and
+The other half lives in the `host/` half (Swift, macOS). You will never see it, and
 its agent will never see this repo. `docs/` is the only shared context, which is
 why it is written the way it is.
 

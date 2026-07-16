@@ -3,7 +3,7 @@
 **Status:** pre-alpha. Nothing works yet. This document describes the intended
 design and the reasoning behind it.
 
-**Canonical copy:** `transom-host/docs/architecture.md`. The copy in
+**Canonical copy:** `docs/architecture.md`. There is only one copy now; the repos were merged.
 `transom-client` is a mirror. If they disagree, the host copy wins.
 
 ---

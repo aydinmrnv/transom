@@ -16,7 +16,7 @@ Transom streams individual macOS windows to a Windows PC as independent native
 windows. This repo is the Mac side. It captures pixels and obeys geometry
 commands. **It is not the window manager. The client is.**
 
-The other half lives in `transom-client` (Rust, Windows). You will never see it,
+The other half lives in the `client/` half (Rust, Windows). You will never see it,
 and its agent will never see this repo. `docs/` is the only shared context, which
 is why it is written the way it is.
 
