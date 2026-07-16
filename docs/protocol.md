@@ -261,8 +261,26 @@ but the payload is not JSON. The first payload byte is a type tag:
   reconnect. An `hvc1` stream carries no inline parameter sets, so the decoder
   needs the `hvcC` configuration record before it can decode anything.
 - **`frame`** carries `seq` (monotonic), `ptsMicros` (host clock, microseconds),
-  a keyframe flag, and the raw HEVC access-unit bytes. The codec is HEVC **4:4:4
-  10-bit** (architecture.md OQ-4).
+  a keyframe flag, and the raw HEVC access-unit bytes. The codec is **HEVC**; the
+  **chroma is selectable on the host** (`serve --chroma`, §7):
+  - **`420` — HEVC Main 4:2:0 8-bit (the default).** This is what the Windows
+    client's in-box Media Foundation H.265 decoder (`CLSID_CMSH265DecoderMFT`) can
+    actually decode — Main/Main10 4:2:0 → NV12 — so real pixels appear with no
+    extra decoder. Chroma subsampling softens *colored* text edges a little (luma,
+    and so black-on-white text, stays full-resolution).
+  - **`444` — HEVC 4:4:4 10-bit.** The crisp-text quality target (architecture.md
+    OQ-4). The client's in-box Media Foundation decoder tops out at Main10 4:2:0
+    and does not display this stream today (it stays on the placeholder — the
+    known blocker this default routes around), so it is **opt-in, not the
+    default**, until a 4:4:4-capable client decode path exists and is verified on a
+    real Windows box (I-7). Note: a reference decoder reads the host's current
+    `444` output as `Main 10 / yuv420p10le`, so whether it is truly 4:4:4 or 10-bit
+    4:2:0 is itself unverified — a separate finding from making streaming *work*.
+
+  The client does not need to be told which chroma is in use: both 4:2:0 modes
+  decode to NV12 on the same path, and if a 4:4:4 stream is sent to an in-box-only
+  client it simply decodes zero frames (the client warns after ~120 undecoded
+  access units rather than failing silently).
 
 Rect metadata lives on the **control** channel, not in the frame header; the
 client correlates by timestamp.
@@ -275,10 +293,24 @@ best-effort may be fine and timestamp correlation can be dropped.
 
 ## 7. Codec
 
-- **HEVC 4:4:4**, pending OQ-4 (does the M1 Max encode 4:4:4 in hardware?).
-- 4:2:0 is a fallback that **fails the product's purpose** on text. If 4:4:4 is
-  not available in hardware, that is a finding to escalate, not to work around.
-- No scaling in the encoder config (I-1).
+- **HEVC.** The host hardware-encodes it (OQ-4 confirmed the M1 Max encodes 4:4:4
+  in hardware). No scaling in the encoder config (I-1).
+- **Chroma is selectable (`serve --chroma 420|444`), and the default is `420`.**
+  This is a pragmatic split between "decodes today" and "the quality target":
+  - **4:2:0 8-bit (default)** exists because the client's *in-box* HEVC decoder
+    cannot decode anything finer. Without it the client shows only its placeholder
+    checkerboard — no picture at all. A slightly-soft-on-colored-text picture that
+    the stock decoder can display beats a crisp one it cannot. Luma is not
+    subsampled, so black-on-white text stays sharp; the cost is at *colored* text
+    edges (syntax highlighting).
+  - **4:4:4 10-bit** remains the north star for crisp colored text. It is one flag
+    away and fully implemented on the host; it is not the default only because the
+    *client* side of it (a 4:4:4-capable decoder — vendor MFT or software) does not
+    exist yet. When it does, flip the default back.
+- Historically this section said "4:2:0 is a fallback that fails the product's
+  purpose." That is still the aspiration for chroma quality — but a codec the far
+  end can't decode fails the product *more* completely (a blank window), so the
+  default optimises for a visible picture first.
 
 ---
 

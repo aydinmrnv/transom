@@ -26,6 +26,14 @@ struct ContentView: View {
     @AppStorage("host.fps") private var fps = 60
     @AppStorage("host.gutter") private var gutter = Tiler.defaultGutter
     @AppStorage("host.video") private var videoEnabled = true
+    /// Encoder chroma. Default 4:2:0 8-bit: the Windows client's in-box decoder can
+    /// decode it, so pixels actually appear. 4:4:4 10-bit is crisper but needs a
+    /// 4:4:4-capable client decoder (protocol.md §6-7).
+    @AppStorage("host.chroma") private var chroma = HEVCEncoder.Format.hevc420_8bit.rawValue
+
+    private var videoFormat: HEVCEncoder.Format {
+        HEVCEncoder.Format(rawValue: chroma) ?? .hevc420_8bit
+    }
 
     private var hostIsPrivate: Bool { PrivateAddress.isPrivateIPv4(bindAddress) }
     private var permissionsReady: Bool { accessibility && (!videoEnabled || screenRecording) }
@@ -232,6 +240,15 @@ struct ContentView: View {
     private var tuningRow: some View {
         HStack(spacing: 12) {
             Toggle("Stream video", isOn: $videoEnabled).disabled(host.running)
+            if videoEnabled {
+                Picker("chroma", selection: $chroma) {
+                    Text("4:2:0 8-bit (decodable)").tag(HEVCEncoder.Format.hevc420_8bit.rawValue)
+                    Text("4:4:4 10-bit (crisp)").tag(HEVCEncoder.Format.hevc444_10bit.rawValue)
+                }
+                .labelsHidden()
+                .fixedSize()
+                .disabled(host.running)
+            }
             Divider().frame(height: 16)
             Text("fps").foregroundStyle(.secondary).font(.caption)
             intField($fps, width: 48)
@@ -283,19 +300,33 @@ struct ContentView: View {
         .background(Color.secondary.opacity(0.08)).cornerRadius(6)
     }
 
-    /// The OQ-4 headline: is video actually on the 4:4:4 10-bit hardware path, or
-    /// did something fall back? A silent drop to 4:2:0 fails the product on text,
-    /// so it must be visible without reading logs.
+    /// The encoder headline. Two independent things matter, and conflating them is
+    /// what the old "FALLBACK — NOT 4:4:4" banner got wrong:
+    ///   1. **Hardware path** — a silent fall to *software* can't hold 60fps. That
+    ///      is the real failure, and it turns the banner red.
+    ///   2. **Chroma choice** — 4:2:0 (in-box decodable) vs 4:4:4 (crisp text) is a
+    ///      deliberate selection, shown as info, not an alarm.
     @ViewBuilder
     private var encoderModeBanner: some View {
         if host.status.videoEnabled {
-            let ok = host.status.encoderIs444Hardware
+            let hwOK = host.status.encoderHardwareOK
+            let format = host.status.videoFormat
+            let decodeNote =
+                format.inBoxDecodable
+                ? "the Windows in-box decoder can decode this"
+                : "needs a 4:4:4-capable client decoder to display"
             HStack(spacing: 10) {
-                Image(systemName: ok ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                Image(systemName: hwOK ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                     .font(.title2)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(ok ? "HEVC 4:4:4 10-bit · hardware" : "FALLBACK — NOT 4:4:4 hardware")
-                        .font(.title3).bold()
+                    Text(
+                        hwOK
+                            ? "HEVC \(format.chromaTag) · hardware"
+                            : "SOFTWARE FALLBACK — HEVC \(format.chromaTag)"
+                    )
+                    .font(.title3).bold()
+                    Text(decodeNote)
+                        .font(.caption).foregroundStyle(.secondary)
                     Text(
                         "encoder read-back: hardware=\(host.status.usingHardware ? "yes" : "no")  ·  \(host.status.encoderFormatSummary)"
                     )
@@ -306,9 +337,10 @@ struct ContentView: View {
                 Spacer()
             }
             .padding(12)
-            .background((ok ? Color.green : Color.red).opacity(0.15))
+            .background((hwOK ? Color.green : Color.red).opacity(0.15))
             .overlay(
-                RoundedRectangle(cornerRadius: 8).stroke(ok ? Color.green : Color.red, lineWidth: 1)
+                RoundedRectangle(cornerRadius: 8).stroke(
+                    hwOK ? Color.green : Color.red, lineWidth: 1)
             )
             .cornerRadius(8)
         } else {
@@ -440,7 +472,8 @@ struct ContentView: View {
         let config = HostConfig(
             target: app, display: disp, host: bindAddress,
             controlPort: UInt16(clamping: controlPort), videoPort: UInt16(clamping: videoPort),
-            gutter: gutter, tile: true, video: videoEnabled, bitrateMbps: bitrateMbps, fps: fps)
+            gutter: gutter, tile: true, video: videoEnabled, bitrateMbps: bitrateMbps, fps: fps,
+            videoFormat: videoFormat)
         host.start(config: config)
     }
 

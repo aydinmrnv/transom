@@ -6,18 +6,29 @@ import os
 
 /// The HEVC encoder for the capture pipeline (issue #3 Phase 2).
 ///
-/// Per the Phase 0 finding (OQ-4), the M1 Max hardware-encodes HEVC **4:4:4
-/// 10-bit** through the `v410` source path, with the profile auto-derived from
-/// the source pixel format (there is no public `Main 4:4:4 10` profile constant).
+/// The chroma/bit-depth is **selectable** (`Format`), because the two ends of the
+/// system disagree about what is decodable vs. what looks best (see
+/// `docs/protocol.md` §6-7):
+///
+/// * **`.hevc420_8bit`** (the default) is HEVC Main 4:2:0 8-bit. It is what the
+///   Windows client's in-box Media Foundation H.265 decoder can actually decode
+///   (Main/Main10 4:2:0 → NV12), so real pixels appear on the client with no extra
+///   decoder. Chroma subsampling softens colored text a little; a picture that
+///   shows beats a crisp one that cannot decode.
+/// * **`.hevc444_10bit`** is HEVC 4:4:4 10-bit through the `v410` source path
+///   (OQ-4), the crisp-text quality target — but the in-box Windows decoder cannot
+///   decode 4:4:4, so it needs a 4:4:4-capable client decoder before it shows
+///   anything.
+///
 /// SCK hands us `BGRA`, so this type owns two VideoToolbox sessions:
 ///
 /// 1. a `VTPixelTransferSession` that converts each captured `BGRA` IOSurface into
-///    a `v410` IOSurface (a color-space conversion on the media engine — **not** a
-///    spatial resample, so I-1 holds — and never a round-trip through `CGImage` or
-///    `Data`), and
-/// 2. a `VTCompressionSession` that encodes those `v410` frames as HEVC 4:4:4
-///    10-bit, hardware **required** (we proved it works, so a fall to software is a
-///    startup error, not a silent quality cliff).
+///    the format's source IOSurface (a color-space conversion on the media
+///    engine — **not** a spatial resample, so I-1 holds — and never a round-trip
+///    through `CGImage` or `Data`), and
+/// 2. a `VTCompressionSession` that encodes those frames, hardware **required** (we
+///    proved it works, so a fall to software is a startup error, not a silent
+///    quality cliff).
 ///
 /// ### Concurrency
 /// This class holds VideoToolbox session references, which are not `Sendable`, so
@@ -40,22 +51,80 @@ public final class HEVCEncoder: @unchecked Sendable {
         public let data: Data
     }
 
+    /// The chroma / bit-depth the stream is encoded at. The default is the mode
+    /// the Windows in-box decoder can decode; 4:4:4 is the quality target. See the
+    /// type doc above and `docs/protocol.md` §6-7.
+    public enum Format: String, Sendable, CaseIterable {
+        /// HEVC Main 4:2:0 8-bit — decodable by the client's in-box MF decoder.
+        case hevc420_8bit
+        /// HEVC 4:4:4 10-bit (v410) — crisp text, needs a 4:4:4-capable decoder.
+        case hevc444_10bit
+
+        /// The CoreVideo pixel format captured `BGRA` is converted into before the
+        /// compression session. 4:2:0 uses **video-range** so the client's
+        /// limited-range NV12→BGRA math lines up; 4:4:4 uses `v410`.
+        var sourcePixelFormat: OSType {
+            switch self {
+            case .hevc420_8bit: return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            case .hevc444_10bit: return kCVPixelFormatType_444YpCbCr10
+            }
+        }
+
+        /// The HEVC profile to pin, or `nil` to let VideoToolbox derive it from the
+        /// source pixel format. 4:4:4 has no public profile constant (OQ-4), so it
+        /// must be derived; 4:2:0 pins Main so the client sees a plain Main stream.
+        var profileLevel: CFString? {
+            switch self {
+            case .hevc420_8bit: return kVTProfileLevel_HEVC_Main_AutoLevel
+            case .hevc444_10bit: return nil
+            }
+        }
+
+        /// Short chroma tag for logs / status (e.g. "4:2:0 8-bit").
+        public var chromaTag: String {
+            switch self {
+            case .hevc420_8bit: return "4:2:0 8-bit"
+            case .hevc444_10bit: return "4:4:4 10-bit"
+            }
+        }
+
+        /// Whether the Windows in-box HEVC decoder can decode this stream as-is.
+        public var inBoxDecodable: Bool {
+            switch self {
+            case .hevc420_8bit: return true
+            case .hevc444_10bit: return false
+            }
+        }
+
+        /// Parse a short CLI token ("420" / "444"), else nil.
+        public init?(cliToken: String) {
+            switch cliToken.lowercased() {
+            case "420", "4:2:0", "420_8bit": self = .hevc420_8bit
+            case "444", "4:4:4", "444_10bit": self = .hevc444_10bit
+            default: return nil
+            }
+        }
+    }
+
     public struct Config: Sendable {
         public var width: Int
         public var height: Int
         public var fps: Int
         public var bitrateBitsPerSecond: Int
         public var maxKeyFrameInterval: Int
+        public var format: Format
 
         public init(
             width: Int, height: Int, fps: Int = 60,
-            bitrateBitsPerSecond: Int = 40_000_000, maxKeyFrameInterval: Int = 120
+            bitrateBitsPerSecond: Int = 40_000_000, maxKeyFrameInterval: Int = 120,
+            format: Format = .hevc420_8bit
         ) {
             self.width = width
             self.height = height
             self.fps = fps
             self.bitrateBitsPerSecond = bitrateBitsPerSecond
             self.maxKeyFrameInterval = maxKeyFrameInterval
+            self.format = format
         }
     }
 
@@ -122,10 +191,12 @@ public final class HEVCEncoder: @unchecked Sendable {
     public init(config: Config) throws {
         self.config = config
 
-        // 1. A pool of v410 (4:4:4 10-bit) IOSurface buffers to convert into.
+        // 1. A pool of source (e.g. v410 for 4:4:4, or NV12 for 4:2:0) IOSurface
+        //    buffers to convert into, in the configured format's pixel format.
+        let sourcePixelFormat = config.format.sourcePixelFormat
         let poolAttrs: [CFString: Any] = [kCVPixelBufferPoolMinimumBufferCountKey: 3]
         let bufferAttrs: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_444YpCbCr10,
+            kCVPixelBufferPixelFormatTypeKey: sourcePixelFormat,
             kCVPixelBufferWidthKey: config.width,
             kCVPixelBufferHeightKey: config.height,
             kCVPixelBufferIOSurfacePropertiesKey: [CFString: Any]() as CFDictionary,
@@ -164,11 +235,12 @@ public final class HEVCEncoder: @unchecked Sendable {
             kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true,
             kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true,
         ]
-        // Hint the source format so VideoToolbox derives the 4:4:4 profile. We do
-        // NOT set kVTCompressionPropertyKey_ProfileLevel: there is no public 4:4:4
-        // constant, and setting Main42210 would silently force 4:2:2 (Phase 0).
+        // Hint the source format so VideoToolbox derives the right profile. For
+        // 4:4:4 we deliberately do NOT set kVTCompressionPropertyKey_ProfileLevel:
+        // there is no public 4:4:4 constant, and setting Main42210 would silently
+        // force 4:2:2 (Phase 0). For 4:2:0 we pin Main below (see `configure`).
         let sourceAttrs: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_444YpCbCr10,
+            kCVPixelBufferPixelFormatTypeKey: sourcePixelFormat,
             kCVPixelBufferIOSurfacePropertiesKey: [CFString: Any]() as CFDictionary,
             kCVPixelBufferWidthKey: config.width,
             kCVPixelBufferHeightKey: config.height,
@@ -200,6 +272,13 @@ public final class HEVCEncoder: @unchecked Sendable {
     }
 
     private static func configure(session: VTCompressionSession, config: Config) throws {
+        // Pin the profile where the format has a public constant (4:2:0 → Main), so
+        // the client receives a plainly-decodable Main stream. 4:4:4 has none, so
+        // it is left for VideoToolbox to derive from the source pixel format.
+        if let profile = config.format.profileLevel {
+            VTSessionSetProperty(
+                session, key: kVTCompressionPropertyKey_ProfileLevel, value: profile)
+        }
         VTSessionSetProperty(
             session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(
@@ -289,7 +368,7 @@ public final class HEVCEncoder: @unchecked Sendable {
 
         if let format = CMSampleBufferGetFormatDescription(sampleBuffer) {
             if outputFormatSummary == "unknown" {
-                outputFormatSummary = Self.describe(format)
+                outputFormatSummary = Self.describe(format, chroma: config.format.chromaTag)
             }
             if parameterSetsHVCC == nil {
                 parameterSetsHVCC = Self.extractHVCC(from: format)
@@ -335,16 +414,18 @@ public final class HEVCEncoder: @unchecked Sendable {
     }
 
     /// A short human summary of an encoded format description's codec and chroma.
-    private static func describe(_ format: CMFormatDescription) -> String {
+    /// `chroma` is the configured format's tag (the compressed stream does not
+    /// re-report its chroma cheaply, so it is passed in from `Config.format`).
+    private static func describe(_ format: CMFormatDescription, chroma: String) -> String {
         let codec = fourCC(CMFormatDescriptionGetMediaSubType(format))
         let dims = CMVideoFormatDescriptionGetDimensions(format)
-        var chroma = "?"
+        var chromaLoc = "?"
         if let ext = CMFormatDescriptionGetExtension(
             format, extensionKey: kCMFormatDescriptionExtension_ChromaLocationTopField) as? String
         {
-            chroma = ext
+            chromaLoc = ext
         }
-        // The subtype tells codec; chroma is inferred from the v410 pipeline.
-        return "\(codec) \(dims.width)x\(dims.height) 4:4:4 10-bit (chromaLoc=\(chroma))"
+        // The subtype tells codec; chroma is the configured source pipeline's.
+        return "\(codec) \(dims.width)x\(dims.height) \(chroma) (chromaLoc=\(chromaLoc))"
     }
 }

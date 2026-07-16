@@ -16,6 +16,10 @@ public struct HostConfig: Sendable {
     public var video: Bool
     public var bitrateMbps: Int
     public var fps: Int
+    /// Chroma / bit-depth the video is encoded at. Defaults to the mode the
+    /// Windows in-box decoder can decode (4:2:0 8-bit); `.hevc444_10bit` is the
+    /// crisp-text target for a 4:4:4-capable client (protocol.md §6-7).
+    public var videoFormat: HEVCEncoder.Format
     /// Map Windows modifiers namesake (Ctrl→Control) instead of the default swap
     /// (Ctrl→Command). The Cmd-vs-Ctrl product decision for input (issue #7).
     public var namesakeModifiers: Bool
@@ -33,6 +37,7 @@ public struct HostConfig: Sendable {
         video: Bool = true,
         bitrateMbps: Int = 40,
         fps: Int = 60,
+        videoFormat: HEVCEncoder.Format = .hevc420_8bit,
         namesakeModifiers: Bool = false,
         logInput: Bool = false
     ) {
@@ -46,6 +51,7 @@ public struct HostConfig: Sendable {
         self.video = video
         self.bitrateMbps = bitrateMbps
         self.fps = fps
+        self.videoFormat = videoFormat
         self.namesakeModifiers = namesakeModifiers
         self.logInput = logInput
     }
@@ -75,8 +81,11 @@ public struct HostStatus: Sendable {
 
     /// VideoToolbox's own read-back of whether the encoder is on the hardware path.
     public var usingHardware = false
-    /// The codec + chroma the encoder reports it is producing (e.g. "hvc1 … 4:4:4
-    /// 10-bit"), captured on the first encoded frame.
+    /// The chroma / bit-depth the encoder was configured to produce. Known before
+    /// the first frame, so the UI/CLI can show the mode immediately.
+    public var videoFormat: HEVCEncoder.Format = .hevc420_8bit
+    /// The codec + chroma the encoder reports it is producing (e.g. "hvc1 … 4:2:0
+    /// 8-bit"), captured on the first encoded frame.
     public var encoderFormatSummary = "—"
 
     /// The startup tile layout with post-clamp actual rects and deltas (I-4/OQ-2).
@@ -88,12 +97,16 @@ public struct HostStatus: Sendable {
 
     public init() {}
 
-    /// The load-bearing check for OQ-4: are we actually on the 4:4:4 10-bit
-    /// hardware path, or has something fallen back? `true` only when the encoder
-    /// reads back as hardware *and* reports 4:4:4 chroma. The app shows this
-    /// prominently, because a silent fall to 4:2:0 fails the product on text.
+    /// Is the encoder healthy — i.e. actually on the hardware path for whatever
+    /// chroma was selected? A silent fall to software is the real failure (it can't
+    /// keep 60fps); running 4:2:0 by choice is not. The UI shows this as OK/degraded.
+    public var encoderHardwareOK: Bool { usingHardware }
+
+    /// Are we specifically on the 4:4:4 10-bit hardware path (the crisp-text
+    /// target)? `true` only when hardware *and* 4:4:4 was selected. Distinct from
+    /// `encoderHardwareOK`: 4:2:0 is decodable-by-default, not a fallback.
     public var encoderIs444Hardware: Bool {
-        usingHardware && encoderFormatSummary.contains("4:4:4")
+        usingHardware && videoFormat == .hevc444_10bit
     }
 }
 
@@ -103,9 +116,10 @@ public struct HostStatus: Sendable {
 ///
 /// It tiles the app's windows once at startup (I-5), watches them via AX and
 /// streams lifecycle + geometry on the control channel, and — with `video` —
-/// captures the display and HEVC-encodes it 4:4:4 10-bit in hardware on a second
-/// channel. Capture and AX never stop while a client comes and goes; a reconnect
-/// resyncs from the registry (see `ControlServer`).
+/// captures the display and HEVC-encodes it in hardware (chroma per
+/// `config.videoFormat`, default 4:2:0 8-bit so the client's in-box decoder shows
+/// pixels) on a second channel. Capture and AX never stop while a client comes and
+/// goes; a reconnect resyncs from the registry (see `ControlServer`).
 ///
 /// ### Concurrency
 /// `@unchecked Sendable` on the same confinement invariant the rest of this
@@ -169,6 +183,7 @@ public final class HostSession: @unchecked Sendable {
             s.videoClientConnected = videoConnected
             s.totalFramesEncoded = totalFrames
             s.usingHardware = usingHardware
+            s.videoFormat = config.videoFormat
             s.encoderFormatSummary = encoderFormatSummary
             s.tilePlacements = tilePlacements
             s.tileError = tileError
@@ -312,7 +327,7 @@ public final class HostSession: @unchecked Sendable {
             config: HEVCEncoder.Config(
                 width: disp.pixelWidth, height: disp.pixelHeight, fps: config.fps,
                 bitrateBitsPerSecond: config.bitrateMbps * 1_000_000,
-                maxKeyFrameInterval: config.fps * 2))
+                maxKeyFrameInterval: config.fps * 2, format: config.videoFormat))
         enc.extractFrameData = true
         self.encoder = enc
         statsLock.withLock { usingHardware = enc.usingHardware }

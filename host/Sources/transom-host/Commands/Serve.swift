@@ -50,6 +50,13 @@ struct Serve: AsyncParsableCommand {
     @Option(name: .long, help: "Video target frame rate.")
     var fps: Int = 60
 
+    @Option(
+        name: .long,
+        help:
+            "Video chroma: 420 (HEVC Main 4:2:0 8-bit, the Windows in-box decoder can decode it — default) or 444 (HEVC 4:4:4 10-bit, crisp text but needs a 4:4:4-capable client decoder)."
+    )
+    var chroma: String = "420"
+
     @Option(name: .long, help: "Auto-stop after N seconds (default: run until Ctrl-C).")
     var seconds: Double?
 
@@ -76,11 +83,15 @@ struct Serve: AsyncParsableCommand {
         guard let disp = TransomKit.Displays.byID(display) else {
             throw ProbeError("no active display with id \(display). See `displays`.")
         }
+        guard let videoFormat = HEVCEncoder.Format(cliToken: chroma) else {
+            throw ProbeError("unknown --chroma \"\(chroma)\"; expected 420 or 444.")
+        }
 
         let config = HostConfig(
             target: target, display: disp, host: host, controlPort: controlPort,
             videoPort: videoPort, gutter: gutter, tile: tile, video: video,
-            bitrateMbps: bitrate, fps: fps, namesakeModifiers: namesakeModifiers, logInput: logInput
+            bitrateMbps: bitrate, fps: fps, videoFormat: videoFormat,
+            namesakeModifiers: namesakeModifiers, logInput: logInput
         )
         let session = HostSession(config: config)
 
@@ -104,7 +115,12 @@ struct Serve: AsyncParsableCommand {
             for p in started.tilePlacements { printPlacement(p) }
         }
         if video {
-            print("  video: hardware=\(started.usingHardware), streaming HEVC 4:4:4 10-bit")
+            let decodeNote =
+                videoFormat.inBoxDecodable
+                ? "in-box decodable" : "needs a 4:4:4-capable client decoder"
+            print(
+                "  video: hardware=\(started.usingHardware), streaming HEVC \(videoFormat.chromaTag) (\(decodeNote))"
+            )
         }
         print(
             "  ready. waiting for a client to connect\(seconds.map { " (auto-stop in \($0)s)" } ?? " (Ctrl-C to stop)")."
@@ -131,7 +147,11 @@ struct Serve: AsyncParsableCommand {
                     + "windows=\(s.liveWindowCount)")
             return
         }
-        let mode = s.encoderIs444Hardware ? "4:4:4 10-bit HW" : "FALLBACK (not 4:4:4 HW)"
+        // Chroma is a choice, not a fallback; the real failure is losing the
+        // hardware path, so that is what gets flagged.
+        let mode =
+            s.encoderHardwareOK
+            ? "\(s.videoFormat.chromaTag) HW" : "SOFTWARE FALLBACK (\(s.videoFormat.chromaTag))"
         print(
             String(
                 format:
