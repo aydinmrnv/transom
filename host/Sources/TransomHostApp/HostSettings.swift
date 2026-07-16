@@ -20,6 +20,10 @@ enum HostDefaults {
     static let logInput = "host.logInput"
     static let previewOutlines = "host.previewOutlines"
     static let previewLabels = "host.previewLabels"
+
+    /// Valid TCP port range. Start is gated on both ports falling inside it so a
+    /// value never gets silently clamped into a different endpoint at serve time.
+    static let portRange = 1...65535
 }
 
 /// The standard macOS Settings window (Cmd-,). Every control binds to a
@@ -51,6 +55,7 @@ private struct ConnectionSettings: View {
     @AppStorage(HostDefaults.videoPort) private var videoPort = 7001
 
     private var isPrivate: Bool { PrivateAddress.isPrivateIPv4(bindAddress) }
+    private func portValid(_ p: Int) -> Bool { HostDefaults.portRange.contains(p) }
 
     var body: some View {
         Form {
@@ -58,6 +63,14 @@ private struct ConnectionSettings: View {
                 TextField("Address", text: $bindAddress)
                 TextField("Control port", value: $controlPort, format: .number.grouping(.never))
                 TextField("Video port", value: $videoPort, format: .number.grouping(.never))
+                if !portValid(controlPort) || !portValid(videoPort) {
+                    Label(
+                        "Ports must be between 1 and 65535 — Start is refused until they are.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Section {
                 Label {

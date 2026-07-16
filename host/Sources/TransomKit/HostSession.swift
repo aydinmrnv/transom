@@ -110,12 +110,12 @@ public struct HostStatus: Sendable {
     }
 }
 
-/// A cheap, poll-on-demand snapshot for the host app's live stream preview: a
-/// downscaled copy of the frame currently being encoded (nil when video is off or
-/// before the first frame) plus every window the AX watcher is tracking, with its
-/// **VDS-pixel** rect and id (protocol.md §3). The image is preview-sized, not the
-/// stream's native pixels (I-1); this is a viewport onto the session, never a fork
-/// of the capture path.
+/// A cheap, poll-on-demand snapshot for the host app's live stream preview: the
+/// frame currently being encoded (nil when video is off or before the first frame)
+/// plus every window the AX watcher is tracking, with its **VDS-pixel** rect and id
+/// (protocol.md §3). The image is the native-pixel capture (never resampled, I-1);
+/// the preview panel scales it down for display. This is a viewport onto the
+/// session, never a fork of the capture path.
 ///
 /// Not `Sendable` on purpose — it carries a `CGImage` and is meant to be read
 /// synchronously on the main thread (the UI's timer), never sent across a task.
@@ -224,15 +224,16 @@ public final class HostSession: @unchecked Sendable {
         return s
     }
 
-    /// A downscaled preview frame + the live window rects, for the host app's
+    /// The latest capture frame + the live window rects, for the host app's
     /// stream-preview panel. Cheap enough to poll ~10 times/sec; reads the same
     /// live capture and registry the stream uses, so the panel shows exactly what
-    /// is going out. `image` is nil when video is off or no frame has arrived yet;
-    /// `windows` is still populated (control-only sessions have a window layout but
-    /// no pixels). Call on the main thread — it is not `Sendable`.
-    public func preview(maxPixelSize: Int = 1280) -> HostPreview {
+    /// is going out. The frame is native pixels (not resampled, I-1) — the panel
+    /// scales it for display. `image` is nil when video is off or no frame has
+    /// arrived yet; `windows` is still populated (control-only sessions have a
+    /// window layout but no pixels). Call on the main thread — it is not `Sendable`.
+    public func preview() -> HostPreview {
         HostPreview(
-            image: capture?.previewImage(maxPixelSize: maxPixelSize),
+            image: capture?.latestImage(),
             windows: registry?.snapshot() ?? [],
             displayPixelWidth: config.display.pixelWidth,
             displayPixelHeight: config.display.pixelHeight)

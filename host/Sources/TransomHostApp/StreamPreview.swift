@@ -61,9 +61,10 @@ struct StreamPreview: View {
                 .contentShape(Rectangle())
                 .onTapGesture { selectedID = nil }
 
-            if showOutlines {
-                overlays
-            }
+            // Always present, so a window stays clickable and the selected one
+            // stays highlighted even with outlines toggled off — that toggle hides
+            // only the *unselected* outlines, not selection itself.
+            overlays
         }
         .aspectRatio(aspect, contentMode: .fit)
         .frame(maxWidth: .infinity, maxHeight: 460)
@@ -97,7 +98,8 @@ struct StreamPreview: View {
                     width: win.rect.width * sx, height: win.rect.height * sy)
                 WindowOutline(
                     window: win, frame: f,
-                    selected: win.id == selectedID, showLabel: showLabels
+                    selected: win.id == selectedID,
+                    outlineVisible: showOutlines, showLabel: showLabels
                 )
                 .onTapGesture {
                     selectedID = (selectedID == win.id) ? nil : win.id
@@ -108,36 +110,46 @@ struct StreamPreview: View {
 }
 
 /// A single window's outline within the preview. Unselected windows get a thin
-/// neutral stroke; the selected one gets a bold accent stroke, a translucent fill,
-/// and (optionally) a title chip — that is the "highlight the selected window".
+/// neutral stroke (only when `outlineVisible`); the selected one always gets a
+/// bold accent stroke, a translucent fill, and (optionally) a title chip — that is
+/// the "highlight the selected window". The hit region is always live, so a window
+/// stays clickable regardless of outline visibility.
 private struct WindowOutline: View {
     let window: PreviewWindow
     let frame: CGRect
     let selected: Bool
+    let outlineVisible: Bool
     let showLabel: Bool
 
     var body: some View {
         let color: Color = selected ? .accentColor : .white
+        // Draw the outline for the selected window always; for the rest only when
+        // outlines are enabled. Either way the shape below stays tappable.
+        let drawn = selected || outlineVisible
         ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 3)
-                .fill(color.opacity(selected ? 0.18 : 0.0))
-            RoundedRectangle(cornerRadius: 3)
-                .stroke(
-                    color.opacity(selected ? 1.0 : 0.55),
-                    lineWidth: selected ? 3 : 1.5)
+            if drawn {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(color.opacity(selected ? 0.18 : 0.0))
+                RoundedRectangle(cornerRadius: 3)
+                    .stroke(
+                        color.opacity(selected ? 1.0 : 0.55),
+                        lineWidth: selected ? 3 : 1.5)
 
-            if showLabel && (selected || frame.width > 54) {
-                Text(labelText)
-                    .font(.system(size: 10, weight: selected ? .bold : .regular, design: .rounded))
-                    .lineLimit(1)
-                    .padding(.horizontal, 4).padding(.vertical, 1)
-                    .background(
-                        color.opacity(selected ? 0.9 : 0.55),
-                        in: RoundedRectangle(cornerRadius: 3)
-                    )
-                    .foregroundStyle(selected ? Color.black : Color.white)
-                    .padding(3)
-                    .frame(maxWidth: frame.width, alignment: .leading)
+                if showLabel && (selected || frame.width > 54) {
+                    Text(labelText)
+                        .font(
+                            .system(size: 10, weight: selected ? .bold : .regular, design: .rounded)
+                        )
+                        .lineLimit(1)
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(
+                            color.opacity(selected ? 0.9 : 0.55),
+                            in: RoundedRectangle(cornerRadius: 3)
+                        )
+                        .foregroundStyle(selected ? Color.black : Color.white)
+                        .padding(3)
+                        .frame(maxWidth: frame.width, alignment: .leading)
+                }
             }
         }
         .frame(width: max(frame.width, 1), height: max(frame.height, 1))

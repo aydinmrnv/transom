@@ -98,41 +98,26 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         if let s { try? await s.stopCapture() }
     }
 
-    /// Latest frame as a CGImage, converted on demand. Nil until the first
-    /// complete frame arrives.
+    /// Latest frame as a CGImage at **native pixels**, converted on demand. Nil
+    /// until the first complete frame arrives. Never resamples (I-1): callers that
+    /// only need a small preview let the display layer scale it down for drawing.
+    ///
+    /// The IOSurface-backed buffer is grabbed under the lock and the (potentially
+    /// expensive) `createCGImage` runs **outside** it — holding a strong ref keeps
+    /// the buffer alive against pool recycling, exactly as the capture callback's
+    /// own `onFrame` render does — so a 60fps capture callback is never blocked
+    /// waiting on a preview conversion.
     public func latestImage() -> CGImage? {
-        lock.withLock {
-            guard let buffer = latestPixelBuffer else { return nil }
-            return ciContext.createCGImage(
-                CIImage(cvPixelBuffer: buffer),
-                from: CGRect(
-                    x: 0, y: 0,
-                    width: CVPixelBufferGetWidth(buffer),
-                    height: CVPixelBufferGetHeight(buffer)))
+        let (buffer, ctx): (CVPixelBuffer?, CIContext) = lock.withLock {
+            (latestPixelBuffer, ciContext)
         }
-    }
-
-    /// A **downscaled** copy of the latest frame, longest side ≤ `maxPixelSize`,
-    /// for a lightweight live preview (the host app's stream-preview panel). Nil
-    /// until the first frame. Downscaling here keeps the UI cheap — a 4K frame is
-    /// resampled to ~1MP before it ever reaches SwiftUI — and it never touches the
-    /// encoder's zero-copy path (`onPixelBuffer`), so it cannot affect the stream.
-    /// This is preview-only: the actual encoded stream is still native pixels (I-1).
-    public func previewImage(maxPixelSize: Int) -> CGImage? {
-        lock.withLock {
-            guard let buffer = latestPixelBuffer else { return nil }
-            let w = CVPixelBufferGetWidth(buffer)
-            let h = CVPixelBufferGetHeight(buffer)
-            let source = CIImage(cvPixelBuffer: buffer)
-            let longest = max(w, h)
-            guard longest > maxPixelSize else {
-                return ciContext.createCGImage(
-                    source, from: CGRect(x: 0, y: 0, width: w, height: h))
-            }
-            let scale = Double(maxPixelSize) / Double(longest)
-            let scaled = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            return ciContext.createCGImage(scaled, from: scaled.extent)
-        }
+        guard let buffer else { return nil }
+        return ctx.createCGImage(
+            CIImage(cvPixelBuffer: buffer),
+            from: CGRect(
+                x: 0, y: 0,
+                width: CVPixelBufferGetWidth(buffer),
+                height: CVPixelBufferGetHeight(buffer)))
     }
 
     // MARK: - SCStreamOutput

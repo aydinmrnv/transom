@@ -45,9 +45,15 @@ struct ContentView: View {
 
     private var hostIsPrivate: Bool { PrivateAddress.isPrivateIPv4(bindAddress) }
     private var permissionsReady: Bool { accessibility && (!videoEnabled || screenRecording) }
+    /// Both ports must be real TCP endpoints. Without this gate, `startServing()`
+    /// would `UInt16(clamping:)` an out-of-range value into a *different* port than
+    /// the recap shows (e.g. 70000 → 65535), binding somewhere the user never asked.
+    private var portsValid: Bool {
+        HostDefaults.portRange.contains(controlPort) && HostDefaults.portRange.contains(videoPort)
+    }
     private var canStart: Bool {
         permissionsReady && selectedAppPID != 0 && selectedDisplayID != 0 && hostIsPrivate
-            && !host.running && !host.starting
+            && portsValid && !host.running && !host.starting
     }
 
     var body: some View {
@@ -202,6 +208,9 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.orange)
                 } else if !hostIsPrivate {
                     Text("Bind address isn't private — fix it in Settings (⌘,) before Start.")
+                        .font(.caption).foregroundStyle(.red)
+                } else if !portsValid {
+                    Text("Ports must be 1–65535 — fix them in Settings (⌘,) before Start.")
                         .font(.caption).foregroundStyle(.red)
                 }
             }
