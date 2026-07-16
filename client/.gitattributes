@@ -1,0 +1,5 @@
+# Normalise line endings to LF in the repo for all text files.
+* text=auto eol=lf
+# The application manifest is UTF-8 text; keep it LF too.
+*.manifest text eol=lf
+*.rc text eol=lf

@@ -1,0 +1,7 @@
+// Resource script: bind the application manifest as the process default
+// manifest (resource id 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID, type 24 =
+// RT_MANIFEST). This is how the loader finds an executable's manifest.
+#define CREATEPROCESS_MANIFEST_RESOURCE_ID 1
+#define RT_MANIFEST 24
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "transom-client.exe.manifest"

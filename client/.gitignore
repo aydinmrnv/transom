@@ -1,0 +1,8 @@
+# Rust / Cargo
+/target
+**/*.rs.bk
+
+# MSVC / build artifacts
+*.pdb
+*.exp
+*.ilk
