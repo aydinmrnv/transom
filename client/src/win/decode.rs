@@ -11,18 +11,26 @@
 //! toolchain, but its runtime bring-up (does the system MFT accept 4:4:4 10-bit;
 //! does STREAM_CHANGE renegotiate cleanly) must happen on the real Windows box.
 //! Every fallible step degrades to "no frame this call", so a decode problem
-//! shows the placeholder texture rather than crashing the window manager.
+//! shows the placeholder texture rather than crashing the window manager. The
+//! transform and the current CPU color conversion live on `DecoderWorker`, never
+//! on the Win32 message-pump thread.
+
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
 
 use windows::core::GUID;
 use windows::Win32::Media::MediaFoundation::{
     IMFMediaType, IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer,
     MFCreateSample, MFStartup, MFMediaType_Video, MFVideoFormat_HEVC, MFVideoFormat_NV12,
-    MFSTARTUP_LITE, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
-    MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_SUBTYPE, MF_VERSION,
+    MFSTARTUP_LITE, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_SUBTYPE, MF_VERSION,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+    COINIT_MULTITHREADED,
+};
 
 /// `CLSID_CMSH265DecoderMFT` — the in-box Microsoft HEVC decoder.
 const CLSID_H265_DECODER: GUID = GUID::from_u128(0x420a_51a3_d605_430c_a02c_6ef0_2f3e_0b03);
@@ -38,7 +46,150 @@ const MF_E_TRANSFORM_STREAM_CHANGE: windows::core::HRESULT =
 /// (`MF_E_NOTACCEPTING`.)
 const MF_E_NOTACCEPTING: windows::core::HRESULT = windows::core::HRESULT(0xC00D_36B3u32 as i32);
 
-pub struct Decoder {
+struct PendingInput {
+    frame: Option<EncodedFrame>,
+    dropped_dependency: bool,
+    stopped: bool,
+}
+
+struct EncodedFrame {
+    data: Vec<u8>,
+    keyframe: bool,
+}
+
+/// Keeps Media Foundation decode and the full-frame NV12→BGRA conversion off the
+/// Win32 UI thread. Both mailboxes contain only the newest frame: if either side
+/// falls behind, stale video is replaced instead of accumulating latency or
+/// unbounded memory.
+pub struct DecoderWorker {
+    input: Arc<(Mutex<PendingInput>, Condvar)>,
+    output: Arc<Mutex<Option<Vec<u8>>>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl DecoderWorker {
+    pub fn start(hvcc: Vec<u8>, width: u32, height: u32) -> std::io::Result<DecoderWorker> {
+        let input = Arc::new((
+            Mutex::new(PendingInput {
+                frame: None,
+                dropped_dependency: false,
+                stopped: false,
+            }),
+            Condvar::new(),
+        ));
+        let output = Arc::new(Mutex::new(None));
+        let worker_input = Arc::clone(&input);
+        let worker_output = Arc::clone(&output);
+
+        let thread = thread::Builder::new()
+            .name("transom-decode".into())
+            .spawn(move || {
+                if let Err(e) = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() } {
+                    eprintln!("decoder worker COM init failed: {e}");
+                    return;
+                }
+
+                let mut decoder = match Decoder::new(&hvcc, width, height) {
+                    Ok(decoder) => decoder,
+                    Err(e) => {
+                        eprintln!("decoder init failed: {e}");
+                        unsafe { CoUninitialize() };
+                        return;
+                    }
+                };
+
+                let mut waiting_for_keyframe = false;
+                loop {
+                    let (encoded, dropped_dependency) = {
+                        let (lock, ready) = &*worker_input;
+                        let mut pending = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        while pending.frame.is_none() && !pending.stopped {
+                            pending = ready.wait(pending).unwrap_or_else(|e| e.into_inner());
+                        }
+                        if pending.stopped {
+                            break;
+                        }
+                        let encoded = pending.frame.take().expect("frame checked above");
+                        let dropped_dependency = pending.dropped_dependency;
+                        pending.dropped_dependency = false;
+                        (encoded, dropped_dependency)
+                    };
+
+                    // HEVC frames depend on earlier frames. If the latest-frame
+                    // mailbox replaced a queued access unit, skip deltas until a
+                    // keyframe arrives, flush the MFT, and restart from that clean
+                    // random-access point instead of feeding a broken reference
+                    // chain to the decoder.
+                    waiting_for_keyframe |= dropped_dependency;
+                    if waiting_for_keyframe {
+                        if !encoded.keyframe {
+                            continue;
+                        }
+                        if decoder.flush().is_err() {
+                            continue;
+                        }
+                        waiting_for_keyframe = false;
+                    }
+
+                    if let Some(frame) = decoder.decode(&encoded.data) {
+                        *worker_output.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
+                    }
+                }
+
+                // Release the MFT while this thread's COM apartment still exists.
+                drop(decoder);
+                unsafe { CoUninitialize() };
+            })?;
+
+        Ok(DecoderWorker {
+            input,
+            output,
+            thread: Some(thread),
+        })
+    }
+
+    /// Replace any not-yet-decoded access unit with the newest one.
+    pub fn submit(&self, access_unit: Vec<u8>, keyframe: bool) {
+        let (lock, ready) = &*self.input;
+        let mut pending = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.stopped {
+            return;
+        }
+        if pending.frame.is_some() {
+            pending.dropped_dependency = true;
+        }
+        pending.frame = Some(EncodedFrame {
+            data: access_unit,
+            keyframe,
+        });
+        ready.notify_one();
+    }
+
+    /// Take the newest completed BGRA frame without blocking the UI thread.
+    pub fn take_frame(&self) -> Option<Vec<u8>> {
+        self.output
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+}
+
+impl Drop for DecoderWorker {
+    fn drop(&mut self) {
+        let (lock, ready) = &*self.input;
+        {
+            let mut pending = lock.lock().unwrap_or_else(|e| e.into_inner());
+            pending.stopped = true;
+            pending.frame = None;
+            ready.notify_one();
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+struct Decoder {
     transform: IMFTransform,
     width: u32,
     height: u32,
@@ -47,12 +198,7 @@ pub struct Decoder {
 }
 
 impl Decoder {
-    pub fn new(
-        _gpu: &super::gpu::Gpu,
-        hvcc: &[u8],
-        width: u32,
-        height: u32,
-    ) -> windows::core::Result<Decoder> {
+    fn new(hvcc: &[u8], width: u32, height: u32) -> windows::core::Result<Decoder> {
         unsafe {
             // Idempotent across decoders; the process never calls MFShutdown and
             // relies on teardown at exit.
@@ -111,6 +257,15 @@ impl Decoder {
             }
             self.drain_one_frame()
         }
+    }
+
+    fn flush(&mut self) -> windows::core::Result<()> {
+        unsafe {
+            self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)?;
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
+        }
+        Ok(())
     }
 
     unsafe fn make_input_sample(&self, au: &[u8]) -> windows::core::Result<IMFSample> {

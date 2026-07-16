@@ -539,6 +539,28 @@ one? Unknown.
 > surfaces this near its port fields. A future change may move the default off
 > 7000; left as-is for now to not silently change #5's CLI contract.
 
+### Client bring-up finding: oversized Retina proxies and drag-loop backpressure
+
+> **CLIENT FIX (2026-07-16): initial fitting must not mean “fill the work area,”
+> and Win32's local move gesture must stay off the input wire.** A normal macOS
+> window on a 2x virtual display can arrive as a source rect larger than the
+> Windows work area. An exact 1:1 proxy is impossible at that size. The client now
+> fits only oversized sources, preserves their aspect ratio inside 85% of the work
+> area, then sends an authoritative `RequestResize(End)` so the host relayouts and
+> reports the actual size. Scaling exists only during that roundtrip; steady state
+> remains 1:1 (I-1/I-4).
+>
+> `WM_ENTERSIZEMOVE` also starts a modal Windows window-manager gesture. Mouse
+> motion delivered during that interval describes the local proxy drag, not input
+> intended for the remote app. Forwarding it synchronously floods the control
+> socket and can stall the same UI thread Windows needs to move the HWND. The
+> client suppresses remote pointer forwarding during the gesture, coalesces normal
+> hover motion to the newest position per message-pump batch, and presents with
+> `DXGI_PRESENT_DO_NOT_WAIT` so a full DWM flip queue cannot block native movement.
+> Media Foundation decode and the current full-frame NV12→BGRA conversion also run
+> on a dedicated latest-frame worker: queued compressed frames and completed BGRA
+> frames replace stale ones instead of making the UI thread process a backlog.
+
 ---
 
 ## 9. Decision log

@@ -114,8 +114,8 @@ explicit about which is which:
   **full geometry round-trip** — the Rust client requested a resize, the Swift
   host applied it via AX, read back the actual rect, and reported `windowMoved`
   with the actual geometry, which the client consumed correctly.
-- 49 unit tests over framing, JSON, control/video message shapes, input encoding,
-  and the window model.
+- 53 unit tests over framing, JSON, control/video message shapes, input encoding,
+  the window model, and initial proxy fitting.
 - The whole client compiles and **links to a real Windows executable**, so the
   `windows-rs` API usage (D3D11, DXGI, Win32, Media Foundation) is correct.
 
