@@ -9,8 +9,11 @@ does not otherwise exist.
 > target Mac: it probes HEVC 4:4:4 hardware encode, tiles windows non-overlapping,
 > captures + hardware-encodes the virtual display, and serves window rects (and
 > optionally video) to a client over TCP. It has **no auth and no encryption**
-> (see Security below), the Windows client is a separate work in progress, and
-> none of this is verifiable in CI — only on the Mac Studio (I-7).
+> (see Security below), and none of this is verifiable in CI — only on the Mac
+> Studio (I-7). The Windows client now lives in this repo under
+> [`client/`](client/) and is a working window manager against this host's wire
+> protocol (its GPU/decode runtime needs a real Windows box; see
+> [`client/README.md`](client/README.md)).
 
 ## The problem
 
@@ -32,8 +35,8 @@ native window, while window rectangles travel on a side metadata channel. The
 Windows client is the real window manager; the Mac host only draws.
 
 **Read the canonical design doc: [`docs/architecture.md`](docs/architecture.md).**
-It is the source of truth for both repos. The Windows client lives at
-[`transom-client`](https://github.com/aydinmrnv/transom-client).
+It is the source of truth for both halves. The Windows client lives in this repo
+under [`client/`](client/).
 
 ## Build
 

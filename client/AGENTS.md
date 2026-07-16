@@ -4,12 +4,16 @@ You are working on the **Windows client** half of Transom.
 
 ## Read first, in this order
 
-1. `docs/architecture.md` — the design and why. **Mirror.** The canonical copy
-   lives in `transom-host`. If they disagree, that one wins.
-2. `docs/invariants.md` — **binding rules.** Not suggestions.
-3. `docs/roadmap.md` — what milestone we are in and what is out of scope.
-4. `docs/protocol.md` — the eventual contract with the host. Draft. Do not
-   implement.
+Both halves now live in one repo; `../docs/` is shared and canonical (see the
+root `AGENTS.md`). Read the other half to diagnose, but code to `../docs/`.
+
+1. `../docs/architecture.md` — the design and why.
+2. `../docs/invariants.md` — **binding rules.** Not suggestions.
+3. `../docs/roadmap.md` — the milestones and what is out of scope.
+4. `../docs/protocol.md` — **the implemented contract with the host.** Real, not a
+   draft: the wire (`src/wire/`), the window model, and the Windows window manager
+   already speak it. When it and the host disagree, the host wins and the fix is to
+   update the doc in the same commit.
 
 ## What this is
 
@@ -117,18 +121,29 @@ Report explicitly whether `physical client rect == swapchain size` holds at
 `WM_ENTERSIZEMOVE`. The window goes blank unless you render from inside it.
 Render during the drag.
 
-## Current milestone: M0, the rendering probe
+## Where the client is now
 
-No networking, no decoder, no host. Synthetic source only. See `docs/roadmap.md`
-M0-client.
+Past M0/M1/M2 on paper: the wire, the window model, native proxy windows, the
+D3D11 1:1 pipeline, the resize round-trip, and input capture are all implemented.
+The layout:
 
-The diagnostic overlay's `physical client rect == swapchain size` indicator is
-the pass/fail for the whole milestone. Make it loud.
+- `src/wire/`, `src/model.rs`, `src/net.rs`, `src/session.rs`, `src/runner.rs`,
+  `src/vk.rs` — **pure Rust, no `windows-rs`.** Compiles and unit-tests on any
+  host; `transom-client connect <host>` drives the protocol headless and is how
+  the wire is checked against the live Swift host.
+- `src/win/` — `#[cfg(windows)]` window manager + D3D11 renderer + Media
+  Foundation decode. Runs only on Windows.
+
+**Verification (I-7).** The pure half is proven (unit tests + live round-trip
+against the host). The `win/` half is verified only by compiling and linking for
+Windows — from a Mac, cross-check with the GNU target (see `README.md`). The 1:1
+guarantee at 150% scaling and HEVC decode still need a real Windows box. Do not
+report a cross-compile as a runtime pass.
 
 ## Out of scope right now
 
-Networking, decoding, the protocol, input capture beyond logging geometry events,
-audio, clipboard. If a task seems to need one, stop and ask.
+Audio, clipboard, multi-host/multi-client, and anything internet-facing (no auth,
+no crypto — trusted wired LAN only). If a task seems to need one, stop and ask.
 
 ## Style
 
