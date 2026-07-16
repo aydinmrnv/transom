@@ -127,11 +127,17 @@ Alt+Tab entry. The exact taxonomy depends on what AX subroles actually report
 
 ### Client -> Host
 
+The `"type"` discriminator is **camelCase on the wire**, matching the host's
+`WireProtocol.swift` (`"requestResize"`, `"requestFocus"`, `"requestClose"`,
+`"input"`) — the same casing as the host→client messages above. The names below
+are the semantic message names; the wire value is the camelCase form. (The host
+is authoritative here; this line was corrected to match it — AGENTS.md.)
+
 ```
-RequestResize  { id: u64, size: Size, phase: ResizePhase }
-RequestFocus   { id: u64 }
-RequestClose   { id: u64 }
-Input          { id: u64, event: InputEvent, ts: u64 }
+requestResize  { id: u64, size: Size, phase: ResizePhase }
+requestFocus   { id: u64 }
+requestClose   { id: u64 }
+input          { id: u64, event: InputEvent, ts: u64 }
 ```
 
 `ResizePhase` is `Begin | Live | End`, mapping to `WM_ENTERSIZEMOVE` /
