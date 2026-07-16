@@ -32,9 +32,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT,
     D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
 };
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
-};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     IDXGIDevice, IDXGIFactory2, IDXGISwapChain1, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -45,7 +43,7 @@ use windows::Win32::Graphics::Dxgi::{
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Params {
-    uv_rect: [f32; 4], // xy = uv origin, zw = uv size, into the source texture
+    uv_rect: [f32; 4],   // xy = uv origin, zw = uv size, into the source texture
     view_size: [f32; 2], // physical pixel size of this window (for checkerboard)
     mode: u32,
     _pad: u32,
@@ -246,7 +244,13 @@ impl Gpu {
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             if self
                 .context
-                .Map(&self.cbuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))
+                .Map(
+                    &self.cbuffer,
+                    0,
+                    D3D11_MAP_WRITE_DISCARD,
+                    0,
+                    Some(&mut mapped),
+                )
                 .is_ok()
             {
                 std::ptr::copy_nonoverlapping(
@@ -335,7 +339,10 @@ impl SourceTexture {
         };
 
         let mut texture: Option<ID3D11Texture2D> = None;
-        unsafe { gpu.device.CreateTexture2D(&desc, Some(&init), Some(&mut texture))? };
+        unsafe {
+            gpu.device
+                .CreateTexture2D(&desc, Some(&init), Some(&mut texture))?
+        };
         let texture = texture.unwrap();
 
         let mut srv: Option<ID3D11ShaderResourceView> = None;

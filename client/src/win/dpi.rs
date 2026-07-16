@@ -33,9 +33,8 @@ pub fn scale_for_dpi(dpi: u32) -> f64 {
 /// containing the point `(x, y)`, falling back to the primary monitor. Used to fit
 /// a proxy window to the client's screen: a macOS window's source rect is in the
 /// host's physical pixels (Retina 2x, so often larger than the whole client
-/// monitor), and creating a borderless window that big leaves it off-screen and
-/// with no title bar to grab (invariants I-2 keep everything physical, so there is
-/// no scaling to save us here).
+/// monitor). `window_fit` chooses the actual windowed target within this area;
+/// invariants I-2 keep all of these dimensions physical.
 pub fn work_area_at(x: i32, y: i32) -> RECT {
     unsafe {
         let monitor: HMONITOR = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTOPRIMARY);

@@ -17,7 +17,7 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct3D11::{ID3D11RenderTargetView, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
 use windows::Win32::Graphics::Dxgi::{
-    IDXGISwapChain1, DXGI_PRESENT, DXGI_SWAP_CHAIN_FLAG,
+    IDXGISwapChain1, DXGI_PRESENT_DO_NOT_WAIT, DXGI_SWAP_CHAIN_FLAG,
 };
 
 use super::gpu::{Gpu, RenderMode, SourceTexture};
@@ -129,12 +129,19 @@ impl Proxy {
             RenderMode::Waiting
         };
 
-        gpu.draw(rtv, self.width, self.height, mode, source_tex.map(|t| &t.srv));
+        gpu.draw(
+            rtv,
+            self.width,
+            self.height,
+            mode,
+            source_tex.map(|t| &t.srv),
+        );
 
         unsafe {
-            // Sync interval 0: present as soon as possible; the DWM still composes
-            // one frame (the accepted latency), but we add none of our own.
-            let _ = self.swapchain.Present(0, DXGI_PRESENT(0));
+            // Do not let DWM backpressure block the Win32 UI thread. If the flip
+            // queue is full, keeping the already-queued newest frame is better
+            // than making native window movement wait for a redundant present.
+            let _ = self.swapchain.Present(0, DXGI_PRESENT_DO_NOT_WAIT);
         }
     }
 

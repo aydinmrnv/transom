@@ -43,7 +43,9 @@ pub enum SessionEvent {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum VideoEvent {
-    Config { hvcc: Vec<u8> },
+    Config {
+        hvcc: Vec<u8>,
+    },
     Frame {
         seq: u64,
         pts_micros: u64,
@@ -137,7 +139,7 @@ impl Session {
         let mut w = self
             .control_write
             .lock()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "poisoned write lock"))?;
+            .map_err(|_| std::io::Error::other("poisoned write lock"))?;
         net::send_message(&mut *w, msg)
     }
 
@@ -202,7 +204,10 @@ fn video_loop(stream: TcpStream, tx: Sender<SessionEvent>) {
         match rx.recv() {
             Ok(Some(payload)) => match VideoMessage::decode(&payload) {
                 Ok(VideoMessage::Config { hvcc }) => {
-                    if tx.send(SessionEvent::Video(VideoEvent::Config { hvcc })).is_err() {
+                    if tx
+                        .send(SessionEvent::Video(VideoEvent::Config { hvcc }))
+                        .is_err()
+                    {
                         return;
                     }
                 }

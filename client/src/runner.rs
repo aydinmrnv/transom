@@ -75,7 +75,8 @@ pub fn run(args: &[String]) -> ExitCode {
     let mut vds: Option<Size> = None;
 
     // Actions that fire once, after the first window is known.
-    let mut pending_actions = opts.type_text.is_some() || opts.click.is_some() || opts.resize.is_some();
+    let mut pending_actions =
+        opts.type_text.is_some() || opts.click.is_some() || opts.resize.is_some();
 
     let mut frames = 0u64;
     let mut video_bytes = 0u64;
@@ -133,7 +134,8 @@ pub fn run(args: &[String]) -> ExitCode {
                 // Rate-limit the video log to once a second so it doesn't drown the
                 // control-plane trace.
                 if last_video_report.elapsed() >= Duration::from_secs(1) {
-                    let mbps = (video_bytes as f64 * 8.0) / 1_000_000.0
+                    let mbps = (video_bytes as f64 * 8.0)
+                        / 1_000_000.0
                         / last_video_report.elapsed().as_secs_f64();
                     println!(
                         "[{:>6}ms] video: {frames} frames, {mbps:.1} Mbps (last seq {seq}, {})",
@@ -420,7 +422,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
 
 fn take(args: &[String], i: &mut usize, name: &str) -> Result<String, String> {
     *i += 1;
-    args.get(*i).cloned().ok_or_else(|| format!("{name} needs a value"))
+    args.get(*i)
+        .cloned()
+        .ok_or_else(|| format!("{name} needs a value"))
 }
 
 /// Parse an `id:a:b` triple used by --click (id:x:y) and --resize (id:w:h).
@@ -430,8 +434,12 @@ fn parse_triple(s: &str, name: &str) -> Result<(u64, u32, u32), String> {
         return Err(format!("{name} expects id:a:b"));
     }
     let id = parts[0].parse().map_err(|_| format!("{name}: bad id"))?;
-    let a = parts[1].parse().map_err(|_| format!("{name}: bad second field"))?;
-    let b = parts[2].parse().map_err(|_| format!("{name}: bad third field"))?;
+    let a = parts[1]
+        .parse()
+        .map_err(|_| format!("{name}: bad second field"))?;
+    let b = parts[2]
+        .parse()
+        .map_err(|_| format!("{name}: bad third field"))?;
     Ok((id, a, b))
 }
 

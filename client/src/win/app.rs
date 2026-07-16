@@ -21,12 +21,12 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowLongPtrW,
     LoadCursorW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, CREATESTRUCTW,
-    GWLP_USERDATA, IDC_ARROW, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WM_ACTIVATE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
-    WM_NCCREATE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SIZING, WM_SYSKEYDOWN,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, CREATESTRUCTW, GWLP_USERDATA,
+    IDC_ARROW, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOZORDER, SW_SHOW, WM_ACTIVATE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE,
+    WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE,
+    WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SIZING, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
@@ -38,7 +38,7 @@ use crate::session::{Session, SessionEvent, VideoEvent};
 use crate::wire::{ClientMessage, InputEvent, Rect, ResizePhase, Size};
 
 #[cfg(windows)]
-use super::decode::Decoder;
+use super::decode::DecoderWorker;
 
 const CLASS_NAME: PCWSTR = w!("TransomProxyWindow");
 
@@ -60,9 +60,13 @@ pub struct App {
     proxies: HashMap<u64, Proxy>,
     hwnd_to_id: HashMap<isize, u64>,
     source: Option<SourceTexture>,
-    decoder: Option<Decoder>,
+    decoder: Option<DecoderWorker>,
     vds: Option<Size>,
     cascade: u32,
+    /// Latest unsent hover move per proxy. High-polling-rate mice can emit far
+    /// more messages than the control channel or Mac cursor needs; one per pump
+    /// preserves the newest position without blocking the Win32 wndproc.
+    pending_mouse_moves: HashMap<u64, InputEvent>,
     reconnect_at: Option<Instant>,
     now_epoch: Instant,
     /// Video-health counters. If access units keep arriving but none ever decode
@@ -86,6 +90,7 @@ impl App {
             decoder: None,
             vds: None,
             cascade: 0,
+            pending_mouse_moves: HashMap::new(),
             reconnect_at: None,
             now_epoch: Instant::now(),
             video_in: 0,
@@ -134,7 +139,11 @@ impl App {
     fn drain_session(&mut self, app_ptr: *mut App) {
         // Reconnect if it's time.
         if self.session.is_none() {
-            if self.reconnect_at.map(|t| Instant::now() >= t).unwrap_or(true) {
+            if self
+                .reconnect_at
+                .map(|t| Instant::now() >= t)
+                .unwrap_or(true)
+            {
                 self.connect();
             }
             return;
@@ -206,19 +215,16 @@ impl App {
         match v {
             VideoEvent::Config { hvcc } => {
                 if let Some(vds) = self.vds {
-                    match Decoder::new(&self.gpu, &hvcc, vds.w, vds.h) {
+                    match DecoderWorker::start(hvcc, vds.w, vds.h) {
                         Ok(d) => self.decoder = Some(d),
-                        Err(e) => eprintln!("decoder init failed: {e}"),
+                        Err(e) => eprintln!("failed to start decoder worker: {e}"),
                     }
                 }
             }
-            VideoEvent::Frame { data, .. } => {
+            VideoEvent::Frame { data, keyframe, .. } => {
                 self.video_in += 1;
-                if let (Some(dec), Some(src)) = (self.decoder.as_mut(), self.source.as_ref()) {
-                    if let Some(bgra) = dec.decode(&data) {
-                        src.update_bgra(&self.gpu, &bgra);
-                        self.video_decoded += 1;
-                    }
+                if let Some(decoder) = self.decoder.as_ref() {
+                    decoder.submit(data, keyframe);
                 }
                 // Access units are arriving but nothing has decoded. The usual cause
                 // is the in-box Media Foundation HEVC decoder refusing the host's
@@ -232,13 +238,24 @@ impl App {
                          handle the host's 4:4:4 10-bit stream (decoder init {}).",
                         self.video_in,
                         if self.decoder.is_some() {
-                            "succeeded, but every ProcessOutput failed"
+                            "worker started, but no output completed"
                         } else {
                             "failed; see the earlier 'decoder init failed' line"
                         }
                     );
                 }
             }
+        }
+    }
+
+    /// Upload at most the newest completed decode. The expensive hardware-decode
+    /// drain and NV12→BGRA conversion happen on `transom-decode`; this UI-thread
+    /// step is only the final D3D texture update.
+    fn poll_decoder(&mut self) {
+        let frame = self.decoder.as_ref().and_then(DecoderWorker::take_frame);
+        if let (Some(bgra), Some(source)) = (frame, self.source.as_ref()) {
+            source.update_bgra(&self.gpu, &bgra);
+            self.video_decoded += 1;
         }
     }
 
@@ -270,16 +287,23 @@ impl App {
         let spawn_x = 40 + offset as i32;
         let spawn_y = 40 + offset as i32;
 
-        // Fit the initial window to the client monitor. `source` is in the host's
-        // physical pixels (a Retina 2x window is ~3840x1954 — bigger than most
-        // client monitors); creating a borderless window that size leaves it
-        // off-screen and unmovable, which is exactly the "takes up the whole
-        // screen, can't touch it" failure. Clamp size and keep it fully on-screen.
+        // Fit an oversized Retina source to a visibly windowed target. The helper
+        // preserves exact size whenever it already fits and preserves aspect ratio
+        // when it does not; after creation we ask the host to relayout to this
+        // physical size so the transient fit snaps back to 1:1.
         let wa = super::dpi::work_area_at(spawn_x, spawn_y);
-        let max_w = (wa.right - wa.left).max(1) as u32;
-        let max_h = (wa.bottom - wa.top).max(1) as u32;
-        let win_w = source.w.clamp(1, max_w);
-        let win_h = source.h.clamp(1, max_h);
+        let fitted = crate::window_fit::initial_proxy_size(
+            Size {
+                w: source.w,
+                h: source.h,
+            },
+            Size {
+                w: (wa.right - wa.left).max(1) as u32,
+                h: (wa.bottom - wa.top).max(1) as u32,
+            },
+        );
+        let win_w = fitted.w;
+        let win_h = fitted.h;
         let clamped = win_w != source.w || win_h != source.h;
         let x = spawn_x.min(wa.right - win_w as i32).max(wa.left);
         let y = spawn_y.min(wa.bottom - win_h as i32).max(wa.top);
@@ -334,10 +358,7 @@ impl App {
         if clamped {
             self.send(&ClientMessage::RequestResize {
                 id,
-                size: Size {
-                    w: win_w,
-                    h: win_h,
-                },
+                size: Size { w: win_w, h: win_h },
                 phase: ResizePhase::End,
             });
         }
@@ -364,6 +385,7 @@ impl App {
     }
 
     fn destroy_proxy(&mut self, id: u64) {
+        self.pending_mouse_moves.remove(&id);
         if let Some(proxy) = self.proxies.remove(&id) {
             self.hwnd_to_id.remove(&(proxy.hwnd.0 as isize));
             unsafe {
@@ -436,6 +458,9 @@ impl App {
             }
 
             WM_ENTERSIZEMOVE => {
+                // Any queued hover belongs to the just-started local window
+                // gesture, not to the remote Mac app.
+                self.pending_mouse_moves.remove(&id);
                 if let Some(proxy) = self.proxies.get_mut(&id) {
                     proxy.begin_size_move();
                     let size = Size {
@@ -533,9 +558,43 @@ impl App {
                 Some(LRESULT(0))
             }
 
-            WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
-            | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MOUSEWHEEL | WM_MOUSEHWHEEL | WM_KEYDOWN
-            | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {
+            WM_MOUSEMOVE => {
+                let in_size_move = self
+                    .proxies
+                    .get(&id)
+                    .map(|proxy| proxy.in_size_move)
+                    .unwrap_or(false);
+                if !in_size_move {
+                    if let Some(event) = input::event_for_message(hwnd, msg, wparam, lparam) {
+                        // Coalesce hover motion instead of doing a synchronous TCP
+                        // write from the UI thread for every raw mouse message.
+                        self.pending_mouse_moves.insert(id, event);
+                    }
+                }
+                // DefWindowProc must still see movement during its modal move /
+                // resize loop. We merely keep that local gesture off the wire.
+                None
+            }
+
+            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
+            | WM_MBUTTONUP | WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+                let in_size_move = self
+                    .proxies
+                    .get(&id)
+                    .map(|proxy| proxy.in_size_move)
+                    .unwrap_or(false);
+                if !in_size_move {
+                    // This event already carries its authoritative pointer
+                    // coordinates, so an older queued hover can be discarded.
+                    self.pending_mouse_moves.remove(&id);
+                    if let Some(event) = input::event_for_message(hwnd, msg, wparam, lparam) {
+                        self.send_input(id, event);
+                    }
+                }
+                None
+            }
+
+            WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {
                 if let Some(event) = input::event_for_message(hwnd, msg, wparam, lparam) {
                     self.send_input(id, event);
                 }
@@ -567,6 +626,12 @@ impl App {
             event,
             ts: self.now_ms(),
         });
+    }
+
+    fn flush_mouse_moves(&mut self) {
+        for (id, event) in std::mem::take(&mut self.pending_mouse_moves) {
+            self.send_input(id, event);
+        }
     }
 }
 
@@ -634,6 +699,7 @@ pub fn run_pump(mut app: Box<App>) {
     loop {
         // 1. Fold in any protocol events (may create/destroy windows).
         unsafe { (*app_ptr).drain_session(app_ptr) };
+        unsafe { (*app_ptr).poll_decoder() };
 
         // 2. Pump all pending Win32 messages. No Rust borrow of App is held here,
         //    so the reentrant wndproc's `*app_ptr` access is sound.
@@ -657,7 +723,9 @@ pub fn run_pump(mut app: Box<App>) {
             break;
         }
 
-        // 3. Render every proxy once (steady-state ~120Hz cap via the wait below).
+        // 3. Send at most one hover position per window for this message batch,
+        //    then render. Neither operation floods the UI thread during a drag.
+        unsafe { (*app_ptr).flush_mouse_moves() };
         unsafe { (*app_ptr).render_all() };
 
         // 4. If every window has closed and we were connected, exit; otherwise

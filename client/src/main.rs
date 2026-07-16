@@ -29,6 +29,7 @@ mod net;
 mod runner;
 mod session;
 mod vk;
+mod window_fit;
 mod wire;
 
 #[cfg(windows)]

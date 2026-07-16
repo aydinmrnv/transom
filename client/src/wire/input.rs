@@ -34,13 +34,33 @@ impl MouseButton {
 /// One input event, in Client Space physical pixels / Windows VK codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
-    MouseDown { x: u32, y: u32, button: MouseButton },
-    MouseUp { x: u32, y: u32, button: MouseButton },
-    MouseMove { x: u32, y: u32 },
+    MouseDown {
+        x: u32,
+        y: u32,
+        button: MouseButton,
+    },
+    MouseUp {
+        x: u32,
+        y: u32,
+        button: MouseButton,
+    },
+    MouseMove {
+        x: u32,
+        y: u32,
+    },
     /// Signed line deltas; positive `dy` scrolls content up (a wheel roll away).
-    Scroll { x: u32, y: u32, dx: i32, dy: i32 },
-    KeyDown { vk: u32 },
-    KeyUp { vk: u32 },
+    Scroll {
+        x: u32,
+        y: u32,
+        dx: i32,
+        dy: i32,
+    },
+    KeyDown {
+        vk: u32,
+    },
+    KeyUp {
+        vk: u32,
+    },
 }
 
 impl InputEvent {
