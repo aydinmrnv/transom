@@ -12,24 +12,32 @@ struct ContentView: View {
     @State private var selectedAppPID: pid_t = 0
     @State private var selectedDisplayID: CGDirectDisplayID = 0
 
+    /// The window highlighted in the preview / windows list. `nil` is "none".
+    @State private var selectedWindowID: UInt64?
+
     // Live permission state, refreshed on a slow timer.
     @State private var screenRecording = false
     @State private var accessibility = false
     private let identity = CodeIdentity.current()
     private let permTimer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
 
-    // Persisted connection config (edited inline; this is a control panel).
-    @AppStorage("host.bindAddress") private var bindAddress = "127.0.0.1"
-    @AppStorage("host.controlPort") private var controlPort = 7000
-    @AppStorage("host.videoPort") private var videoPort = 7001
-    @AppStorage("host.bitrateMbps") private var bitrateMbps = 40
-    @AppStorage("host.fps") private var fps = 60
-    @AppStorage("host.gutter") private var gutter = Tiler.defaultGutter
-    @AppStorage("host.video") private var videoEnabled = true
+    // Persisted config — the source of truth is the Settings window (Cmd-,); these
+    // read the same UserDefaults keys and are consumed at Start (HostDefaults).
+    @AppStorage(HostDefaults.bindAddress) private var bindAddress = "127.0.0.1"
+    @AppStorage(HostDefaults.controlPort) private var controlPort = 7000
+    @AppStorage(HostDefaults.videoPort) private var videoPort = 7001
+    @AppStorage(HostDefaults.bitrateMbps) private var bitrateMbps = 40
+    @AppStorage(HostDefaults.fps) private var fps = 60
+    @AppStorage(HostDefaults.gutter) private var gutter = Tiler.defaultGutter
+    @AppStorage(HostDefaults.video) private var videoEnabled = true
     /// Encoder chroma. Default 4:2:0 8-bit: the Windows client's in-box decoder can
     /// decode it, so pixels actually appear. 4:4:4 10-bit is crisper but needs a
     /// 4:4:4-capable client decoder (protocol.md §6-7).
-    @AppStorage("host.chroma") private var chroma = HEVCEncoder.Format.hevc420_8bit.rawValue
+    @AppStorage(HostDefaults.chroma) private var chroma = HEVCEncoder.Format.hevc420_8bit.rawValue
+    @AppStorage(HostDefaults.namesakeModifiers) private var namesakeModifiers = false
+    @AppStorage(HostDefaults.logInput) private var logInput = false
+    @AppStorage(HostDefaults.previewOutlines) private var previewOutlines = true
+    @AppStorage(HostDefaults.previewLabels) private var previewLabels = true
 
     private var videoFormat: HEVCEncoder.Format {
         HEVCEncoder.Format(rawValue: chroma) ?? .hevc420_8bit
@@ -55,7 +63,12 @@ struct ContentView: View {
                 }
             }
             .padding(22)
-            .frame(maxWidth: 900, alignment: .leading)
+            .frame(maxWidth: 1000, alignment: .leading)
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                SettingsLink { Label("Settings", systemImage: "gearshape") }
+            }
         }
         .onAppear(perform: refreshAll)
         .onReceive(permTimer) { _ in refreshPermissions() }
@@ -174,8 +187,7 @@ struct ContentView: View {
                     .disabled(host.running)
             }
 
-            bindRow
-            tuningRow
+            settingsSummaryRow
 
             HStack(spacing: 12) {
                 if host.running {
@@ -188,6 +200,9 @@ struct ContentView: View {
                 if !permissionsReady {
                     Text("Grant the permissions above first.")
                         .font(.caption).foregroundStyle(.orange)
+                } else if !hostIsPrivate {
+                    Text("Bind address isn't private — fix it in Settings (⌘,) before Start.")
+                        .font(.caption).foregroundStyle(.red)
                 }
             }
 
@@ -199,80 +214,59 @@ struct ContentView: View {
         }
     }
 
-    private var bindRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 12) {
-                Text("Bind").frame(width: 44, alignment: .leading)
-                TextField("127.0.0.1", text: $bindAddress)
-                    .frame(width: 140)
-                    .disabled(host.running)
-                Text("control").foregroundStyle(.secondary).font(.caption)
-                intField($controlPort, width: 64)
-                Text("video").foregroundStyle(.secondary).font(.caption)
-                intField($videoPort, width: 64)
-            }
-            // The private-address gate from #5, made visible (and enforced at Start).
-            HStack(spacing: 6) {
-                Image(systemName: hostIsPrivate ? "lock.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(hostIsPrivate ? .green : .red)
-                Text(
-                    hostIsPrivate
-                        ? "Private address — allowed (no auth/encryption; LAN only)."
-                        : "Not a private address — Start is refused. Use 127/8, 10/8, 172.16/12, 192.168/16, or 169.254/16."
-                )
-                .font(.caption)
-                .foregroundStyle(hostIsPrivate ? Color.secondary : Color.red)
+    /// A read-only recap of the persisted settings, with a jump into the Settings
+    /// window where they're edited. The knobs used to live inline here; now the
+    /// main window is about *starting a session* and this is just the confirmation
+    /// of what Start will use.
+    private var settingsSummaryRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "slider.horizontal.3").foregroundStyle(.secondary)
+            Text(configSummary)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            }
-            if controlPort == 7000 {
-                Label(
-                    "Port 7000 is used by AirPlay Receiver on many Macs — if the control client "
-                        + "never connects, pick another port or turn AirPlay Receiver off in "
-                        + "System Settings › General › AirDrop & Handoff.",
-                    systemImage: "info.circle"
-                )
-                .font(.caption2).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
+            Spacer(minLength: 8)
+            SettingsLink { Text("Settings…") }
         }
+        .padding(10)
+        .background(Color.secondary.opacity(0.07))
+        .cornerRadius(8)
     }
 
-    private var tuningRow: some View {
-        HStack(spacing: 12) {
-            Toggle("Stream video", isOn: $videoEnabled).disabled(host.running)
-            if videoEnabled {
-                Picker("chroma", selection: $chroma) {
-                    Text("4:2:0 8-bit (decodable)").tag(HEVCEncoder.Format.hevc420_8bit.rawValue)
-                    Text("4:4:4 10-bit (crisp)").tag(HEVCEncoder.Format.hevc444_10bit.rawValue)
-                }
-                .labelsHidden()
-                .fixedSize()
-                .disabled(host.running)
-            }
-            Divider().frame(height: 16)
-            Text("fps").foregroundStyle(.secondary).font(.caption)
-            intField($fps, width: 48)
-            Text("bitrate").foregroundStyle(.secondary).font(.caption)
-            intField($bitrateMbps, width: 48)
-            Text("Mbps").foregroundStyle(.secondary).font(.caption)
-            Text("gutter").foregroundStyle(.secondary).font(.caption)
-            intField($gutter, width: 56)
-            Text("px").foregroundStyle(.secondary).font(.caption)
+    private var configSummary: String {
+        var parts = ["\(bindAddress)", "control \(controlPort)"]
+        if videoEnabled {
+            parts.append("video \(videoPort)")
+            parts.append("HEVC \(videoFormat.chromaTag)")
+            parts.append("\(fps) fps")
+            parts.append("\(bitrateMbps) Mbps")
+        } else {
+            parts.append("video off")
         }
+        parts.append("gutter \(gutter)px")
+        parts.append(namesakeModifiers ? "Ctrl→Ctrl" : "Ctrl→⌘")
+        return parts.joined(separator: "  ·  ")
     }
 
     // MARK: - 3. Status
 
     private var statusSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 16) {
             sectionHeader("Status", "live")
 
             clientRow
+            previewSection
             encoderModeBanner
             if host.status.videoEnabled {
                 statTiles
             }
             tileLayoutView
+        }
+        .onChange(of: host.previewWindows) { _, windows in
+            // Drop a highlight whose window closed, so the selection never dangles.
+            if let id = selectedWindowID, !windows.contains(where: { $0.id == id }) {
+                selectedWindowID = nil
+            }
         }
     }
 
@@ -298,6 +292,87 @@ struct ContentView: View {
         }
         .padding(.horizontal, 10).padding(.vertical, 5)
         .background(Color.secondary.opacity(0.08)).cornerRadius(6)
+    }
+
+    // MARK: Live preview
+
+    /// The headline of this whole feature: a downscaled view of the exact frame
+    /// being encoded, every tracked window outlined on top, and the selected one
+    /// highlighted (in both the picture and the list beside it).
+    private var previewSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Live preview").font(.headline)
+                Text(
+                    host.status.videoEnabled
+                        ? "what you're streaming" : "window layout (video off)"
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(alignment: .top, spacing: 14) {
+                StreamPreview(
+                    image: host.previewImage,
+                    displaySize: host.displayPixelSize,
+                    windows: host.previewWindows,
+                    showOutlines: previewOutlines,
+                    showLabels: previewLabels,
+                    videoEnabled: host.status.videoEnabled,
+                    selectedID: $selectedWindowID)
+                windowsPanel
+            }
+        }
+    }
+
+    private var windowsPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("Windows").font(.headline)
+                Text("\(host.previewWindows.count)")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(Color.secondary.opacity(0.12)).cornerRadius(4)
+                Spacer()
+            }
+            if host.previewWindows.isEmpty {
+                Text("No tracked windows yet.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(spacing: 4) {
+                        ForEach(host.previewWindows) { windowRow($0) }
+                    }
+                }
+                .frame(maxHeight: 380)
+            }
+            Text("Click a window — here or in the preview — to highlight it.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(width: 250)
+    }
+
+    private func windowRow(_ w: PreviewWindow) -> some View {
+        let selected = w.id == selectedWindowID
+        return Button {
+            selectedWindowID = selected ? nil : w.id
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(w.title.isEmpty ? "window \(w.id)" : w.title)
+                    .font(.caption).bold().lineLimit(1)
+                    .foregroundStyle(selected ? Color.white : Color.primary)
+                Text(
+                    "id \(w.id) · (\(Int(w.rect.minX)),\(Int(w.rect.minY))) "
+                        + "\(Int(w.rect.width))×\(Int(w.rect.height))"
+                )
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(selected ? Color.white.opacity(0.85) : Color.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .background(selected ? Color.accentColor : Color.secondary.opacity(0.08))
+            .cornerRadius(6)
+        }
+        .buttonStyle(.plain)
     }
 
     /// The encoder headline. Two independent things matter, and conflating them is
@@ -445,12 +520,6 @@ struct ContentView: View {
         }
     }
 
-    private func intField(_ binding: Binding<Int>, width: CGFloat) -> some View {
-        TextField("", value: binding, format: .number.grouping(.never))
-            .frame(width: width)
-            .disabled(host.running)
-    }
-
     private func refreshAll() {
         displays = Displays.all()
         apps = AppResolver.runningApps()
@@ -473,7 +542,7 @@ struct ContentView: View {
             target: app, display: disp, host: bindAddress,
             controlPort: UInt16(clamping: controlPort), videoPort: UInt16(clamping: videoPort),
             gutter: gutter, tile: true, video: videoEnabled, bitrateMbps: bitrateMbps, fps: fps,
-            videoFormat: videoFormat)
+            videoFormat: videoFormat, namesakeModifiers: namesakeModifiers, logInput: logInput)
         host.start(config: config)
     }
 

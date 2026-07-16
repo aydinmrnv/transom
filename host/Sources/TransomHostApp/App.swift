@@ -20,9 +20,15 @@ struct TransomHostApp: App {
     var body: some Scene {
         Window("Transom Host", id: "main") {
             ContentView()
-                .frame(minWidth: 720, minHeight: 640)
+                .frame(minWidth: 760, minHeight: 640)
         }
         .windowResizability(.contentMinSize)
+
+        // Standard macOS Settings window (Cmd-,). Its knobs persist in UserDefaults
+        // via @AppStorage and are read back by ContentView when starting a session.
+        Settings {
+            HostSettingsView()
+        }
     }
 }
 

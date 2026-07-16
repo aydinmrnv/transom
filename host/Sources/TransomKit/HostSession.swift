@@ -110,6 +110,32 @@ public struct HostStatus: Sendable {
     }
 }
 
+/// A cheap, poll-on-demand snapshot for the host app's live stream preview: a
+/// downscaled copy of the frame currently being encoded (nil when video is off or
+/// before the first frame) plus every window the AX watcher is tracking, with its
+/// **VDS-pixel** rect and id (protocol.md §3). The image is preview-sized, not the
+/// stream's native pixels (I-1); this is a viewport onto the session, never a fork
+/// of the capture path.
+///
+/// Not `Sendable` on purpose — it carries a `CGImage` and is meant to be read
+/// synchronously on the main thread (the UI's timer), never sent across a task.
+public struct HostPreview {
+    public var image: CGImage?
+    public var windows: [WindowRegistry.Entry]
+    public var displayPixelWidth: Int
+    public var displayPixelHeight: Int
+
+    public init(
+        image: CGImage?, windows: [WindowRegistry.Entry],
+        displayPixelWidth: Int, displayPixelHeight: Int
+    ) {
+        self.image = image
+        self.windows = windows
+        self.displayPixelWidth = displayPixelWidth
+        self.displayPixelHeight = displayPixelHeight
+    }
+}
+
 /// The serving pipeline for one app on one display, extracted from the `serve`
 /// command so the CLI and the SwiftUI host app drive the **same** code (the app
 /// is a thin shell over `serve`, not a fork of it).
@@ -196,6 +222,20 @@ public final class HostSession: @unchecked Sendable {
         }
         s.liveWindowCount = liveCount
         return s
+    }
+
+    /// A downscaled preview frame + the live window rects, for the host app's
+    /// stream-preview panel. Cheap enough to poll ~10 times/sec; reads the same
+    /// live capture and registry the stream uses, so the panel shows exactly what
+    /// is going out. `image` is nil when video is off or no frame has arrived yet;
+    /// `windows` is still populated (control-only sessions have a window layout but
+    /// no pixels). Call on the main thread — it is not `Sendable`.
+    public func preview(maxPixelSize: Int = 1280) -> HostPreview {
+        HostPreview(
+            image: capture?.previewImage(maxPixelSize: maxPixelSize),
+            windows: registry?.snapshot() ?? [],
+            displayPixelWidth: config.display.pixelWidth,
+            displayPixelHeight: config.display.pixelHeight)
     }
 
     // MARK: - Lifecycle

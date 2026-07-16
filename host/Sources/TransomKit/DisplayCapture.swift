@@ -112,6 +112,29 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         }
     }
 
+    /// A **downscaled** copy of the latest frame, longest side ≤ `maxPixelSize`,
+    /// for a lightweight live preview (the host app's stream-preview panel). Nil
+    /// until the first frame. Downscaling here keeps the UI cheap — a 4K frame is
+    /// resampled to ~1MP before it ever reaches SwiftUI — and it never touches the
+    /// encoder's zero-copy path (`onPixelBuffer`), so it cannot affect the stream.
+    /// This is preview-only: the actual encoded stream is still native pixels (I-1).
+    public func previewImage(maxPixelSize: Int) -> CGImage? {
+        lock.withLock {
+            guard let buffer = latestPixelBuffer else { return nil }
+            let w = CVPixelBufferGetWidth(buffer)
+            let h = CVPixelBufferGetHeight(buffer)
+            let source = CIImage(cvPixelBuffer: buffer)
+            let longest = max(w, h)
+            guard longest > maxPixelSize else {
+                return ciContext.createCGImage(
+                    source, from: CGRect(x: 0, y: 0, width: w, height: h))
+            }
+            let scale = Double(maxPixelSize) / Double(longest)
+            let scaled = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            return ciContext.createCGImage(scaled, from: scaled.extent)
+        }
+    }
+
     // MARK: - SCStreamOutput
 
     public func stream(
