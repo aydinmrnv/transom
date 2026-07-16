@@ -81,7 +81,10 @@ pub struct TileWindow {
 pub enum ServerMessage {
     /// First message on a fresh connection: protocol version + the whole virtual
     /// display size, so we can sanity-check every rect we receive.
-    Hello { protocol: u32, vds: Size },
+    Hello {
+        protocol: u32,
+        vds: Size,
+    },
     WindowCreated {
         id: u64,
         rect: Rect,
@@ -89,15 +92,28 @@ pub enum ServerMessage {
         kind: WindowKind,
     },
     /// ACTUAL geometry after an AX write or observed move (I-4), never requested.
-    WindowMoved { id: u64, rect: Rect },
-    WindowDestroyed { id: u64 },
-    WindowTitle { id: u64, title: String },
-    WindowFocused { id: u64 },
+    WindowMoved {
+        id: u64,
+        rect: Rect,
+    },
+    WindowDestroyed {
+        id: u64,
+    },
+    WindowTitle {
+        id: u64,
+        title: String,
+    },
+    WindowFocused {
+        id: u64,
+    },
     TileLayout {
         windows: Vec<TileWindow>,
         display: Size,
     },
-    Error { code: u32, message: String },
+    Error {
+        code: u32,
+        message: String,
+    },
 }
 
 /// Client → host. What we're allowed to ask the host to do.
@@ -108,8 +124,12 @@ pub enum ClientMessage {
         size: Size,
         phase: ResizePhase,
     },
-    RequestFocus { id: u64 },
-    RequestClose { id: u64 },
+    RequestFocus {
+        id: u64,
+    },
+    RequestClose {
+        id: u64,
+    },
     Input {
         id: u64,
         event: InputEvent,

@@ -33,7 +33,9 @@ pub enum ModelEvent {
     /// The session (re)synced: the host sent `hello`. Everything before is stale;
     /// the platform layer should expect a fresh set of `WindowAdded`s and tear
     /// down any proxy window whose id does not reappear (see `Resynced`).
-    Connected { vds: Size },
+    Connected {
+        vds: Size,
+    },
     /// A new window: create a proxy sized to `source.w × source.h`.
     WindowAdded(Window),
     /// The window's source rect changed. If `size_changed`, the proxy's swapchain
@@ -43,17 +45,29 @@ pub enum ModelEvent {
         source: Rect,
         size_changed: bool,
     },
-    WindowTitleChanged { id: u64, title: String },
+    WindowTitleChanged {
+        id: u64,
+        title: String,
+    },
     /// The Mac raised this window; reflect focus in the proxy set.
-    WindowFocused { id: u64 },
+    WindowFocused {
+        id: u64,
+    },
     /// The window is gone: destroy its proxy.
-    WindowRemoved { id: u64 },
+    WindowRemoved {
+        id: u64,
+    },
     /// After a `tileLayout` resync, these proxy ids were not in the layout and
     /// have been dropped from the model. Emitted so a reconnecting client can
     /// prune proxies that died while it was away.
-    Resynced { removed: Vec<u64> },
+    Resynced {
+        removed: Vec<u64>,
+    },
     /// The host sent an `error`. Surfaced for logging; not fatal on its own.
-    HostError { code: u32, message: String },
+    HostError {
+        code: u32,
+        message: String,
+    },
 }
 
 /// The live window set plus session state. Ordered by insertion so proxy
@@ -122,8 +136,8 @@ impl WindowModel {
                 // duplicate resync `windowCreated` is idempotent rather than a
                 // second proxy.
                 if let Some(i) = self.index_of(id) {
-                    let size_changed = self.windows[i].source.w != rect.w
-                        || self.windows[i].source.h != rect.h;
+                    let size_changed =
+                        self.windows[i].source.w != rect.w || self.windows[i].source.h != rect.h;
                     self.windows[i] = window;
                     vec![ModelEvent::WindowRectChanged {
                         id,
@@ -258,7 +272,12 @@ mod tests {
             protocol: 1,
             vds: Size { w: 5120, h: 2880 },
         });
-        assert_eq!(ev, vec![ModelEvent::Connected { vds: Size { w: 5120, h: 2880 } }]);
+        assert_eq!(
+            ev,
+            vec![ModelEvent::Connected {
+                vds: Size { w: 5120, h: 2880 }
+            }]
+        );
         assert_eq!(m.vds(), Some(Size { w: 5120, h: 2880 }));
     }
 
@@ -311,7 +330,10 @@ mod tests {
         ));
         // Same id again (e.g. from a resync) updates, doesn't duplicate.
         let ev = m.apply(created(1, rect(0, 0, 20, 20), "a"));
-        assert!(matches!(ev.as_slice(), [ModelEvent::WindowRectChanged { .. }]));
+        assert!(matches!(
+            ev.as_slice(),
+            [ModelEvent::WindowRectChanged { .. }]
+        ));
         assert_eq!(m.windows().len(), 1);
     }
 
@@ -347,8 +369,14 @@ mod tests {
         // A resync layout that no longer contains window 2.
         let ev = m.apply(ServerMessage::TileLayout {
             windows: vec![
-                TileWindow { id: 1, rect: rect(0, 0, 10, 10) },
-                TileWindow { id: 3, rect: rect(40, 0, 15, 10) }, // resized
+                TileWindow {
+                    id: 1,
+                    rect: rect(0, 0, 10, 10),
+                },
+                TileWindow {
+                    id: 3,
+                    rect: rect(40, 0, 15, 10),
+                }, // resized
             ],
             display: Size { w: 100, h: 100 },
         });
@@ -368,10 +396,15 @@ mod tests {
     fn tile_layout_adds_unseen_windows() {
         let mut m = WindowModel::new();
         let ev = m.apply(ServerMessage::TileLayout {
-            windows: vec![TileWindow { id: 5, rect: rect(0, 0, 30, 30) }],
+            windows: vec![TileWindow {
+                id: 5,
+                rect: rect(0, 0, 30, 30),
+            }],
             display: Size { w: 100, h: 100 },
         });
-        assert!(ev.iter().any(|e| matches!(e, ModelEvent::WindowAdded(w) if w.id == 5)));
+        assert!(ev
+            .iter()
+            .any(|e| matches!(e, ModelEvent::WindowAdded(w) if w.id == 5)));
         assert_eq!(m.get(5).unwrap().source, rect(0, 0, 30, 30));
     }
 }

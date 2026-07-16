@@ -129,7 +129,13 @@ impl Proxy {
             RenderMode::Waiting
         };
 
-        gpu.draw(rtv, self.width, self.height, mode, source_tex.map(|t| &t.srv));
+        gpu.draw(
+            rtv,
+            self.width,
+            self.height,
+            mode,
+            source_tex.map(|t| &t.srv),
+        );
 
         unsafe {
             // Do not let DWM backpressure block the Win32 UI thread. If the flip

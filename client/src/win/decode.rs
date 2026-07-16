@@ -20,16 +20,15 @@ use std::thread::{self, JoinHandle};
 
 use windows::core::GUID;
 use windows::Win32::Media::MediaFoundation::{
-    IMFMediaType, IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer,
-    MFCreateSample, MFStartup, MFMediaType_Video, MFVideoFormat_HEVC, MFVideoFormat_NV12,
-    MFSTARTUP_LITE, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_SUBTYPE, MF_VERSION,
+    IMFMediaType, IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFMediaType_Video, MFStartup, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFSTARTUP_LITE,
+    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_INFO, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
+    MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_SUBTYPE, MF_VERSION,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-    COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 
 /// `CLSID_CMSH265DecoderMFT` — the in-box Microsoft HEVC decoder.
@@ -167,10 +166,7 @@ impl DecoderWorker {
 
     /// Take the newest completed BGRA frame without blocking the UI thread.
     pub fn take_frame(&self) -> Option<Vec<u8>> {
-        self.output
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
+        self.output.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 }
 
@@ -261,7 +257,8 @@ impl Decoder {
 
     fn flush(&mut self) -> windows::core::Result<()> {
         unsafe {
-            self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)?;
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)?;
             self.transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
         }

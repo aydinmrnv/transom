@@ -165,7 +165,12 @@ impl Value {
         Value::Num(n.to_string())
     }
     pub fn object(fields: Vec<(&str, Value)>) -> Value {
-        Value::Object(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        Value::Object(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
     }
 }
 
@@ -331,9 +336,7 @@ impl<'a> Parser<'a> {
                         return Err(self.err("invalid low surrogate"));
                     }
                     let c = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-                    out.push(
-                        char::from_u32(c).ok_or_else(|| self.err("invalid surrogate pair"))?,
-                    );
+                    out.push(char::from_u32(c).ok_or_else(|| self.err("invalid surrogate pair"))?);
                 } else if (0xDC00..=0xDFFF).contains(&cp) {
                     return Err(self.err("unexpected low surrogate"));
                 } else {
@@ -453,7 +456,9 @@ mod tests {
         assert_eq!(v.get("type").and_then(Value::as_str), Some("windowMoved"));
         assert_eq!(v.get("id").and_then(Value::as_u64), Some(1));
         assert_eq!(
-            v.get("rect").and_then(|r| r.get("x")).and_then(Value::as_u32),
+            v.get("rect")
+                .and_then(|r| r.get("x"))
+                .and_then(Value::as_u32),
             Some(2300)
         );
     }
@@ -462,7 +467,10 @@ mod tests {
     fn keeps_u64_ids_exact() {
         // Beyond f64's integer range: proves we don't round-trip through f64.
         let v = Value::parse(r#"{"id":9007199254740993}"#).unwrap();
-        assert_eq!(v.get("id").and_then(Value::as_u64), Some(9_007_199_254_740_993));
+        assert_eq!(
+            v.get("id").and_then(Value::as_u64),
+            Some(9_007_199_254_740_993)
+        );
     }
 
     #[test]
