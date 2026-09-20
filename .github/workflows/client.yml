@@ -37,3 +37,22 @@ jobs:
 
       - name: Format
         run: cargo fmt --check
+
+      - name: Package Windows installer
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object { $_.name -eq 'transom-client' }).version
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress --yes }
+          & $iscc "/DAppVersion=$version" installer\Transom.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
+          $installer = Get-Item "dist\TransomSetup-v$version.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 $installer.FullName).Hash.ToLowerInvariant()
+          "$hash  $($installer.Name)" | Set-Content dist\SHA256SUMS.txt -Encoding ascii
+
+      - name: Upload installable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Transom-Windows
+          path: client/dist/*
