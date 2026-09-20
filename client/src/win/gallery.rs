@@ -1,19 +1,10 @@
 //! Selector thumbnails are UI previews only. Interactive proxy textures never
 //! pass through this downsampling path.
+use super::glass::{self, rect, Paint};
 use crate::{model::Window, wire::Size};
-use windows::Win32::{
-    Foundation::{COLORREF, RECT},
-    Graphics::Gdi::*,
-    UI::Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED},
-};
 
 pub const CARD_BASE: usize = 1000;
 pub const CARD_COUNT: usize = 12;
-pub const CANVAS: COLORREF = COLORREF(0x00FCF8F6);
-pub const SIDEBAR: COLORREF = COLORREF(0x00F8F0EA);
-pub const INK: COLORREF = COLORREF(0x00382418);
-pub const SECONDARY: COLORREF = COLORREF(0x007D6758);
-pub const BLUE: COLORREF = COLORREF(0x00DB5D27);
 
 pub struct Card {
     pub window: Window,
@@ -31,6 +22,9 @@ impl Card {
         }
     }
     pub fn update_preview(&mut self, pixels: &[u8], display: Size) {
+        self.update_preview_sized(pixels, display, 480, 270);
+    }
+    pub fn update_preview_sized(&mut self, pixels: &[u8], display: Size, max_w: u32, max_h: u32) {
         let r = self.window.source;
         if r.w == 0
             || r.h == 0
@@ -42,7 +36,9 @@ impl Card {
             self.size = Size { w: 0, h: 0 };
             return;
         }
-        let ratio = (320.0 / r.w as f64).min(180.0 / r.h as f64).min(1.0);
+        let ratio = (max_w as f64 / r.w as f64)
+            .min(max_h as f64 / r.h as f64)
+            .min(1.0);
         let w = (r.w as f64 * ratio).max(1.0) as u32;
         let h = (r.h as f64 * ratio).max(1.0) as u32;
         self.pixels.resize((w * h * 4) as usize, 0);
@@ -59,133 +55,6 @@ impl Card {
     }
 }
 
-pub unsafe fn fill(dc: HDC, r: &RECT, color: COLORREF) {
-    let brush = CreateSolidBrush(color);
-    FillRect(dc, r, brush);
-    let _ = DeleteObject(brush);
-}
-pub unsafe fn label(
-    dc: HDC,
-    font: HFONT,
-    text: &str,
-    mut r: RECT,
-    color: COLORREF,
-    flags: DRAW_TEXT_FORMAT,
-) {
-    let old = SelectObject(dc, font);
-    let _ = SetBkMode(dc, TRANSPARENT);
-    let _ = SetTextColor(dc, color);
-    let mut text: Vec<u16> = text.encode_utf16().collect();
-    DrawTextW(dc, &mut text, &mut r, flags);
-    SelectObject(dc, old);
-}
-pub unsafe fn draw(card: &Card, item: &DRAWITEMSTRUCT, fonts: &[HFONT; 3], dpi: u32) {
-    let dc = item.hDC;
-    let r = item.rcItem;
-    let s = |n: i32| n * dpi as i32 / 96;
-    fill(dc, &r, COLORREF(0x00FFFFFF));
-    let border = CreateSolidBrush(if item.itemState.0 & (ODS_FOCUS.0 | ODS_SELECTED.0) != 0 {
-        BLUE
-    } else {
-        COLORREF(0x00E7DDD2)
-    });
-    FrameRect(dc, &r, border);
-    let _ = DeleteObject(border);
-    let preview = RECT {
-        left: r.left + s(10),
-        top: r.top + s(10),
-        right: r.right - s(10),
-        bottom: r.bottom - s(76),
-    };
-    fill(dc, &preview, SIDEBAR);
-    if card.size.w > 0 && !card.pixels.is_empty() {
-        let ratio = ((preview.right - preview.left) as f64 / card.size.w as f64)
-            .min((preview.bottom - preview.top) as f64 / card.size.h as f64);
-        let w = (card.size.w as f64 * ratio) as i32;
-        let h = (card.size.h as f64 * ratio) as i32;
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: card.size.w as i32,
-                biHeight: -(card.size.h as i32),
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        StretchDIBits(
-            dc,
-            preview.left + (preview.right - preview.left - w) / 2,
-            preview.top + (preview.bottom - preview.top - h) / 2,
-            w,
-            h,
-            0,
-            0,
-            card.size.w as i32,
-            card.size.h as i32,
-            Some(card.pixels.as_ptr().cast()),
-            &info,
-            DIB_RGB_COLORS,
-            SRCCOPY,
-        );
-    } else {
-        label(
-            dc,
-            fonts[0],
-            "Waiting for preview",
-            preview,
-            SECONDARY,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        );
-    }
-    let title = if card.window.title.trim().is_empty() {
-        "Untitled window"
-    } else {
-        &card.window.title
-    };
-    label(
-        dc,
-        fonts[2],
-        title,
-        RECT {
-            left: r.left + s(16),
-            top: r.bottom - s(64),
-            right: r.right - s(16),
-            bottom: r.bottom - s(38),
-        },
-        INK,
-        DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
-    );
-    label(
-        dc,
-        fonts[0],
-        if card.opened {
-            "Show window"
-        } else {
-            "Open window"
-        },
-        RECT {
-            left: r.left + s(16),
-            top: r.bottom - s(34),
-            right: r.right - s(16),
-            bottom: r.bottom - s(10),
-        },
-        BLUE,
-        DT_SINGLELINE | DT_NOPREFIX,
-    );
-    if item.itemState.0 & ODS_FOCUS.0 != 0 {
-        let f = RECT {
-            left: r.left + s(4),
-            top: r.top + s(4),
-            right: r.right - s(4),
-            bottom: r.bottom - s(4),
-        };
-        let _ = DrawFocusRect(dc, &f);
-    }
-}
-
 pub fn accessible_title(card: &Card) -> String {
     format!(
         "{}: {}",
@@ -196,6 +65,122 @@ pub fn accessible_title(card: &Card) -> String {
         },
         card.window.title
     )
+}
+
+pub unsafe fn draw_glass(card: &Card, p: &Paint<'_>, w: f32, h: f32, focused: bool, list: bool) {
+    p.gradient(
+        rect(1., 1., w - 2., h - 2.),
+        11.,
+        if focused { 0x253B60 } else { 0x222D3C },
+        0x141E2A,
+        0.97,
+    );
+    p.stroke(
+        rect(1., 1., w - 2., h - 2.),
+        11.,
+        if focused { 0x4685FF } else { 0x344355 },
+        0.85,
+        if focused { 2. } else { 0.8 },
+    );
+    let area = if list {
+        rect(12., 9., 92., h - 18.)
+    } else {
+        rect(13., 12., w - 26., h - 62.)
+    };
+    p.fill(area, 5., 0x080F19, 1.);
+    if card.size.w > 0 && !card.pixels.is_empty() {
+        let sw = card.size.w as f32;
+        let sh = card.size.h as f32;
+        let k = ((area.right - area.left) / sw).min((area.bottom - area.top) / sh);
+        p.bitmap(
+            &card.pixels,
+            card.size.w,
+            card.size.h,
+            rect(
+                area.left + (area.right - area.left - sw * k) / 2.,
+                area.top + (area.bottom - area.top - sh * k) / 2.,
+                sw * k,
+                sh * k,
+            ),
+        );
+    } else {
+        p.icon("\u{E7F4}", area, if list { 24. } else { 36. }, 0x59718E);
+    }
+    let title = if card.window.title.trim().is_empty() {
+        "Untitled window"
+    } else {
+        &card.window.title
+    };
+    if list {
+        p.text(
+            title,
+            rect(122., 10., w - 175., 27.),
+            14.,
+            true,
+            glass::TEXT,
+            false,
+        );
+        p.text(
+            if card.opened {
+                "Open on this PC"
+            } else {
+                "Available to open"
+            },
+            rect(122., 37., w - 175., 22.),
+            12.,
+            false,
+            glass::MUTED,
+            false,
+        );
+    } else {
+        app_icon(p, title, 14., h - 43.);
+        p.text(
+            title,
+            rect(63., h - 43., w - 111., 34.),
+            14.,
+            true,
+            glass::TEXT,
+            false,
+        );
+    }
+    if card.opened {
+        p.dot(w - 16., 18., 4., glass::GREEN);
+    }
+}
+unsafe fn app_icon(p: &Paint<'_>, title: &str, x: f32, y: f32) {
+    let app = title.split(" — ").next().unwrap_or(title).to_lowercase();
+    let (color, glyph) = if app.contains("safari") {
+        (0x238DE5, "\u{E774}")
+    } else if app.contains("xcode") {
+        (0x288FE8, "\u{E943}")
+    } else if app.contains("terminal") {
+        (0x152331, "\u{E756}")
+    } else if app.contains("finder") {
+        (0x3D9CEE, "\u{E8B7}")
+    } else if app.contains("messages") {
+        (0x45B75A, "\u{E8F2}")
+    } else if app.contains("music") {
+        (0xE93C60, "\u{E189}")
+    } else if app.contains("notes") {
+        (0xD8B542, "\u{E70B}")
+    } else {
+        (0x285F99, "\u{E737}")
+    };
+    p.gradient(rect(x, y, 34., 34.), 7., color, 0x16283E, 1.);
+    p.stroke(rect(x, y, 34., 34.), 7., 0x91B2D0, 0.4, 0.7);
+    p.icon(glyph, rect(x, y, 34., 34.), 21., 0xF4F8FC);
+    if app.contains("photos") {
+        p.fill(rect(x, y, 34., 34.), 7., 0xF4F6FB, 1.);
+        for (i, c) in [
+            0xED5C75, 0xED933D, 0xE9C848, 0x80BD64, 0x52B7B8, 0x508FE2, 0x886DE0, 0xC66EC8,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let a = i as f32 * std::f32::consts::PI / 4.;
+            p.dot(x + 17. + a.cos() * 7., y + 17. + a.sin() * 7., 5., *c);
+        }
+    }
 }
 
 #[cfg(test)]

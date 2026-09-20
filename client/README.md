@@ -56,10 +56,11 @@ added as needed; no new crates â€” invariants I-8).
 1. Open Transom Host on the Mac, choose the virtual sharing display and select
    one or more app cards. Press **Start sharing**. The chosen windows must fit
    on that display; Transom reads their actual geometry back before sharing.
-2. Open Transom on Windows. Choose your Mac under **Your Macs** and press
-   **Connect**, or double-click its name. Custom ports are automatic.
+2. Open Transom on Windows. Use the device panel’s **…** menu to choose a discovered or saved Mac, then
+   press **Connect**. Custom ports are automatic.
 3. Choose a preview card to **Open window**. Search filters by app/window title;
-   Previous/Next reaches additional cards. **Show window** brings an open view back.
+   Previous/Next reaches additional cards. **Show window** brings an open view back. Each card’s **…** menu can open or
+   hide its local view. Grid/list views and Recents make larger collections easier to browse.
 4. Move a window with its local Windows title bar; use the edges to resize.
    Closing the local view returns it to the gallery and leaves the Mac document
    open. The Mac app's own close control still closes its remote document.
@@ -67,8 +68,8 @@ added as needed; no new crates â€” invariants I-8).
 
 Successful connections are stored in `%LocalAppData%\Transom\connections.json`.
 Discovered Macs are resolved by stable identity when their IP changes. Saved
-devices remain visible while offline; **Forget** removes a saved entry.
-Scans refresh about every ten seconds, or immediately with **Refresh**.
+devices remain visible while offline; **Forget saved Mac** in the device menu removes a saved entry.
+Scans refresh about every ten seconds, or immediately with **Refresh nearby Macs** in the device menu.
 
 If no Mac appears, check that the host is sharing, Local Network permission is
 allowed, and the host is not bound to loopback. Both computers must share a local
@@ -77,7 +78,11 @@ network that permits mDNS. **Manual connectionâ€¦** reveals fields for a hostnam
 blank for control-only diagnostics. Connections remain unencrypted and
 unauthenticated, for trusted LAN use only.
 
-The native dashboard supports keyboard navigation and per-monitor DPI sizing.
+The native dark dashboard uses Windows acrylic with translucent navy panels,
+Direct2D previews, and DirectWrite text. Windows versions without acrylic use
+an opaque navy fallback. Desktop shows a read-only preview of the shared display;
+Files filters the shared Finder windows. No remote file transfer is implied.
+The dashboard supports keyboard navigation and per-monitor DPI sizing.
 Discovery and connection attempts run in background workers; Disconnect also
 cancels a pending attempt. CLI connections open the same persistent dashboard.
 The local title bar supports native move, resize, minimize and maximize.

@@ -41,3 +41,50 @@ GetClientRect remains authoritative for the swapchain. Only an active resize
 may stretch the source; a normal move leaves both remote and client sizes alone.
 
 Reference: https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-entersizemove
+
+## Reference-directed dark acrylic redesign
+
+The user supplied image-1.png as the exact visual target. It supersedes the light
+palette above. Match its narrow 236 px sidebar, 156 px tall device panel, tab strip,
+four-column 188 px preview cards, 16 px gutters, blue active/selection borders,
+slate translucent surfaces and integrated window controls. Palette: ink #08131F,
+glass #182333, blue #2869FF, secondary #B8C6DF, text #F3F6FC, online #54E577.
+Segoe UI 14 px controls, 16 px headings and 24 px device/brand type. All figures
+are DIPs in the shell; streaming remains physical pixels.
+
+Use native Windows acrylic with premultiplied-alpha Direct2D rendering, rounded
+geometry and DirectWrite text. The prior flat GDI treatment cannot match this
+reference and is replaced. Live preview cards use actual decoded windows; real
+connection state replaces the illustrative speed numbers. Connections, apps,
+recents and settings remain usable, with a shared-display preview for Desktop.
+The lower sidebar promotes sharing more apps rather than inventing a paid plan.
+
+Review against brief: the target's color/material/proportions control the design.
+Avoid substituting an unrelated generic dark theme or retaining the old layout.
+Rendering must be compared visually with the supplied reference before completion.
+
+
+### Windows rendering findings (2026-09-20)
+
+GDI owner-drawn child controls left opaque rectangles and incorrect alpha on
+an acrylic HWND. All buttons now keep their native HWND/input/accessibility
+semantics but are painted on the parent Direct2D surface. A subclass validates
+child WM_PAINT without issuing a second drawing pass. EDIT controls use layered
+child surfaces with opaque alpha. Do not invalidate the parent from every child
+paint: that creates a repaint loop which starves discovery and video messages.
+Only changed state/input and the throttled preview refresh invalidate it.
+
+Native button defaults can be altered by IsDialogMessage (default-button style).
+Suppressing their independent GDI paint also prevents a white default-button
+rectangle from replacing the blue primary action. Menus snapshot their data and
+release the State borrow before TrackPopupMenu, because the modal timer continues
+video processing during popup menus.
+
+Runtime validation on ALIENWARE_A51 at 200% DPI: acrylic material, empty/connected
+states, settings at 1464x934 and 1114x726 DIPs, eight decoded local-fixture previews,
+search, opening/closing a native streamed window, and a bounded title-bar drag.
+The fixture's control log recorded no resize request for that move. Real Mac
+connection succeeds, but the host currently reports zero shared windows; these
+populated-gallery tests use an explicitly labeled loopback fixture, not fabricated
+Mac content. Real Mac multi-app capture and all-monitor DPI verification remain
+separate checks; this UI pass does not claim 100%/150% or cross-monitor proof.

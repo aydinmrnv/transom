@@ -234,6 +234,15 @@ impl App {
                 self.refresh_gallery();
                 self.update_status();
             }
+            Some(Action::HideWindow(id)) => {
+                if let Some(proxy) = self.proxies.get(&id) {
+                    unsafe {
+                        let _ = ShowWindow(proxy.hwnd, SW_HIDE);
+                    }
+                }
+                self.refresh_gallery();
+                self.update_status();
+            }
             None => {}
         }
         let result = self.connecting.as_ref().and_then(|rx| rx.try_recv().ok());
@@ -249,6 +258,7 @@ impl App {
                     self.rx = Some(rx);
                     self.reconnect_at = None;
                     self.notice = None;
+                    self.dashboard.set_connected(true);
                     self.dashboard.remember(c);
                     self.update_status();
                 }
@@ -282,6 +292,7 @@ impl App {
     }
 
     fn clear_session(&mut self) {
+        self.dashboard.set_connected(false);
         if let Some(s) = self.session.take() {
             s.shutdown();
         }
