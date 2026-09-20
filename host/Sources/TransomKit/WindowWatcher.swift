@@ -42,6 +42,8 @@ public final class WindowWatcher: @unchecked Sendable {
     private let registry: WindowRegistry
     private let appElement: AXUIElement
     private var observer: AXObserver?
+    private var refreshTimer: Timer?
+    private var tracked: [UInt64: AXUIElement] = [:]
 
     /// Registered on the app element: these are app-wide.
     private static let appNotifications = [
@@ -92,12 +94,19 @@ public final class WindowWatcher: @unchecked Sendable {
         seeding = true
         defer { seeding = false }
         // Seed with the windows that already exist.
-        for win in AXWindow.windows(pid: pid) where win.role == (kAXWindowRole as String) {
-            registerAndAnnounce(win.element)
+        refreshWindows()
+        // Some apps settle AX writes asynchronously or miss window notifications.
+        // Reconcile on the same run loop so stale crops cannot persist indefinitely.
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.refreshWindows()
         }
+        refreshTimer = timer
+        RunLoop.current.add(timer, forMode: .default)
     }
 
     public func stop() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
         guard let observer else { return }
         CFRunLoopRemoveSource(
             CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), .defaultMode)
@@ -112,17 +121,21 @@ public final class WindowWatcher: @unchecked Sendable {
         case kAXWindowCreatedNotification:
             registerAndAnnounce(element)
         case kAXFocusedWindowChangedNotification:
-            let (id, isNew) = registry.id(for: element)
-            if isNew { registerAndAnnounce(element, alreadyMinted: id) }
-            if registry.entry(for: id) != nil { emit(.focused(id: id)) }
+            // App-wide focus notifications can carry the application element.
+            // Resolve its focused window instead of minting an app-sized crop.
+            guard let element = AXWindow.focusedWindow(pid: pid) else { return }
+            registerAndAnnounce(element)
+            if let id = registry.existingID(for: element), registry.entry(for: id) != nil {
+                emit(.focused(id: id))
+            }
         case kAXWindowMovedNotification, kAXWindowResizedNotification:
-            let (id, _) = registry.id(for: element)
-            if let rect = rect(of: element) {
+            guard let id = registry.existingID(for: element), registry.entry(for: id) != nil else { return }
+            if let rect = rect(of: element), registry.entry(for: id)?.rect != rect {
                 registry.updateRect(id: id, rect: rect)
                 emit(.moved(id: id, rect: rect))
             }
         case kAXTitleChangedNotification:
-            let (id, _) = registry.id(for: element)
+            guard let id = registry.existingID(for: element), registry.entry(for: id) != nil else { return }
             let title = displayTitle(AXWindow(element: element, index: -1).title)
             registry.updateTitle(id: id, title: title)
             emit(.titleChanged(id: id, title: title))
@@ -130,6 +143,7 @@ public final class WindowWatcher: @unchecked Sendable {
             registerAndAnnounce(element)
         case kAXUIElementDestroyedNotification, kAXWindowMiniaturizedNotification:
             if let id = registry.remove(element: element) {
+                tracked[id] = nil
                 emit(.destroyed(id: id))
             }
         default:
@@ -139,9 +153,13 @@ public final class WindowWatcher: @unchecked Sendable {
 
     /// Mint an id (if needed), register per-window notifications, record initial
     /// geometry, and emit `created`.
-    private func registerAndAnnounce(_ element: AXUIElement, alreadyMinted: UInt64? = nil) {
-        let id = alreadyMinted ?? registry.id(for: element).id
-        if let observer {
+    private func registerAndAnnounce(_ element: AXUIElement) {
+        let win = AXWindow(element: element, index: -1)
+        guard win.role == (kAXWindowRole as String), !win.isMinimized,
+            let frame = win.frame(), frame.width > 0, frame.height > 0
+        else { return }
+        let id = registry.id(for: element).id
+        if tracked[id] == nil, let observer {
             let refcon = Unmanaged.passUnretained(self).toOpaque()
             for name in Self.windowNotifications {
                 let addErr = AXObserverAddNotification(observer, element, name as CFString, refcon)
@@ -151,8 +169,6 @@ public final class WindowWatcher: @unchecked Sendable {
                 }
             }
         }
-        let win = AXWindow(element: element, index: -1)
-        guard !win.isMinimized else { return }
         if !seeding && registry.entry(for: id) == nil && win.subrole == (kAXStandardWindowSubrole as String) {
             guard prepareNewWindow?(element) ?? true else {
                 _ = registry.remove(element: element)
@@ -160,9 +176,35 @@ public final class WindowWatcher: @unchecked Sendable {
             }
         }
         let title = displayTitle(win.title)
-        let r = rect(of: element) ?? WireRect(x: 0, y: 0, w: 0, h: 0)
+        guard let r = rect(of: element) else {
+            if tracked.removeValue(forKey: id) != nil {
+                _ = registry.remove(element: element)
+                emit(.destroyed(id: id))
+            }
+            return
+        }
+        let previous = registry.entry(for: id)
+        tracked[id] = element
         registry.record(id: id, rect: r, title: title)
-        emit(.created(id: id, rect: r, title: title))
+        if let previous {
+            if previous.rect != r { emit(.moved(id: id, rect: r)) }
+            if previous.title != title { emit(.titleChanged(id: id, title: title)) }
+        } else {
+            emit(.created(id: id, rect: r, title: title))
+        }
+    }
+
+    private func refreshWindows() {
+        guard let windows = AXWindow.availableWindows(pid: pid) else { return }
+        for win in windows { registerAndAnnounce(win.element) }
+        let removed = tracked.filter { _, element in
+            !windows.contains { CFEqual($0.element, element) && !$0.isMinimized }
+        }
+        for (id, element) in removed {
+            _ = registry.remove(element: element)
+            tracked[id] = nil
+            emit(.destroyed(id: id))
+        }
     }
 
     /// The window's actual AX frame converted to VDS physical pixels (I-3),
@@ -171,7 +213,19 @@ public final class WindowWatcher: @unchecked Sendable {
         guard let frame = AXWindow(element: element, index: -1).frame() else { return nil }
         let vds = Coordinates.displayPixels(
             fromAXRect: frame, displayOriginPoints: display.originPoints, scale: display.scale)
-        return WireRect(clampingVDSPixels: vds)
+        return Self.captureRect(vds, displayWidth: display.pixelWidth, displayHeight: display.pixelHeight)
+    }
+
+    /// Never substitute a desktop-origin crop for an invalid or off-display frame.
+    static func captureRect(_ frame: CGRect, displayWidth: Int, displayHeight: Int) -> WireRect? {
+        guard [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite),
+            frame.width > 0, frame.height > 0,
+            frame.minX.rounded() >= 0, frame.minY.rounded() >= 0,
+            frame.maxX.rounded() <= CGFloat(displayWidth),
+            frame.maxY.rounded() <= CGFloat(displayHeight)
+        else { return nil }
+        let rect = WireRect(clampingVDSPixels: frame)
+        return rect.w > 0 && rect.h > 0 ? rect : nil
     }
 
     private func displayTitle(_ title: String) -> String {

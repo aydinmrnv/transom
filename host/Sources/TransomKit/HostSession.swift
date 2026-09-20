@@ -365,6 +365,7 @@ public final class HostSession: @unchecked Sendable {
                     return
                 }
                 CFRunLoopRun()
+                for watcher in watchers { watcher.stop() }
             }
             watcherThread.stackSize = 1 << 20
             watcherThread.start()
@@ -420,7 +421,8 @@ public final class HostSession: @unchecked Sendable {
         self.encoder = enc
         statsLock.withLock { usingHardware = enc.usingHardware }
 
-        let cap = DisplayCapture(display: disp, fps: config.fps)
+        let cap = DisplayCapture(display: disp, fps: config.fps,
+            applicationPIDs: Set(([config.target] + config.additionalTargets).map(\.pid)))
         self.capture = cap
 
         let videoServer = VideoServer(hvccProvider: { enc.parameterSetsHVCC })
@@ -454,6 +456,13 @@ public final class HostSession: @unchecked Sendable {
         try await listener.start()
         tasks.append(Task { await videoServer.serve(listener: listener) })
         tasks.append(Task { for await f in frames { await videoServer.send(f) } })
+        tasks.append(Task {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(300)) }
+                catch { break }
+                if await videoServer.hasClient { cap.requestIdleRefresh() }
+            }
+        })
     }
 
     /// Stop everything and reset to a clean state. Safe to call more than once.

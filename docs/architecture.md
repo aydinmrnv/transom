@@ -661,6 +661,29 @@ connections already queued when it stopped and emits one disconnect callback.
 Regression tests exercise shutdown with a receive in progress. This is a code
 finding; real Mac capture and permission behavior require separate validation.
 
+### Selected apps must be filtered before display capture (0.4.4)
+
+On the real Mac Studio, a Conductor proxy showed wallpaper and the Transom Host
+panel over its crop. The sharing path used an unfiltered whole-display stream.
+HostSession now uses ScreenCaptureKit's display inclusion filter for the selected
+app PIDs; the full-display path remains available to the diagnostic probe.
+This retains the native display-sized pixel atlas and app popup capture without
+including unrelated apps or desktop content. See Apple's
+[ScreenCaptureKit filter walkthrough](https://developer.apple.com/videos/play/wwdc2022/10155/).
+
+The same live session advertised a Brave entry with a zero-size rect. App-wide
+AX focus notifications were treated as window elements, with missing geometry
+replaced by a zero-origin rect. Focus now resolves the app's actual focused
+window; admission requires a real AXWindow with a positive, in-display frame.
+An observer-run-loop reconciliation checks window inventory and actual geometry
+every 500 ms, including writes that settle after their immediate AX readback.
+
+While a video client is attached, idle capture refreshes keep timestamps and
+keyframes advancing. SCK can stop emitting complete samples on a static desktop;
+without refresh, a decoder's delayed final picture or keyframe recovery can stay
+stale until the next screen change. These refreshes reuse native pixels and do
+not resample an interactive frame.
+
 ## 9. Decision log
 
 | Decision | Rationale |

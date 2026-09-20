@@ -36,14 +36,29 @@ public struct AXWindow {
 
     /// All windows AX reports for an application, in AX order.
     public static func windows(pid: pid_t) -> [AXWindow] {
+        availableWindows(pid: pid) ?? []
+    }
+
+    /// A failed AX read is different from an app that has no windows.
+    public static func availableWindows(pid: pid_t) -> [AXWindow]? {
         let app = application(pid: pid)
         var value: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(
             app, kAXWindowsAttribute as CFString, &value)
         guard err == .success, let array = value as? [AXUIElement] else {
-            return []
+            return nil
         }
         return array.enumerated().map { AXWindow(element: $1, index: $0) }
+    }
+
+    public static func focusedWindow(pid: pid_t) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(application(pid: pid),
+            kAXFocusedWindowAttribute as CFString, &value) == .success,
+            let value, CFGetTypeID(value) == AXUIElementGetTypeID()
+        else { return nil }
+        // swift-format-ignore: NeverForceUnwrap
+        return (value as! AXUIElement)
     }
 
     // MARK: - Reads

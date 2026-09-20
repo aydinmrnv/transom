@@ -29,9 +29,11 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
     private let display: DisplayInfo
     private let fps: Int
+    private let applicationPIDs: Set<pid_t>?
     private let queue = DispatchQueue(label: "one.transom.host.capture")
     // Accessed only on the capture queue, including explicit refreshes.
     private var lastPixelPTS = CMTime.invalid
+    private var lastEmission = DispatchTime.now().uptimeNanoseconds
 
     private let lock = NSLock()
     private var stream: SCStream?
@@ -52,9 +54,10 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     /// underneath you.
     public var onPixelBuffer: (@Sendable (CVPixelBuffer, CMTime) -> Void)?
 
-    public init(display: DisplayInfo, fps: Int = 60) {
+    public init(display: DisplayInfo, fps: Int = 60, applicationPIDs: Set<pid_t>? = nil) {
         self.display = display
         self.fps = fps
+        self.applicationPIDs = applicationPIDs
         super.init()
     }
 
@@ -73,7 +76,17 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             throw CaptureError.displayNotFound(display.id)
         }
 
-        let filter = SCContentFilter(display: scDisplay, excludingWindows: [])
+        let filter: SCContentFilter
+        if let applicationPIDs {
+            // Inclusion, not exclusion: other apps, the desktop and this host's
+            // own panel must never appear inside a selected window's crop.
+            let applications = content.applications.filter { applicationPIDs.contains($0.processID) }
+            guard !applications.isEmpty else { throw CaptureError.noSelectedApplications }
+            filter = SCContentFilter(display: scDisplay, including: applications, exceptingWindows: [])
+        } else {
+            // Whole-display capture is reserved for the diagnostic CLI/probe.
+            filter = SCContentFilter(display: scDisplay, excludingWindows: [])
+        }
 
         let config = SCStreamConfiguration()
         // The load-bearing lines for I-1: exact native pixels, no scaling.
@@ -84,6 +97,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         config.queueDepth = 5
         config.showsCursor = true
         config.scalesToFit = false
+        config.backgroundColor = CGColor(gray: 0, alpha: 1)
 
         let stream = SCStream(filter: filter, configuration: config, delegate: nil)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
@@ -115,6 +129,18 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         }
     }
 
+    /// SCK stops producing complete samples when the screen settles. A decoder
+    /// can still hold the final frame, or be waiting for a recovery keyframe.
+    /// Keep idle sessions advancing without increasing an active stream's FPS.
+    public func requestIdleRefresh() {
+        queue.async { [weak self] in
+            guard let self,
+                DispatchTime.now().uptimeNanoseconds - self.lastEmission >= 250_000_000
+            else { return }
+            self.refreshOnCaptureQueue()
+        }
+    }
+
     private func refreshOnCaptureQueue() {
         let buffer = lock.withLock { stream == nil ? nil : latestPixelBuffer }
         guard let buffer else { return }
@@ -128,6 +154,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         let timestamp = lastPixelPTS.isValid && CMTimeCompare(pts, lastPixelPTS) <= 0
             ? CMTimeAdd(lastPixelPTS, CMTime(value: 1, timescale: 1_000_000)) : pts
         lastPixelPTS = timestamp
+        lastEmission = DispatchTime.now().uptimeNanoseconds
         let signpostState = Log.signposter.beginInterval("capture")
         pixelHook(buffer, timestamp)
         Log.signposter.endInterval("capture", signpostState)
@@ -209,11 +236,14 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
 public enum CaptureError: Error, CustomStringConvertible {
     case displayNotFound(CGDirectDisplayID)
+    case noSelectedApplications
 
     public var description: String {
         switch self {
         case .displayNotFound(let id):
             return "ScreenCaptureKit does not see display id \(id)."
+        case .noSelectedApplications:
+            return "ScreenCaptureKit cannot find the selected apps. Open an app window and try again."
         }
     }
 }

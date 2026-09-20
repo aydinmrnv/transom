@@ -11,6 +11,7 @@ import Foundation
 public actor VideoServer {
     private var active: (id: UUID, transport: any PacketTransport)?
     private var stopped = false
+    var hasClient: Bool { active != nil }
     private var sentConfig = false
     private var waitingForKeyframe = true
     private var seq: UInt64 = 0
