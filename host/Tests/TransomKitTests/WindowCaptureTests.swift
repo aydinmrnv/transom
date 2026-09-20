@@ -1,10 +1,27 @@
 import CoreGraphics
+import ApplicationServices
 import Testing
 
 @testable import TransomKit
 
 @Suite("Window capture bounds")
 struct WindowCaptureTests {
+    @Test("unreadable AX notifications cannot fabricate a window")
+    func rejectsInvalidNotificationElements() {
+        let display = DisplayInfo(id: 1, originPoints: .zero,
+            sizePoints: CGSize(width: 1920, height: 1080),
+            pixelWidth: 3840, pixelHeight: 2160, scale: 2, isMain: true)
+        // No such process exists: both the element and focused-window reads fail.
+        // Previously either event still minted a zero-origin, zero-size window.
+        let pid: pid_t = 999_999_999
+        for notification in [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification] {
+            let registry = WindowRegistry()
+            let watcher = WindowWatcher(pid: pid, display: display, registry: registry)
+            watcher.handle(element: AXWindow.application(pid: pid), notification: notification)
+            #expect(registry.snapshot().isEmpty)
+        }
+    }
+
     @Test("only real positive window crops fit the capture surface")
     func validCrop() {
         #expect(WindowWatcher.captureRect(CGRect(x: 20, y: 60, width: 1200, height: 800),
