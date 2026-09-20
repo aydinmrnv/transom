@@ -95,13 +95,20 @@ impl Session {
             video_stream: None,
             threads: Vec::new(),
         };
+        // Publish display geometry before either reader can publish video.
+        // Otherwise a fast video socket can win the scheduling race and its
+        // only hvcC config is discarded by a renderer with no VDS yet.
+        let mut model = WindowModel::new();
+        for ev in model.apply(hello) {
+            let _ = tx.send(SessionEvent::Control(ev));
+        }
         // Control reader: decode messages, fold into the model, emit ModelEvents.
         {
             let tx = tx.clone();
             threads.push(
                 thread::Builder::new()
                     .name("transom-control".into())
-                    .spawn(move || control_loop(control_read, tx, hello))
+                    .spawn(move || control_loop(control_read, tx, model))
                     .expect("spawn control thread"),
             );
         }
@@ -170,13 +177,7 @@ impl Drop for Session {
     }
 }
 
-fn control_loop(stream: TcpStream, tx: Sender<SessionEvent>, hello: ServerMessage) {
-    let mut model = WindowModel::new();
-    for ev in model.apply(hello) {
-        if tx.send(SessionEvent::Control(ev)).is_err() {
-            return;
-        }
-    }
+fn control_loop(stream: TcpStream, tx: Sender<SessionEvent>, mut model: WindowModel) {
     let mut rx = FramedReceiver::new(stream);
     loop {
         match rx.recv() {
@@ -299,6 +300,49 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::Duration;
+
+    #[test]
+    fn display_geometry_precedes_immediate_video_config() {
+        let control = TcpListener::bind("127.0.0.1:0").unwrap();
+        let video = TcpListener::bind("127.0.0.1:0").unwrap();
+        let control_port = control.local_addr().unwrap().port();
+        let video_port = video.local_addr().unwrap().port();
+        let control_thread = thread::spawn(move || {
+            let (mut socket, _) = control.accept().unwrap();
+            socket
+                .write_all(&crate::wire::frame::frame(
+                    br#"{"type":"hello","protocol":1,"vdsSize":{"w":800,"h":600}}"#,
+                ))
+                .unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+        });
+        let video_thread = thread::spawn(move || {
+            let (mut socket, _) = video.accept().unwrap();
+            socket
+                .write_all(&crate::wire::frame::frame(&[1, 2, 3]))
+                .unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+        });
+        let (session, events) =
+            Session::connect("127.0.0.1", control_port, Some(video_port)).unwrap();
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(2)).unwrap(),
+            SessionEvent::Control(ModelEvent::Connected { .. })
+        ));
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(2)).unwrap(),
+            SessionEvent::Video(VideoEvent::Config { .. })
+        ));
+        drop(session);
+        control_thread.join().unwrap();
+        video_thread.join().unwrap();
+    }
 
     #[test]
     fn handshake_keeps_following_frames_and_drop_closes_connection() {

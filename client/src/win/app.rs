@@ -64,6 +64,7 @@ pub struct App {
     connecting: Option<Receiver<ConnectResult>>,
     active: bool,
     notice: Option<String>,
+    video_notice: Option<String>,
     session: Option<Session>,
     rx: Option<std::sync::mpsc::Receiver<SessionEvent>>,
     proxies: HashMap<u64, Proxy>,
@@ -113,6 +114,7 @@ impl App {
             connecting: None,
             active,
             notice: None,
+            video_notice: None,
             session: None,
             rx: None,
             proxies: HashMap::new(),
@@ -222,6 +224,8 @@ impl App {
         if let Some(c) = &self.selected {
             let state = if let Some(n) = &self.notice {
                 n.clone()
+            } else if let Some(n) = &self.video_notice {
+                n.clone()
             } else if self.cfg.video_port.is_none() {
                 "Control only · video is off".into()
             } else if self.video_decoded > 0 {
@@ -248,6 +252,7 @@ impl App {
         self.video_decoded = 0;
         self.warned_no_decode = false;
         self.notice = None;
+        self.video_notice = None;
         let ids: Vec<_> = self.proxies.keys().copied().collect();
         for id in ids {
             self.destroy_proxy(id);
@@ -369,33 +374,44 @@ impl App {
                 if let Some(vds) = self.vds {
                     match DecoderWorker::start(hvcc, vds.w, vds.h) {
                         Ok(d) => self.decoder = Some(d),
-                        Err(e) => eprintln!("failed to start decoder worker: {e}"),
+                        Err(e) => {
+                            self.video_notice = Some(format!("Cannot start video decoder: {e}"));
+                            self.update_status();
+                        }
                     }
                 }
             }
-            VideoEvent::Frame { data, keyframe, .. } => {
+            VideoEvent::Frame {
+                data,
+                keyframe,
+                pts_micros,
+                ..
+            } => {
                 self.video_in += 1;
-                if let Some(decoder) = self.decoder.as_ref() {
-                    decoder.submit(data, keyframe);
+                if self.video_in <= 3 {
+                    eprintln!(
+                        "video: access unit {} ({} bytes, keyframe={keyframe})",
+                        self.video_in,
+                        data.len()
+                    );
                 }
-                // Access units are arriving but nothing has decoded. The usual cause
-                // is the in-box Media Foundation HEVC decoder refusing the host's
-                // 4:4:4 10-bit stream (it tops out at Main10 4:2:0). Say so once, so
-                // the placeholder checkerboard isn't a silent mystery.
-                if !self.warned_no_decode && self.video_decoded == 0 && self.video_in >= 120 {
+                if let Some(decoder) = self.decoder.as_ref() {
+                    decoder.submit(data, keyframe, pts_micros);
+                }
+                // A newly connected client must wait for a complete keyframe.
+                // Preserve any more specific error reported by the worker.
+                if !self.warned_no_decode
+                    && self.notice.is_none()
+                    && self.video_notice.is_none()
+                    && self.video_decoded == 0
+                    && self.video_in >= 120
+                {
                     self.warned_no_decode = true;
-                    self.notice=Some("Video cannot be decoded. Set the Mac to HEVC 4:2:0 and check the Windows HEVC decoder.".into());
+                    self.video_notice=Some("Video is arriving but no picture has decoded yet. Waiting for a complete keyframe…".into());
                     self.update_status();
                     eprintln!(
-                        "video: received {} access units but decoded 0 frames — the window \
-                         will stay on the placeholder. The in-box HEVC decoder likely can't \
-                         handle the host's 4:4:4 10-bit stream (decoder init {}).",
-                        self.video_in,
-                        if self.decoder.is_some() {
-                            "worker started, but no output completed"
-                        } else {
-                            "failed; see the earlier 'decoder init failed' line"
-                        }
+                        "video: received {} access units; waiting for a decodable keyframe",
+                        self.video_in
                     );
                 }
             }
@@ -406,12 +422,19 @@ impl App {
     /// drain and NV12→BGRA conversion happen on `transom-decode`; this UI-thread
     /// step is only the final D3D texture update.
     fn poll_decoder(&mut self) {
+        if let Some(error) = self.decoder.as_ref().and_then(DecoderWorker::take_error) {
+            self.video_notice = Some(error);
+            self.update_status();
+        }
         let frame = self.decoder.as_ref().and_then(DecoderWorker::take_frame);
         if let (Some(bgra), Some(source)) = (frame, self.source.as_ref()) {
             source.update_bgra(&self.gpu, &bgra);
             self.video_decoded += 1;
+            let recovered = self.video_notice.take().is_some();
             if self.video_decoded == 1 {
-                self.notice = None;
+                eprintln!("video: first decoded frame uploaded to the display texture");
+            }
+            if self.video_decoded == 1 || recovered {
                 self.update_status();
             }
         }
