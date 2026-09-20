@@ -18,15 +18,22 @@ use crate::wire::ClientMessage;
 pub fn connect(host: &str, port: u16) -> io::Result<TcpStream> {
     // Resolve explicitly so a bad host/port gives a clear error, and so we can
     // apply a connect timeout rather than blocking the default ~75s.
-    let addr = (host, port).to_socket_addrs()?.next().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no address for {host}:{port}"),
-        )
-    })?;
-    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
-    stream.set_nodelay(true)?;
-    Ok(stream)
+    let addresses: Vec<_> = (host, port).to_socket_addrs()?.collect();
+    let mut error = io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("no address for {host}:{port}"),
+    );
+    for addr in addresses {
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
+            Ok(stream) => {
+                stream.set_nodelay(true)?;
+                stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+                return Ok(stream);
+            }
+            Err(e) => error = e,
+        }
+    }
+    Err(error)
 }
 
 /// Reads length-prefixed frames off any `Read` (a `TcpStream`, or a `Cursor` in

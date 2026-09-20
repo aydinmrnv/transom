@@ -30,7 +30,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
+use super::connect::{Action, Dashboard};
 use super::gpu::{Gpu, SourceTexture};
+use crate::connections::Connection;
+use std::sync::mpsc::{self, Receiver};
+type ConnectResult = Result<(Connection, Session, Receiver<SessionEvent>), String>;
 use super::input;
 use super::proxy::Proxy;
 use crate::model::ModelEvent;
@@ -55,6 +59,11 @@ pub struct AppConfig {
 pub struct App {
     gpu: Gpu,
     cfg: AppConfig,
+    dashboard: Dashboard,
+    selected: Option<Connection>,
+    connecting: Option<Receiver<ConnectResult>>,
+    active: bool,
+    notice: Option<String>,
     session: Option<Session>,
     rx: Option<std::sync::mpsc::Receiver<SessionEvent>>,
     proxies: HashMap<u64, Proxy>,
@@ -78,10 +87,32 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(gpu: Gpu, cfg: AppConfig) -> App {
+    pub fn new(gpu: Gpu, cfg: Option<AppConfig>, dashboard: Dashboard) -> App {
+        let active = cfg.is_some();
+        let cfg = cfg.unwrap_or(AppConfig {
+            host: String::new(),
+            control_port: crate::wire::DEFAULT_CONTROL_PORT,
+            video_port: Some(crate::wire::DEFAULT_VIDEO_PORT),
+            checkerboard: false,
+        });
+        let selected = if active {
+            Connection::manual(
+                &cfg.host,
+                &cfg.control_port.to_string(),
+                &cfg.video_port.map(|p| p.to_string()).unwrap_or_default(),
+            )
+            .ok()
+        } else {
+            None
+        };
         App {
             gpu,
             cfg,
+            dashboard,
+            selected,
+            connecting: None,
+            active,
+            notice: None,
             session: None,
             rx: None,
             proxies: HashMap::new(),
@@ -108,21 +139,128 @@ impl App {
     /// Attempt to (re)connect the session. Failures are logged and retried on the
     /// backoff; a live host is not required for the window manager to be up.
     fn connect(&mut self) {
-        match Session::connect(&self.cfg.host, self.cfg.control_port, self.cfg.video_port) {
-            Ok((session, rx)) => {
-                eprintln!("connected to {}:{}", self.cfg.host, self.cfg.control_port);
-                self.session = Some(session);
-                self.rx = Some(rx);
-                self.reconnect_at = None;
+        if !self.active || self.connecting.is_some() {
+            return;
+        }
+        let Some(mut connection) = self.selected.clone() else {
+            return;
+        };
+        self.dashboard
+            .set_status(&format!("Connecting to {}…", connection.name), true);
+        let (tx, rx) = mpsc::channel();
+        self.connecting = Some(rx);
+        std::thread::spawn(move || {
+            let result = (|| {
+                // Rediscover saved Bonjour identities before using an endpoint:
+                // a DHCP lease may now belong to a different machine.
+                if !connection.id.starts_with("manual:") {
+                    connection = crate::discovery::scan()
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .find(|c| c.id == connection.id)
+                        .ok_or(
+                            "Mac is offline or not sharing. Open Transom Host and press Start.",
+                        )?;
+                }
+                let (session, events) = Session::connect(
+                    &connection.host,
+                    connection.control_port,
+                    connection.video_port,
+                )
+                .map_err(|e| e.to_string())?;
+                Ok((connection, session, events))
+            })();
+            // If the user cancelled, dropping the failed delivery closes sockets.
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_dashboard(&mut self) {
+        match self.dashboard.tick() {
+            Some(Action::Connect(c)) => {
+                self.disconnect();
+                self.cfg.host = c.host.clone();
+                self.cfg.control_port = c.control_port;
+                self.cfg.video_port = c.video_port;
+                self.selected = Some(c);
+                self.active = true;
+                self.connect();
             }
-            Err(e) => {
-                eprintln!(
-                    "connect to {}:{} failed: {e} (retrying)",
-                    self.cfg.host, self.cfg.control_port
-                );
-                self.reconnect_at = Some(Instant::now() + RECONNECT_DELAY);
+            Some(Action::Disconnect) => {
+                self.disconnect();
+                self.dashboard
+                    .set_status("Disconnected. Your Mac apps are still open.", false);
+            }
+            None => {}
+        }
+        let result = self.connecting.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(result) = result {
+            self.connecting = None;
+            match result {
+                Ok((c, session, rx)) => {
+                    self.cfg.host = c.host.clone();
+                    self.cfg.control_port = c.control_port;
+                    self.cfg.video_port = c.video_port;
+                    self.selected = Some(c.clone());
+                    self.session = Some(session);
+                    self.rx = Some(rx);
+                    self.reconnect_at = None;
+                    self.notice = None;
+                    self.dashboard.remember(c);
+                    self.update_status();
+                }
+                Err(e) => {
+                    self.dashboard
+                        .set_status(&format!("Could not connect: {e} Retrying…"), true);
+                    self.reconnect_at = Some(Instant::now() + RECONNECT_DELAY);
+                }
             }
         }
+    }
+
+    fn update_status(&mut self) {
+        if let Some(c) = &self.selected {
+            let state = if let Some(n) = &self.notice {
+                n.clone()
+            } else if self.cfg.video_port.is_none() {
+                "Control only · video is off".into()
+            } else if self.video_decoded > 0 {
+                "Streaming".into()
+            } else {
+                "Waiting for video…".into()
+            };
+            self.dashboard.set_status(
+                &format!("{} · {} · {} window(s)", c.name, state, self.proxies.len()),
+                true,
+            );
+        }
+    }
+
+    fn clear_session(&mut self) {
+        if let Some(s) = self.session.take() {
+            s.shutdown();
+        }
+        self.rx = None;
+        self.decoder = None;
+        self.source = None;
+        self.vds = None;
+        self.video_in = 0;
+        self.video_decoded = 0;
+        self.warned_no_decode = false;
+        self.notice = None;
+        let ids: Vec<_> = self.proxies.keys().copied().collect();
+        for id in ids {
+            self.destroy_proxy(id);
+        }
+        self.pending_mouse_moves.clear();
+        self.cascade = 0;
+    }
+
+    fn disconnect(&mut self) {
+        self.active = false;
+        self.connecting = None;
+        self.reconnect_at = None;
+        self.clear_session();
     }
 
     /// Send a message to the host, if connected.
@@ -137,7 +275,10 @@ impl App {
     // --- session event handling -----------------------------------------
 
     fn drain_session(&mut self, app_ptr: *mut App) {
-        // Reconnect if it's time.
+        if !self.active {
+            return;
+        }
+        // Reconnect if it's time; network work never blocks the Win32 pump.
         if self.session.is_none() {
             if self
                 .reconnect_at
@@ -157,12 +298,18 @@ impl App {
                 Ok(SessionEvent::Control(ev)) => self.apply_model_event(ev, app_ptr),
                 Ok(SessionEvent::Video(v)) => self.apply_video(v),
                 Ok(SessionEvent::ControlClosed(reason)) => {
-                    eprintln!("control channel closed{}", suffix(reason));
+                    self.dashboard.set_status(
+                        &format!("Connection lost{}. Retrying…", suffix(reason)),
+                        true,
+                    );
                     disconnected = true;
                     break;
                 }
                 Ok(SessionEvent::VideoClosed(reason)) => {
-                    eprintln!("video channel closed{}", suffix(reason));
+                    self.dashboard.set_status(
+                        &format!("Video unavailable{}. Retrying…", suffix(reason)),
+                        true,
+                    );
                     // A video channel can die independently while control stays
                     // open. Reconnect the whole session so the host sends a fresh
                     // hvcC config and the decoder can recover without restarting
@@ -178,9 +325,7 @@ impl App {
             }
         }
         if disconnected {
-            if let Some(s) = self.session.take() {
-                s.shutdown();
-            }
+            self.clear_session();
             self.reconnect_at = Some(Instant::now() + RECONNECT_DELAY);
         } else {
             self.rx = Some(rx);
@@ -212,9 +357,10 @@ impl App {
                 }
             }
             ModelEvent::HostError { code, message } => {
-                eprintln!("host error {code}: {message}");
+                self.notice = Some(format!("Host error {code}: {message}"));
             }
         }
+        self.update_status();
     }
 
     fn apply_video(&mut self, v: VideoEvent) {
@@ -238,6 +384,8 @@ impl App {
                 // the placeholder checkerboard isn't a silent mystery.
                 if !self.warned_no_decode && self.video_decoded == 0 && self.video_in >= 120 {
                     self.warned_no_decode = true;
+                    self.notice=Some("Video cannot be decoded. Set the Mac to HEVC 4:2:0 and check the Windows HEVC decoder.".into());
+                    self.update_status();
                     eprintln!(
                         "video: received {} access units but decoded 0 frames — the window \
                          will stay on the placeholder. The in-box HEVC decoder likely can't \
@@ -262,6 +410,10 @@ impl App {
         if let (Some(bgra), Some(source)) = (frame, self.source.as_ref()) {
             source.update_bgra(&self.gpu, &bgra);
             self.video_decoded += 1;
+            if self.video_decoded == 1 {
+                self.notice = None;
+                self.update_status();
+            }
         }
     }
 
@@ -731,6 +883,7 @@ pub fn run_pump(mut app: Box<App>) {
     unsafe { (*app_ptr).connect() };
 
     loop {
+        unsafe { (*app_ptr).poll_dashboard() };
         // 1. Fold in any protocol events (may create/destroy windows).
         unsafe { (*app_ptr).drain_session(app_ptr) };
         unsafe { (*app_ptr).poll_decoder() };
@@ -747,6 +900,9 @@ pub fn run_pump(mut app: Box<App>) {
             if msg.message == WM_QUIT {
                 quit = true;
                 break;
+            }
+            if unsafe { (*app_ptr).dashboard.dialog_message(&msg) } {
+                continue;
             }
             unsafe {
                 let _ = TranslateMessage(&msg);

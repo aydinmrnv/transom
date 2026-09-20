@@ -27,6 +27,8 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod connections;
+mod discovery;
 mod model;
 mod net;
 mod runner;
@@ -127,7 +129,7 @@ fn print_usage() {
          --version        Print version\n\
          \n\
          Run `transom-client connect` with no host for its own options.\n\
-         The host is `transom-host serve` on the Mac; connect by IP (no discovery).",
+         Open the dashboard to discover nearby Macs, or connect by hostname/IP.",
         env!("CARGO_PKG_VERSION")
     );
 }
