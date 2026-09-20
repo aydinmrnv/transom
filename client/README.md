@@ -67,6 +67,11 @@ added as needed; no new crates — invariants I-8).
    open. The Mac app's own close control still closes its remote document.
 5. **Disconnect** closes the local views. Closing the dashboard exits Transom.
 
+**Ctrl+Alt+Shift+D** disconnects from the dashboard or any focused remote window,
+including a maximized view, and returns to the dashboard. It also cancels a pending
+connection/retry. The shortcut is handled locally; it leaves Mac documents open
+and does not reserve a system-wide hotkey while other apps have focus.
+
 Successful connections are stored in `%LocalAppData%\Transom\connections.json`.
 Discovered Macs are resolved by stable identity when their IP changes. Saved
 and discovered entries for the same endpoint are combined. In **Macs**, use

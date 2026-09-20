@@ -684,6 +684,16 @@ impl State {
         let hero = rect(236., 48., w - 260., 148.);
         p.gradient(hero, 12., 0x233044, 0x111C2B, 0.67);
         p.stroke(hero, 12., glass::LINE, 0.65, 0.8);
+        if self.active {
+            p.text(
+                super::input::DISCONNECT_SHORTCUT,
+                rect(w - 240., 149., 222., 24.),
+                11.,
+                false,
+                glass::MUTED,
+                true,
+            );
+        }
         let selected = self.selected();
         let name = selected
             .as_ref()

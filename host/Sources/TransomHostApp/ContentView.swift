@@ -5,7 +5,7 @@ import SwiftUI
 import TransomKit
 
 struct ContentView: View {
-    @StateObject private var host = HostAppModel()
+    @ObservedObject var host: HostAppModel
     @State private var displays: [DisplayInfo] = []
     @State private var apps: [TargetApp] = []
     @State private var selectedPIDs: Set<pid_t> = []
@@ -124,6 +124,7 @@ struct ContentView: View {
             if host.running {
                 Button("Stop sharing") { host.stop() }
                     .controlSize(.large).buttonStyle(.bordered)
+                    .help("Stop sharing (⇧⌥⌘D). Your Mac windows stay open.")
             } else {
                 Button(host.starting ? "Starting…" : "Start sharing", action: startSharing)
                     .controlSize(.large).buttonStyle(.borderedProminent)

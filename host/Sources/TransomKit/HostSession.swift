@@ -167,6 +167,8 @@ public final class HostSession: @unchecked Sendable {
     private var watcherRunLoop: CFRunLoop?
     private var controlListener: TCPListener?
     private var videoListener: TCPListener?
+    private var controlServer: ControlServer?
+    private var videoServer: VideoServer?
     private var capture: DisplayCapture?
     private var encoder: HEVCEncoder?
     private var eventSink: AsyncStream<WindowWatcher.WindowEvent>.Continuation?
@@ -337,6 +339,7 @@ public final class HostSession: @unchecked Sendable {
         self.clientSink = clientSink
 
         let controlServer = ControlServer(vdsSize: vdsSize, registry: registry)
+        self.controlServer = controlServer
         await controlServer.setOnClientMessage { message in clientSink.yield(message) }
         await controlServer.setOnConnectionChange { [weak self] connected in
             self?.statsLock.withLock { self?.controlConnected = connected }
@@ -421,6 +424,7 @@ public final class HostSession: @unchecked Sendable {
         self.capture = cap
 
         let videoServer = VideoServer(hvccProvider: { enc.parameterSetsHVCC })
+        self.videoServer = videoServer
         await videoServer.setOnConnectionChange { [weak self, weak enc, weak cap] connected in
             self?.statsLock.withLock { self?.videoConnected = connected }
             if connected {
@@ -456,6 +460,8 @@ public final class HostSession: @unchecked Sendable {
     public func stop() async {
         controlListener?.stop()
         videoListener?.stop()
+        await controlServer?.stop()
+        await videoServer?.stop()
         if let capture { await capture.stop() }
         encoder?.finish()
         eventSink?.finish()
@@ -471,6 +477,8 @@ public final class HostSession: @unchecked Sendable {
         watcherRunLoop = nil
         controlListener = nil
         videoListener = nil
+        controlServer = nil
+        videoServer = nil
         capture = nil
         encoder = nil
         eventSink = nil

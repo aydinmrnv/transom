@@ -650,6 +650,17 @@ one? Unknown.
 
 ---
 
+### Stop Sharing must close accepted sockets
+
+Code inspection during the 0.4.3 disconnect-shortcut work found that stopping
+the `NWListener` and cancelling the server tasks did not explicitly close their
+accepted `NWConnection`s. A task suspended in the callback-backed receive can
+remain alive after cancellation. `HostSession.stop()` now closes both servers'
+active transports before releasing capture and input state. Each server rejects
+connections already queued when it stopped and emits one disconnect callback.
+Regression tests exercise shutdown with a receive in progress. This is a code
+finding; real Mac capture and permission behavior require separate validation.
+
 ## 9. Decision log
 
 | Decision | Rationale |

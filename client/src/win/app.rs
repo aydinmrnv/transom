@@ -209,9 +209,7 @@ impl App {
                 self.connect();
             }
             Some(Action::Disconnect) => {
-                self.disconnect();
-                self.dashboard
-                    .set_status("Disconnected. Your Mac apps are still open.", false);
+                self.disconnect_to_dashboard();
             }
             Some(Action::OpenWindow(id)) => {
                 if let Some(proxy) = self.proxies.get(&id) {
@@ -317,6 +315,24 @@ impl App {
         self.connecting = None;
         self.reconnect_at = None;
         self.clear_session();
+    }
+
+    fn disconnect_to_dashboard(&mut self) {
+        self.disconnect();
+        self.dashboard
+            .set_status("Disconnected. Your Mac apps are still open.", false);
+        unsafe {
+            let hwnd = self.dashboard.hwnd;
+            let _ = ShowWindow(
+                hwnd,
+                if IsIconic(hwnd).as_bool() {
+                    SW_RESTORE
+                } else {
+                    SW_SHOW
+                },
+            );
+            let _ = SetForegroundWindow(hwnd);
+        }
     }
 
     /// Send a message to the host, if connected.
@@ -1070,6 +1086,15 @@ pub fn run_pump(mut app: Box<App>) {
             if msg.message == WM_QUIT {
                 quit = true;
                 break;
+            }
+            // This pump owns the dashboard and every proxy. Consume the shortcut
+            // before TranslateMessage/DispatchMessage so D never reaches the Mac.
+            // Socket shutdown also releases the host's held modifier state.
+            if input::is_disconnect_message(&msg) {
+                unsafe {
+                    (*app_ptr).disconnect_to_dashboard();
+                }
+                continue;
             }
             if unsafe { (*app_ptr).dashboard.dialog_message(&msg) } {
                 continue;

@@ -10,6 +10,7 @@ import Foundation
 /// because an `hvc1` stream is undecodable without them.
 public actor VideoServer {
     private var active: (id: UUID, transport: any PacketTransport)?
+    private var stopped = false
     private var sentConfig = false
     private var waitingForKeyframe = true
     private var seq: UInt64 = 0
@@ -37,6 +38,10 @@ public actor VideoServer {
     }
 
     func serveConnection(_ transport: any PacketTransport) async {
+        guard !stopped, !Task.isCancelled else {
+            await transport.close()
+            return
+        }
         let connectionID = UUID()
         active = (connectionID, transport)
         sentConfig = false
@@ -46,7 +51,7 @@ public actor VideoServer {
         // The client sends nothing on this channel; the receive loop just detects
         // disconnect so the host can stop targeting a dead socket.
         do {
-            while try await transport.receiveFrame() != nil {}
+            while !stopped, try await transport.receiveFrame() != nil {}
         } catch {
             // fall through to cleanup
         }
@@ -56,6 +61,15 @@ public actor VideoServer {
             onConnectionChange?(false)
         }
         await transport.close()
+    }
+
+    /// Stop the accepted connection as well as any buffered listener arrivals.
+    public func stop() async {
+        stopped = true
+        guard let active else { return }
+        self.active = nil
+        onConnectionChange?(false)
+        await active.transport.close()
     }
 
     /// Send one encoded frame to the connected client, if any. Config is sent
