@@ -9,10 +9,9 @@
 #define AppName "Transom"
 #define AppPublisher "Transom"
 #define AppExeName "transom-client.exe"
-#define AppId "{D6C3D6F7-0D1B-49B7-9B3F-2C32B48E1B3E}"
 
 [Setup]
-AppId={#AppId}
+AppId={{D6C3D6F7-0D1B-49B7-9B3F-2C32B48E1B3E}
 AppName={#AppName}
 AppPublisher={#AppPublisher}
 AppVersion={#AppVersion}
