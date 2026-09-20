@@ -54,6 +54,7 @@ enum HostDefaults {
         let defaults = UserDefaults.standard
         guard let saved = defaults.string(forKey: bindAddress),
             PrivateAddress.isPrivateIPv4(saved),
+            !saved.hasPrefix("127."),
             !HostDiscovery.localAddresses().contains(saved),
             let replacement = HostDiscovery.localAddresses().first
         else { return }
