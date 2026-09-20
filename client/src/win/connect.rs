@@ -6,6 +6,7 @@
 //! window manager.
 
 use std::ffi::c_void;
+use std::process::Command;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
@@ -31,6 +32,7 @@ const ID_CONTROL_PORT: usize = 1002;
 const ID_VIDEO: usize = 1003;
 const ID_CONNECT: usize = 1004;
 const ID_CANCEL: usize = 1005;
+const ID_UPDATE: usize = 1006;
 
 pub struct Connection {
     pub host: String,
@@ -126,6 +128,8 @@ unsafe extern "system" fn window_proc(
                 submit(hwnd);
             } else if id == ID_CANCEL {
                 let _ = DestroyWindow(hwnd);
+            } else if id == ID_UPDATE {
+                launch_updater(hwnd);
             }
             LRESULT(0)
         }
@@ -260,6 +264,17 @@ unsafe fn create_controls(hwnd: HWND) {
     );
     let _ = child(
         w!("BUTTON"),
+        w!("Check for updates"),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        24,
+        264,
+        150,
+        30,
+        hwnd,
+        ID_UPDATE,
+    );
+    let _ = child(
+        w!("BUTTON"),
         w!("Connect"),
         WS_CHILD
             | WS_VISIBLE
@@ -363,6 +378,10 @@ unsafe fn submit(hwnd: HWND) {
         show_error(hwnd, "Control port must be a number between 1 and 65535.");
         return;
     };
+    if control_port == 0 {
+        show_error(hwnd, "Control port must be a number between 1 and 65535.");
+        return;
+    }
     if host.trim().is_empty() {
         show_error(hwnd, "Enter the Mac's private network address.");
         return;
@@ -384,6 +403,31 @@ unsafe fn submit(hwnd: HWND) {
         video_port,
     });
     let _ = DestroyWindow(hwnd);
+}
+
+/// Start the companion updater next to the installed client. Keeping update
+/// discovery outside the main process means the client can be closed and
+/// replaced cleanly by the installer without self-update races.
+unsafe fn launch_updater(hwnd: HWND) {
+    let Ok(client_path) = std::env::current_exe() else {
+        show_error(hwnd, "Transom could not locate its installation folder.");
+        return;
+    };
+    let updater = client_path.with_file_name("transom-updater.exe");
+    if !updater.is_file() {
+        show_error(
+            hwnd,
+            "The updater is not installed. Reinstall Transom using the latest setup file.",
+        );
+        return;
+    }
+    if Command::new(updater)
+        .args(["--check", "--current-version", env!("CARGO_PKG_VERSION")])
+        .spawn()
+        .is_err()
+    {
+        show_error(hwnd, "Transom could not start its updater.");
+    }
 }
 
 unsafe fn read_text(hwnd: HWND) -> String {

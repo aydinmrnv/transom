@@ -1,0 +1,92 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish Windows installer
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Read client version
+        id: version
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object { $_.name -eq 'transom-client' }).version
+          if ([string]::IsNullOrWhiteSpace($version)) { throw 'Could not read the client version.' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Unit tests
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build client and updater
+        run: cargo build --locked --release --bin transom-client --bin transom-updater
+
+      - name: Locate Inno Setup
+        id: inno
+        shell: pwsh
+        working-directory: .
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress --yes
+            $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw 'Inno Setup compiler was not found.' }
+          "path=$iscc" >> $env:GITHUB_OUTPUT
+
+      - name: Build installer
+        shell: pwsh
+        working-directory: .
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          ISCC: ${{ steps.inno.outputs.path }}
+        run: |
+          New-Item -ItemType Directory -Force client\dist | Out-Null
+          & $env:ISCC "/DAppVersion=$env:APP_VERSION" "$PWD\client\installer\Transom.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          $installer = Get-Item "client\dist\TransomSetup-v$env:APP_VERSION.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 $installer.FullName).Hash.ToLowerInvariant()
+          "$hash  $($installer.Name)" | Set-Content "client\dist\Transom-Windows-v$env:APP_VERSION-SHA256SUMS.txt" -Encoding ascii
+
+      - name: Publish GitHub release
+        shell: pwsh
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $tag = "v$env:APP_VERSION"
+          $installer = "client\dist\TransomSetup-v$env:APP_VERSION.exe"
+          $checksums = "client\dist\Transom-Windows-v$env:APP_VERSION-SHA256SUMS.txt"
+          gh release create $tag $installer $checksums `
+            --repo "${{ github.repository }}" `
+            --target "${{ github.sha }}" `
+            --title "Transom $tag — Windows installer" `
+            --notes "This release contains the SHA-256-verified Windows installer. It installs the native client and updater per-user under LocalAppData, creates Start Menu shortcuts, and can update from the connection window. The installer is not Authenticode-signed yet." `
+            --prerelease

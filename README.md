@@ -113,9 +113,10 @@ app is notarized.
 2. Open the signed `Transom Host.app`, grant Screen Recording and Accessibility,
    select that display and the app to share, then set Settings → Connection →
    Address to the Mac's private LAN address. Press **Start**.
-3. Copy the Windows command shown in the host window and run it beside
-   `transom-client.exe`. The default ports are `47100` (control) and `47101`
-   (video); the host app and client already agree on them.
+3. Download and run `TransomSetup-vX.Y.Z.exe` from the GitHub release. It
+   installs the Windows client and creates a Start Menu shortcut. Open Transom,
+   enter the Mac address, and press **Connect**. The default ports are `47100`
+   (control) and `47101` (video); the host app and client already agree on them.
 4. Move, resize, focus, type, scroll, and close the resulting native Windows
    proxy window. Stop the host when finished.
 

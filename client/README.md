@@ -72,6 +72,24 @@ transom-client run 192.168.1.20 --control-port 47100 --video
 transom-client run 192.168.1.20 --control-port 47100 --checkerboard
 ```
 
+Double-clicking `transom-client.exe` opens the same connection window as
+`transom-client run`; it no longer exits into a command-line help screen.
+
+## Install and update on Windows
+
+Use the `TransomSetup-vX.Y.Z.exe` asset from the GitHub release. It installs
+Transom per-user under `%LocalAppData%\Programs\Transom`, creates a Start Menu
+shortcut, optionally creates a desktop shortcut, and registers an uninstaller.
+The setup is safe to run over an existing Transom install and preserves the
+same install location.
+
+The connection window's **Check for updates** button and the Start Menu's
+**Check for updates** shortcut look for the newest GitHub release, download its
+installer over HTTPS, verify the published SHA-256 checksum, and hand off to the
+installer. The updater is a separate process so it can replace the running
+client cleanly. Releases are currently not Authenticode-signed; Windows may show
+the normal SmartScreen prompt until a signing certificate is configured.
+
 `connect` is the same protocol core with no GPU: it prints the control stream and
 can send test input/resize, so it works on **any** host and is how the wire is
 verified without a Windows box.

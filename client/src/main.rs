@@ -25,6 +25,8 @@
 //!    it opens the connection form.
 //!  * `doctor` — D3D11 / DPI / monitor health check (Windows only).
 
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod model;
 mod net;
 mod runner;
@@ -50,10 +52,11 @@ fn main() -> ExitCode {
         Some("doctor") => run_doctor(),
         Some("connect") => runner::run(&args[1..]),
         Some("run") => run_gui(&args[1..]),
-        Some("-h") | Some("--help") | Some("help") | None => {
+        Some("-h") | Some("--help") | Some("help") => {
             print_usage();
             ExitCode::SUCCESS
         }
+        None => run_default(),
         Some("--version") | Some("-V") => {
             println!("transom-client {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -64,6 +67,21 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Explorer launches the installed client without arguments. Make that the
+/// product path: open the connection window instead of printing CLI help and
+/// exiting. The command-line surface remains available through explicit
+/// subcommands (`run`, `connect`, and `doctor`).
+#[cfg(windows)]
+fn run_default() -> ExitCode {
+    run_gui(&[])
+}
+
+#[cfg(not(windows))]
+fn run_default() -> ExitCode {
+    print_usage();
+    ExitCode::SUCCESS
 }
 
 #[cfg(windows)]

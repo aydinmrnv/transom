@@ -1,6 +1,6 @@
 [package]
 name = "transom-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.74"
 license = "AGPL-3.0-or-later"
@@ -12,6 +12,10 @@ publish = false
 [[bin]]
 name = "transom-client"
 path = "src/main.rs"
+
+[[bin]]
+name = "transom-updater"
+path = "src/updater.rs"
 
 # windows-rs is the ONLY runtime dependency, and only on Windows targets — the
 # protocol core (wire/model/net/session) is pure Rust and needs nothing, which is
