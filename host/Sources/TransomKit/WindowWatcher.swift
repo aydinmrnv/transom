@@ -31,6 +31,7 @@ public final class WindowWatcher: @unchecked Sendable {
 
     public var onEvent: (@Sendable (WindowEvent) -> Void)?
 
+    private let appName: String?
     private let pid: pid_t
     private let display: DisplayInfo
     private let registry: WindowRegistry
@@ -50,7 +51,8 @@ public final class WindowWatcher: @unchecked Sendable {
         kAXUIElementDestroyedNotification,
     ]
 
-    public init(pid: pid_t, display: DisplayInfo, registry: WindowRegistry) {
+    public init(pid: pid_t, display: DisplayInfo, registry: WindowRegistry, appName: String? = nil) {
+        self.appName = appName
         self.pid = pid
         self.display = display
         self.registry = registry
@@ -112,7 +114,7 @@ public final class WindowWatcher: @unchecked Sendable {
             }
         case kAXTitleChangedNotification:
             let (id, _) = registry.id(for: element)
-            let title = AXWindow(element: element, index: -1).title
+            let title = displayTitle(AXWindow(element: element, index: -1).title)
             registry.updateTitle(id: id, title: title)
             emit(.titleChanged(id: id, title: title))
         case kAXUIElementDestroyedNotification:
@@ -139,7 +141,7 @@ public final class WindowWatcher: @unchecked Sendable {
             }
         }
         let win = AXWindow(element: element, index: -1)
-        let title = win.title
+        let title = displayTitle(win.title)
         let r = rect(of: element) ?? WireRect(x: 0, y: 0, w: 0, h: 0)
         registry.record(id: id, rect: r, title: title)
         emit(.created(id: id, rect: r, title: title))
@@ -152,6 +154,11 @@ public final class WindowWatcher: @unchecked Sendable {
         let vds = Coordinates.displayPixels(
             fromAXRect: frame, displayOriginPoints: display.originPoints, scale: display.scale)
         return WireRect(clampingVDSPixels: vds)
+    }
+
+    private func displayTitle(_ title: String) -> String {
+        guard let appName, !appName.isEmpty else { return title }
+        return title.isEmpty || title == appName ? appName : "\(appName) — \(title)"
     }
 
     private func emit(_ event: WindowEvent) {

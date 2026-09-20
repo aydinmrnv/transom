@@ -52,8 +52,15 @@ public enum TileService {
     public static func layout(pid: pid_t, display: DisplayInfo, gutter: Int)
         -> Result<[TilePlacement], TilerError>
     {
+        layout(pids: [pid], display: display, gutter: gutter)
+    }
+
+    /// One global layout across the selected apps, never overlapping per-app layouts.
+    public static func layout(pids: [pid_t], display: DisplayInfo, gutter: Int, fit: Bool = false)
+        -> Result<[TilePlacement], TilerError>
+    {
         var placeable: [(win: AXWindow, sizePoints: CGSize, sizePixels: TileSize)] = []
-        for win in AXWindow.windows(pid: pid) where win.role == (kAXWindowRole as String) {
+        for win in pids.flatMap({ AXWindow.windows(pid: $0) }) where win.role == (kAXWindowRole as String) {
             guard let size = win.size() else { continue }
             let px = TileSize(
                 width: Int(
@@ -66,15 +73,18 @@ public enum TileService {
         guard !placeable.isEmpty else { return .success([]) }
 
         let displaySize = TileSize(width: display.pixelWidth, height: display.pixelHeight)
-        switch Tiler.layout(
-            windows: placeable.map(\.sizePixels), display: displaySize, gutter: gutter)
-        {
+        let sizes = placeable.map(\.sizePixels)
+        let result = fit ? Tiler.fittedLayout(windows: sizes, display: displaySize, gutter: gutter)
+            : Tiler.layout(windows: sizes, display: displaySize, gutter: gutter)
+        switch result {
         case .failure(let error):
             return .failure(error)
         case .success(let rects):
             var placements: [TilePlacement] = []
             placements.reserveCapacity(placeable.count)
-            for (placement, rect) in zip(placeable, rects) {
+            let originalFrames = placeable.map { $0.win.frame() }
+            for (index, pair) in zip(placeable, rects).enumerated() {
+                let (placement, rect) = pair
                 let axRect = Coordinates.axGlobalRect(
                     fromDisplayPixels: CGRect(
                         x: CGFloat(rect.x), y: CGFloat(rect.y),
@@ -82,13 +92,26 @@ public enum TileService {
                     displayOriginPoints: display.originPoints,
                     scale: display.scale)
                 let result = placement.win.place(
-                    position: axRect.origin, size: placement.sizePoints)
+                    position: axRect.origin, size: axRect.size)
                 placements.append(
                     TilePlacement(
-                        index: placement.win.index,
+                        index: index,
                         title: placement.win.title,
                         requested: rect,
                         actual: Self.actualVDSRect(from: result, display: display)))
+            }
+            // A Mac app can refuse a move or enforce a larger minimum. Never
+            // announce an overlapping sprite sheet as a successful session.
+            let actual = placements.compactMap(\.actual)
+            let invalid = actual.count != placements.count || actual.enumerated().contains { i, r in
+                r.x < 0 || r.y < 0 || r.maxX > displaySize.width || r.maxY > displaySize.height
+                    || actual.prefix(i).contains(where: { $0.intersects(r) })
+            }
+            if invalid {
+                for (item, frame) in zip(placeable, originalFrames) {
+                    if let frame { _ = item.win.place(position: frame.origin, size: frame.size) }
+                }
+                return .failure(.actualGeometryRejected)
             }
             return .success(placements)
         }

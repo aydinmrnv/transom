@@ -7,6 +7,7 @@ import Foundation
 /// `serve` CLI takes, in one `Sendable` value the host app can also build.
 public struct HostConfig: Sendable {
     public var target: TargetApp
+    public var additionalTargets: [TargetApp]
     public var display: DisplayInfo
     public var host: String
     public var controlPort: UInt16
@@ -28,6 +29,7 @@ public struct HostConfig: Sendable {
 
     public init(
         target: TargetApp,
+        additionalTargets: [TargetApp] = [],
         display: DisplayInfo,
         host: String = "127.0.0.1",
         controlPort: UInt16 = TransomPorts.control,
@@ -42,6 +44,8 @@ public struct HostConfig: Sendable {
         logInput: Bool = false
     ) {
         self.target = target
+        var seen: Set<pid_t> = [target.pid]
+        self.additionalTargets = additionalTargets.filter { seen.insert($0.pid).inserted }
         self.display = display
         self.host = host
         self.controlPort = controlPort
@@ -159,7 +163,7 @@ public final class HostSession: @unchecked Sendable {
 
     // Lifecycle-owned; mutated only inside start()/stop().
     private var registry: WindowRegistry?
-    private var watcher: WindowWatcher?
+    private var watchers: [WindowWatcher] = []
     private var watcherRunLoop: CFRunLoop?
     private var controlListener: TCPListener?
     private var videoListener: TCPListener?
@@ -267,24 +271,28 @@ public final class HostSession: @unchecked Sendable {
 
         // Tile once at startup so streamed windows are non-overlapping (I-5), and
         // keep the requested-vs-actual placements for the Status view (I-4/OQ-2).
+        let targets = [config.target] + config.additionalTargets
         if config.tile {
-            switch TileService.layout(pid: config.target.pid, display: disp, gutter: config.gutter)
+            switch TileService.layout(pids: targets.map(\.pid), display: disp, gutter: config.gutter, fit: targets.count > 1)
             {
             case .success(let placements):
                 statsLock.withLock { tilePlacements = placements }
             case .failure(let error):
                 statsLock.withLock { tileError = error.description }
-                Log.general.notice(
-                    "serve: tiling failed: \(error.description, privacy: .public)")
+                throw ProbeError("The selected windows do not fit on the sharing display. Choose fewer apps or a larger display. \(error.description)")
             }
         }
 
         // Control channel: AX events -> ordered broadcast via one AsyncStream.
         let (events, eventSink) = AsyncStream.makeStream(of: WindowWatcher.WindowEvent.self)
         self.eventSink = eventSink
-        let watcher = WindowWatcher(pid: config.target.pid, display: disp, registry: registry)
-        watcher.onEvent = { event in eventSink.yield(event) }
-        self.watcher = watcher
+        let watchers = targets.map { target in
+            let watcher = WindowWatcher(pid: target.pid, display: disp, registry: registry,
+                appName: target.name)
+            watcher.onEvent = { event in eventSink.yield(event) }
+            return watcher
+        }
+        self.watchers = watchers
 
         // Phase 4 (issue #6): the geometry roundtrip. Client RequestResize is
         // throttled (~10Hz), written to AX, read back, and emitted as windowMoved
@@ -325,7 +333,7 @@ public final class HostSession: @unchecked Sendable {
             let watcherThread = Thread {
                 ctx.runLoop = CFRunLoopGetCurrent()
                 do {
-                    try watcher.start()
+                    for watcher in watchers { try watcher.start() }
                     cont.resume()
                 } catch {
                     cont.resume(throwing: error)
@@ -436,7 +444,7 @@ public final class HostSession: @unchecked Sendable {
 
         tasks = []
         registry = nil
-        watcher = nil
+        watchers = []
         watcherRunLoop = nil
         controlListener = nil
         videoListener = nil
