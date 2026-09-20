@@ -24,8 +24,8 @@ struct ContentView: View {
     // Persisted config — the source of truth is the Settings window (Cmd-,); these
     // read the same UserDefaults keys and are consumed at Start (HostDefaults).
     @AppStorage(HostDefaults.bindAddress) private var bindAddress = "127.0.0.1"
-    @AppStorage(HostDefaults.controlPort) private var controlPort = 7000
-    @AppStorage(HostDefaults.videoPort) private var videoPort = 7001
+    @AppStorage(HostDefaults.controlPort) private var controlPort = HostDefaults.defaultControlPort
+    @AppStorage(HostDefaults.videoPort) private var videoPort = HostDefaults.defaultVideoPort
     @AppStorage(HostDefaults.bitrateMbps) private var bitrateMbps = 40
     @AppStorage(HostDefaults.fps) private var fps = 60
     @AppStorage(HostDefaults.gutter) private var gutter = Tiler.defaultGutter
@@ -50,6 +50,7 @@ struct ContentView: View {
     /// the recap shows (e.g. 70000 → 65535), binding somewhere the user never asked.
     private var portsValid: Bool {
         HostDefaults.portRange.contains(controlPort) && HostDefaults.portRange.contains(videoPort)
+            && (!videoEnabled || controlPort != videoPort)
     }
     private var canStart: Bool {
         permissionsReady && selectedAppPID != 0 && selectedDisplayID != 0 && hostIsPrivate
@@ -76,6 +77,7 @@ struct ContentView: View {
                 SettingsLink { Label("Settings", systemImage: "gearshape") }
             }
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .onAppear(perform: refreshAll)
         .onReceive(permTimer) { _ in refreshPermissions() }
     }
@@ -83,22 +85,58 @@ struct ContentView: View {
     // MARK: - Header
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Transom Host").font(.largeTitle).bold()
-            Text(
-                "Control panel for the host half — the same thing `transom-host serve` runs. "
-                    + "Point it at a display and an app, then Start. Not a product; a thing that runs."
-            )
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+        HStack(alignment: .top, spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.accentColor.gradient)
+                Image(systemName: "rectangle.on.rectangle.angled")
+                    .font(.system(size: 27, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 58, height: 58)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Transom Host").font(.largeTitle).bold()
+                Text("Share Mac app windows with your Windows PC as native, movable windows.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 16)
+            readinessBadge
         }
+    }
+
+    private var readinessBadge: some View {
+        HStack(spacing: 7) {
+            Circle().fill(readinessColor).frame(width: 9, height: 9)
+            Text(readinessLabel).font(.caption.bold()).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.secondary.opacity(0.08), in: Capsule())
+    }
+
+    private var readinessLabel: String {
+        if host.running { return "Sharing" }
+        if host.starting { return "Starting…" }
+        if !permissionsReady { return "Needs permissions" }
+        if selectedAppPID == 0 || selectedDisplayID == 0 { return "Ready to configure" }
+        if !hostIsPrivate || !portsValid { return "Check settings" }
+        return "Ready to share"
+    }
+
+    private var readinessColor: Color {
+        if host.running { return .green }
+        if host.starting { return .orange }
+        if !permissionsReady || !hostIsPrivate || !portsValid { return .red }
+        return .accentColor
     }
 
     // MARK: - 1. Permissions
 
     private var permissionsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Permissions", nil)
+            sectionHeader("1. Permissions", "required")
 
             permissionRow(
                 "Screen Recording", granted: screenRecording,
@@ -137,6 +175,7 @@ struct ContentView: View {
             }
             Spacer()
             Button("Open Settings", action: openSettings)
+                .buttonStyle(.bordered)
         }
     }
 
@@ -166,7 +205,7 @@ struct ContentView: View {
 
     private var configurationSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Configuration", nil)
+            sectionHeader("2. Session setup", "before starting")
 
             HStack {
                 Picker("Display", selection: $selectedDisplayID) {
@@ -194,14 +233,17 @@ struct ContentView: View {
             }
 
             settingsSummaryRow
+            connectionCard
 
             HStack(spacing: 12) {
                 if host.running {
-                    Button("Stop", role: .destructive) { host.stop() }
+                    Button("Stop sharing", role: .destructive) { host.stop() }
+                        .buttonStyle(.bordered)
                 } else {
                     Button(host.starting ? "Starting…" : "Start") { startServing() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(!canStart)
+                        .buttonStyle(.borderedProminent)
                 }
                 if !permissionsReady {
                     Text("Grant the permissions above first.")
@@ -210,8 +252,10 @@ struct ContentView: View {
                     Text("Bind address isn't private — fix it in Settings (⌘,) before Start.")
                         .font(.caption).foregroundStyle(.red)
                 } else if !portsValid {
-                    Text("Ports must be 1–65535 — fix them in Settings (⌘,) before Start.")
-                        .font(.caption).foregroundStyle(.red)
+                    Text(
+                        "Ports must be valid and different — fix them in Settings (⌘,) before Start."
+                    )
+                    .font(.caption).foregroundStyle(.red)
                 }
             }
 
@@ -257,11 +301,54 @@ struct ContentView: View {
         return parts.joined(separator: "  ·  ")
     }
 
+    /// The handoff between the Mac and Windows is deliberately copyable. This
+    /// removes the two most common first-run mistakes: using localhost from the
+    /// other machine and forgetting that the client must use the same port.
+    private var connectionCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Windows connection", systemImage: "display.2")
+                    .font(.headline)
+                Spacer()
+                Button("Copy command") { copyWindowsCommand() }
+            }
+            Text("Run this on Windows after pressing Start:")
+                .font(.caption).foregroundStyle(.secondary)
+            Text(windowsCommand)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            if bindAddress == "127.0.0.1" {
+                Label(
+                    "127.0.0.1 only accepts connections from this Mac. Set a private LAN address in Settings for a separate Windows PC.",
+                    systemImage: "info.circle"
+                )
+                .font(.caption2).foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("LAN-only bind · no authentication or encryption · trusted network only")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(Color.accentColor.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor.opacity(0.25)))
+        .cornerRadius(8)
+    }
+
+    private var windowsCommand: String {
+        var command = "transom-client run \(bindAddress) --control-port \(controlPort)"
+        if videoEnabled {
+            command += " --video-port \(videoPort)"
+        }
+        return command
+    }
+
     // MARK: - 3. Status
 
     private var statusSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            sectionHeader("Status", "live")
+            sectionHeader("3. Live session", "live")
 
             clientRow
             previewSection
@@ -286,8 +373,12 @@ struct ContentView: View {
                 clientBadge("video client", connected: host.status.videoClientConnected)
             }
             Spacer()
-            Text("\(host.status.liveWindowCount) window(s) tracked")
-                .font(.caption).foregroundStyle(.secondary)
+            Text(
+                "\(host.status.liveWindowCount) "
+                    + (host.status.liveWindowCount == 1 ? "window" : "windows")
+                    + " tracked"
+            )
+            .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -557,6 +648,11 @@ struct ContentView: View {
 
     private func open(_ urlString: String) {
         if let url = URL(string: urlString) { NSWorkspace.shared.open(url) }
+    }
+
+    private func copyWindowsCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(windowsCommand, forType: .string)
     }
 }
 

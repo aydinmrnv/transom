@@ -24,6 +24,22 @@ enum HostDefaults {
     /// Valid TCP port range. Start is gated on both ports falling inside it so a
     /// value never gets silently clamped into a different endpoint at serve time.
     static let portRange = 1...65535
+    static let defaultControlPort = Int(TransomPorts.control)
+    static let defaultVideoPort = Int(TransomPorts.video)
+
+    /// Upgrade the old prototype defaults once. Existing custom port choices
+    /// are preserved; only the untouched 7000/7001 pair is migrated.
+    static func migrateLegacyPorts() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: "host.portDefaultsMigrated") == false else { return }
+        let oldControl = defaults.object(forKey: controlPort) as? Int ?? 7000
+        let oldVideo = defaults.object(forKey: videoPort) as? Int ?? 7001
+        if oldControl == 7000 && oldVideo == 7001 {
+            defaults.set(defaultControlPort, forKey: controlPort)
+            defaults.set(defaultVideoPort, forKey: videoPort)
+        }
+        defaults.set(true, forKey: "host.portDefaultsMigrated")
+    }
 }
 
 /// The standard macOS Settings window (Cmd-,). Every control binds to a
@@ -51,8 +67,8 @@ struct HostSettingsView: View {
 
 private struct ConnectionSettings: View {
     @AppStorage(HostDefaults.bindAddress) private var bindAddress = "127.0.0.1"
-    @AppStorage(HostDefaults.controlPort) private var controlPort = 7000
-    @AppStorage(HostDefaults.videoPort) private var videoPort = 7001
+    @AppStorage(HostDefaults.controlPort) private var controlPort = HostDefaults.defaultControlPort
+    @AppStorage(HostDefaults.videoPort) private var videoPort = HostDefaults.defaultVideoPort
 
     private var isPrivate: Bool { PrivateAddress.isPrivateIPv4(bindAddress) }
     private func portValid(_ p: Int) -> Bool { HostDefaults.portRange.contains(p) }
@@ -71,6 +87,13 @@ private struct ConnectionSettings: View {
                     .font(.caption).foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                 }
+                if controlPort == videoPort, portValid(controlPort) {
+                    Label(
+                        "Control and video ports must be different.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption).foregroundStyle(.red)
+                }
             }
             Section {
                 Label {
@@ -86,16 +109,6 @@ private struct ConnectionSettings: View {
                 } icon: {
                     Image(systemName: isPrivate ? "lock.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(isPrivate ? .green : .red)
-                }
-                if controlPort == 7000 {
-                    Label(
-                        "Port 7000 is AirPlay Receiver on many Macs. If the control client never "
-                            + "connects, pick another port or turn AirPlay Receiver off in System "
-                            + "Settings › General › AirDrop & Handoff.",
-                        systemImage: "info.circle"
-                    )
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 }
                 Text("Connection changes apply the next time you press Start.")
                     .font(.caption2).foregroundStyle(.secondary)

@@ -1,14 +1,15 @@
-# Contributing to transom-host
+# Contributing to Transom
 
-**This project is pre-alpha and does not work yet.** It is an attempt at
-something that does not currently exist (seamless single-window streaming from a
-Mac host), built on an unproven design. Expect churn.
+**This project is early access and hardware-dependent.** The host and Windows
+client now run end to end on the intended Mac/Windows pair, but capture,
+encoding, permissions, and DPI behavior still need to be verified on the target
+machines. Expect churn.
 
 ## Start with the architecture doc
 
 Before anything else, read **[`docs/architecture.md`](docs/architecture.md)**. It
-is canonical for *both* the host and the [Windows
-client](https://github.com/aydinmrnv/transom-client), and it explains why the
+is canonical for *both* the host and the Windows client in [`client/`](client/),
+and it explains why the
 design is what it is (the sprite-sheet virtual display, geometry mirroring, the
 no-resampling rule, the live-resize compromise). If code disagrees with that
 document, the code is wrong — or the document needs updating first, deliberately.

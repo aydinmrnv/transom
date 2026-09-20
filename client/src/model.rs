@@ -129,21 +129,26 @@ impl WindowModel {
                 let window = Window {
                     id,
                     source: rect,
-                    title,
+                    title: title.clone(),
                     kind,
                 };
                 // A create for an id we already track is treated as an update, so a
                 // duplicate resync `windowCreated` is idempotent rather than a
                 // second proxy.
                 if let Some(i) = self.index_of(id) {
+                    let title_changed = self.windows[i].title != title;
                     let size_changed =
                         self.windows[i].source.w != rect.w || self.windows[i].source.h != rect.h;
                     self.windows[i] = window;
-                    vec![ModelEvent::WindowRectChanged {
+                    let mut events = vec![ModelEvent::WindowRectChanged {
                         id,
                         source: rect,
                         size_changed,
-                    }]
+                    }];
+                    if title_changed {
+                        events.push(ModelEvent::WindowTitleChanged { id, title });
+                    }
+                    events
                 } else {
                     self.windows.push(window.clone());
                     vec![ModelEvent::WindowAdded(window)]
@@ -335,6 +340,18 @@ mod tests {
             [ModelEvent::WindowRectChanged { .. }]
         ));
         assert_eq!(m.windows().len(), 1);
+    }
+
+    #[test]
+    fn duplicate_create_refreshes_title_during_resync() {
+        let mut m = WindowModel::new();
+        m.apply(created(1, rect(0, 0, 10, 10), "before"));
+        let ev = m.apply(created(1, rect(0, 0, 10, 10), "after"));
+        assert!(ev.contains(&ModelEvent::WindowTitleChanged {
+            id: 1,
+            title: "after".to_string(),
+        }));
+        assert_eq!(m.get(1).unwrap().title, "after");
     }
 
     #[test]

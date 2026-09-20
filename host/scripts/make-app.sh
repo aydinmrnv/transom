@@ -81,6 +81,9 @@ make_icns() {
 build_bundle() {
   local BUNDLE_ID="$1" APP_NAME="$2" EXECUTABLE="$3" VERSION="$4" BUILD="$5" CATEGORY="$6"
   local APP_DIR="$REPO_ROOT/build/${APP_NAME}.app"
+  local STAGE_ROOT
+  STAGE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/transom-app.XXXXXX")"
+  local STAGED_APP_DIR="$STAGE_ROOT/${APP_NAME}.app"
 
   echo "==> building ${EXECUTABLE} (release)"
   swift build -c release --product "$EXECUTABLE"
@@ -91,13 +94,15 @@ build_bundle() {
   fi
 
   echo "==> assembling ${APP_DIR}"
-  rm -rf "$APP_DIR"
-  mkdir -p "$APP_DIR/Contents/MacOS"
-  mkdir -p "$APP_DIR/Contents/Resources"
+  # Assemble and sign outside Documents/iCloud/File Provider folders. Those
+  # integrations can add FinderInfo/resource-fork metadata while codesign is
+  # walking the bundle, which makes an otherwise valid app fail signing.
+  mkdir -p "$STAGED_APP_DIR/Contents/MacOS"
+  mkdir -p "$STAGED_APP_DIR/Contents/Resources"
 
-  cp "$BUILD_DIR/$EXECUTABLE" "$APP_DIR/Contents/MacOS/$EXECUTABLE"
+  cp "$BUILD_DIR/$EXECUTABLE" "$STAGED_APP_DIR/Contents/MacOS/$EXECUTABLE"
 
-  cat > "$APP_DIR/Contents/Info.plist" <<PLIST
+  cat > "$STAGED_APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -121,25 +126,36 @@ build_bundle() {
 PLIST
 
   echo "==> generating AppIcon.icns"
-  make_icns "$APP_DIR/Contents/Resources/AppIcon.icns"
+  make_icns "$STAGED_APP_DIR/Contents/Resources/AppIcon.icns"
 
   echo "==> codesigning ${APP_NAME} with identity: ${CODESIGN_IDENTITY}"
+  # The staging directory is deliberately outside the repository's potentially
+  # synced parent, so no packaging-only xattrs can appear during signing.
   codesign --force \
     --sign "$CODESIGN_IDENTITY" \
     --identifier "$BUNDLE_ID" \
     --options runtime \
     --timestamp=none \
-    "$APP_DIR/Contents/MacOS/$EXECUTABLE"
+    "$STAGED_APP_DIR/Contents/MacOS/$EXECUTABLE"
 
   codesign --force \
     --sign "$CODESIGN_IDENTITY" \
     --identifier "$BUNDLE_ID" \
     --options runtime \
     --timestamp=none \
-    "$APP_DIR"
+    "$STAGED_APP_DIR"
 
   echo "==> verifying signature"
+  codesign --verify --deep --strict --verbose=2 "$STAGED_APP_DIR"
+
+  # Copy only after signing. ditto's flags avoid carrying Finder metadata into
+  # the deliverable; the final verification catches any provider that adds it
+  # back at the destination.
+  rm -rf "$APP_DIR"
+  ditto --norsrc --noqtn "$STAGED_APP_DIR" "$APP_DIR"
+  xattr -cr "$APP_DIR" 2>/dev/null || true
   codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+  rm -rf "$STAGE_ROOT"
   echo
   echo "signing identity (TCC keys the grant on the Designated Requirement below,"
   echo "so a stable signed identity survives rebuilds; cdhash may still change):"

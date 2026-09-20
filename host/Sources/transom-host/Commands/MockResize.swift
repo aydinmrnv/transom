@@ -26,7 +26,7 @@ struct MockResize: AsyncParsableCommand {
     var host: String
 
     @Argument(help: "Control channel port.")
-    var port: UInt16 = 7000
+    var port: UInt16 = TransomPorts.control
 
     @Option(name: .long, help: "Window id to resize (default: the first window in the resync).")
     var id: UInt64?

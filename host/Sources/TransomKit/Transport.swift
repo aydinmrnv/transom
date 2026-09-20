@@ -67,6 +67,14 @@ public enum PrivateAddress {
     }
 }
 
+/// Product defaults for the two TCP channels. 7000 is commonly occupied by
+/// macOS AirPlay Receiver, so the app and both CLIs use a Transom-specific pair
+/// that is unlikely to be claimed by a system service.
+public enum TransomPorts {
+    public static let control: UInt16 = 47_100
+    public static let video: UInt16 = 47_101
+}
+
 /// A TCP `PacketTransport` over one `NWConnection`, with length-prefix framing.
 /// An actor so the receive buffer and the single-outstanding-receive rule are
 /// enforced by isolation rather than a lock.
@@ -227,8 +235,35 @@ public final class TCPListener: @unchecked Sendable {
         }
     }
 
-    public func start() {
-        listener.start(queue: queue)
+    /// Start listening and wait until Network.framework confirms that the
+    /// endpoint is bound. NWListener.init succeeds even when another process
+    /// already owns the port; without this handshake the UI can say "running"
+    /// while no client can ever connect.
+    public func start() async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let gate = ConnectGate()
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    if gate.finish() { cont.resume() }
+                case .failed(let error):
+                    if gate.finish() {
+                        cont.resume(
+                            throwing: TransportError.listenerFailed(error.localizedDescription))
+                    }
+                case .waiting(let error):
+                    if gate.finish() {
+                        cont.resume(
+                            throwing: TransportError.listenerFailed(error.localizedDescription))
+                    }
+                case .cancelled:
+                    if gate.finish() { cont.resume(throwing: CancellationError()) }
+                default:
+                    break
+                }
+            }
+            listener.start(queue: queue)
+        }
     }
 
     public func stop() {

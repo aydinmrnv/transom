@@ -21,7 +21,7 @@ struct MockClient: AsyncParsableCommand {
     var host: String = "127.0.0.1"
 
     @Option(name: .long, help: "Control channel TCP port.")
-    var controlPort: UInt16 = 7000
+    var controlPort: UInt16 = TransomPorts.control
 
     @Option(name: .long, help: "Target window id (from the printed resync listing).")
     var id: UInt64?

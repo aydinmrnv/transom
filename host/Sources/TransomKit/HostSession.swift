@@ -30,8 +30,8 @@ public struct HostConfig: Sendable {
         target: TargetApp,
         display: DisplayInfo,
         host: String = "127.0.0.1",
-        controlPort: UInt16 = 7000,
-        videoPort: UInt16 = 7001,
+        controlPort: UInt16 = TransomPorts.control,
+        videoPort: UInt16 = TransomPorts.video,
         gutter: Int = Tiler.defaultGutter,
         tile: Bool = true,
         video: Bool = true,
@@ -246,6 +246,18 @@ public final class HostSession: @unchecked Sendable {
     /// registry is seeded, so a client connecting immediately gets a full resync.
     /// Throws with a plain message if a permission or bind precondition fails.
     public func start() async throws {
+        do {
+            try await startImpl()
+        } catch {
+            // A video bind failure, watcher error, or permission race can happen
+            // after part of the session is live. Always tear down the partial
+            // graph before surfacing the error so retrying from the UI is safe.
+            await stop()
+            throw error
+        }
+    }
+
+    private func startImpl() async throws {
         try preflight()
 
         let disp = config.display
@@ -340,9 +352,8 @@ public final class HostSession: @unchecked Sendable {
                         await resize.handle(id: id, size: size, phase: phase)
                     case .input, .requestFocus:
                         injector.handle(message)
-                    case .requestClose:
-                        Log.general.notice(
-                            "control: client -> \(String(describing: message), privacy: .public)")
+                    case let .requestClose(id):
+                        injector.close(id: id)
                     }
                 }
             })
@@ -353,7 +364,7 @@ public final class HostSession: @unchecked Sendable {
                     await resize.tick()
                 }
             })
-        controlListener.start()
+        try await controlListener.start()
 
         if config.video {
             try await startVideo(disp: disp, vdsSize: vdsSize)
@@ -398,9 +409,9 @@ public final class HostSession: @unchecked Sendable {
         }
         try await cap.start()
 
+        try await listener.start()
         tasks.append(Task { await videoServer.serve(listener: listener) })
         tasks.append(Task { for await f in frames { await videoServer.send(f) } })
-        listener.start()
     }
 
     /// Stop everything and reset to a clean state. Safe to call more than once.
@@ -453,6 +464,9 @@ public final class HostSession: @unchecked Sendable {
         }
         guard PrivateAddress.isPrivateIPv4(config.host) else {
             throw ProbeError(TransportError.refusedPublicBind(config.host).description)
+        }
+        if config.video && config.controlPort == config.videoPort {
+            throw ProbeError("control and video ports must be different")
         }
     }
 

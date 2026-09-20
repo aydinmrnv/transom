@@ -57,9 +57,9 @@ pub fn run(args: &[String]) -> ExitCode {
         Err(e) => {
             eprintln!("connect failed: {e}");
             eprintln!(
-                "hint: is `transom-host serve` running on {}? the default control port {} \
-                 also collides with macOS AirPlay Receiver — try --control-port 7010.",
-                opts.host, DEFAULT_CONTROL_PORT
+                "hint: is `transom-host serve` running on {}:{}? control defaults to {} \
+                 and video to {}. Override both sides with --control-port/--video-port if needed.",
+                opts.host, opts.control_port, DEFAULT_CONTROL_PORT, DEFAULT_VIDEO_PORT
             );
             return ExitCode::FAILURE;
         }
@@ -451,8 +451,8 @@ pub fn print_usage() {
          transom-client connect <host> [options]\n\
          \n\
          OPTIONS:\n    \
-         --control-port <n>   control channel port (default 7000; 7010 dodges AirPlay)\n    \
-         --video              also open the video channel on the default port (7001)\n    \
+         --control-port <n>   control channel port (default 47100)\n    \
+         --video              also open the video channel on the default port (47101)\n    \
          --video-port <n>     also open the video channel on <n>\n    \
          --seconds <n>        run for n seconds then disconnect (default: until Ctrl-C)\n    \
          --type <text>        focus the first window and type <text> (US/ANSI keys)\n    \
@@ -460,6 +460,6 @@ pub fn print_usage() {
          --resize <id:w:h>    request a begin/live/end resize of window <id> to w x h\n\
          \n\
          EXAMPLE:\n    \
-         transom-client connect 127.0.0.1 --control-port 7010 --seconds 5 --type hello"
+         transom-client connect 127.0.0.1 --control-port 47100 --seconds 5 --type hello"
     );
 }

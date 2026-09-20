@@ -95,6 +95,33 @@ public final class InputInjector: @unchecked Sendable {
         }
     }
 
+    /// Ask the remote app to close the window behind `id`. AX does not expose a
+    /// universal close action on every window, but standard macOS windows expose
+    /// their close button as an AX element. Pressing that button preserves the
+    /// app's normal close semantics (including unsaved-document prompts).
+    public func close(id: UInt64) {
+        lock.withLock {
+            guard let element = registry.element(for: id) else {
+                trace("requestClose id=\(id): unknown window id")
+                return
+            }
+            var value: CFTypeRef?
+            let read = AXUIElementCopyAttributeValue(
+                element, "AXCloseButton" as CFString, &value)
+            guard read == .success, let value else {
+                trace("requestClose id=\(id): close button unavailable")
+                return
+            }
+            guard CFGetTypeID(value) == AXUIElementGetTypeID() else {
+                trace("requestClose id=\(id): close button had an unexpected AX type")
+                return
+            }
+            let button = unsafeDowncast(value, to: AXUIElement.self)
+            let result = AXUIElementPerformAction(button, kAXPressAction as CFString)
+            trace("requestClose id=\(id): press=\(result.rawValue)")
+        }
+    }
+
     // MARK: - Mouse
 
     /// Assumes `lock` is held.

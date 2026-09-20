@@ -117,6 +117,7 @@ pub enum ServerMessage {
 }
 
 /// Client → host. What we're allowed to ask the host to do.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientMessage {
     RequestResize {

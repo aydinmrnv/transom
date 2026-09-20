@@ -14,6 +14,7 @@
 
 use super::json::Value;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
     Left,
@@ -32,6 +33,7 @@ impl MouseButton {
 }
 
 /// One input event, in Client Space physical pixels / Windows VK codes.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
     MouseDown {

@@ -30,10 +30,10 @@ struct Serve: AsyncParsableCommand {
     var host: String = "127.0.0.1"
 
     @Option(name: .long, help: "Control channel TCP port.")
-    var controlPort: UInt16 = 7000
+    var controlPort: UInt16 = TransomPorts.control
 
     @Option(name: .long, help: "Video channel TCP port.")
-    var videoPort: UInt16 = 7001
+    var videoPort: UInt16 = TransomPorts.video
 
     @Option(name: .long, help: "Gutter in VDS pixels between tiles.")
     var gutter: Int = Tiler.defaultGutter
@@ -41,8 +41,11 @@ struct Serve: AsyncParsableCommand {
     @Flag(inversion: .prefixedNo, help: "Tile the app's windows at startup (I-5).")
     var tile: Bool = true
 
-    @Flag(name: .long, help: "Also capture + HEVC-encode and stream video on the 2nd connection.")
-    var video: Bool = false
+    @Flag(
+        inversion: .prefixedNo,
+        help: "Capture + HEVC-encode and stream video on the 2nd connection (default: on)."
+    )
+    var video: Bool = true
 
     @Option(name: .long, help: "Video target bitrate in Mbps.")
     var bitrate: Int = 40

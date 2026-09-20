@@ -31,8 +31,8 @@ pub use video::{VideoDecodeError, VideoMessage};
 /// The protocol version this client speaks, checked against the host's `hello`.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// Default TCP ports (protocol.md §1). These are defaults, not wire constants;
-/// the host can be told to use others, and the control default collides with
-/// macOS AirPlay Receiver, so it is frequently overridden.
-pub const DEFAULT_CONTROL_PORT: u16 = 7000;
-pub const DEFAULT_VIDEO_PORT: u16 = 7001;
+/// Product-default TCP ports (protocol.md §1). These are defaults, not wire
+/// constants; the host can be told to use others. The pair avoids macOS
+/// AirPlay Receiver's common use of port 7000.
+pub const DEFAULT_CONTROL_PORT: u16 = 47_100;
+pub const DEFAULT_VIDEO_PORT: u16 = 47_101;

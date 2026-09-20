@@ -11,6 +11,7 @@ use crate::wire::Size;
 /// When a host window cannot fit at 1:1, keep the initial proxy within this
 /// fraction of the monitor work area. The spare border leaves an obvious grab
 /// area and avoids making a fitted window indistinguishable from fullscreen.
+#[allow(dead_code)]
 const OVERSIZE_FIT_PERCENT: u64 = 85;
 
 /// Choose the initial physical client size for a proxy.
@@ -19,6 +20,7 @@ const OVERSIZE_FIT_PERCENT: u64 = 85;
 /// fitted uniformly into 85% of the work area, preserving aspect ratio. The
 /// caller must request a host resize when the returned size differs; scaling is
 /// only the short transition before the authoritative host read-back arrives.
+#[allow(dead_code)]
 pub fn initial_proxy_size(source: Size, work_area: Size) -> Size {
     let source = Size {
         w: source.w.max(1),

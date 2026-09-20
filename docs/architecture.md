@@ -1,10 +1,12 @@
 # Transom: Architecture
 
-**Status:** pre-alpha. Nothing works yet. This document describes the intended
-design and the reasoning behind it.
+**Status:** early-access implementation. The host/client path is implemented
+through capture, HEVC video, geometry mirroring, input, reconnect, and native
+proxy windows. Hardware-specific pixel/DPI validation and security hardening
+remain before a general release.
 
-**Canonical copy:** `docs/architecture.md`. There is only one copy now; the repos were merged.
-`transom-client` is a mirror. If they disagree, the host copy wins.
+**Canonical copy:** `docs/architecture.md`. Both the macOS host and Windows
+client live in this repository and share this document.
 
 ---
 
@@ -517,11 +519,11 @@ one? Unknown.
 > `.cghidEventTap` is used; the real cursor moves and SCK captures it (protocol.md
 > §8), so no cursor is synthesized.
 
-### Operational finding: the default control port 7000 collides with AirPlay Receiver
+### Operational finding: the prototype control port 7000 collides with AirPlay Receiver
 
 > **M2 FINDING (2026-07-15, Mac Studio, macOS 26): TCP 7000 is taken by
 > AirPlay Receiver.** While verifying `serve`/`HostSession` end to end, the
-> control channel (default port **7000**) silently failed to accept a client: a
+> control channel (the prototype default port **7000**) silently failed to accept a client: a
 > mock client's `connect()` *succeeded* but no framed bytes ever arrived, and the
 > host's control listener never reported a connection. Cause: macOS **AirPlay
 > Receiver** (Control Center, process `ControlCenter`) listens on `*:7000` by
@@ -532,12 +534,9 @@ one? Unknown.
 > the bind *succeeds* rather than failing loudly with the port already owned.)
 >
 > This is not a Transom bug — it reproduces identically on the M1 (#5) code, and
-> was hit independently while verifying input (#7) — but it will bite anyone using
-> the defaults. Mitigations: disable AirPlay Receiver (System Settings › General ›
-> AirDrop & Handoff), or bind the control channel to a free port
-> (`serve --control-port 8770`, or the port field in the host app). The host app
-> surfaces this near its port fields. A future change may move the default off
-> 7000; left as-is for now to not silently change #5's CLI contract.
+> was hit independently while verifying input (#7). The product now defaults to
+> control 47100 and video 47101, so a fresh setup avoids the collision; custom
+> ports remain supported when both sides use the same values.
 
 ### Client bring-up finding: oversized Retina proxies and drag-loop backpressure
 

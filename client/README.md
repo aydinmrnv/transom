@@ -1,11 +1,11 @@
-# transom-client
+# Transom Client
 
 Windows client for **Transom**, a seamless remote windowing system: individual
 macOS app windows streamed to a Windows PC as independent, native windows you can
 move, resize, snap, and fullscreen. Think RDS RemoteApp with a Mac host — which
 does not otherwise exist.
 
-> **⚠️ Pre-alpha.** The client is now a real window manager, not a scaffold: it
+> **Early access.** The client is a real window manager, not a scaffold: it
 > speaks the wire protocol, opens a native borderless proxy window per Mac window,
 > holds the 1:1 D3D11 pixel pipeline, and round-trips resize/focus/input. What is
 > **proven** vs **pending hardware bring-up** is spelled out under
@@ -55,19 +55,21 @@ added as needed; no new crates — invariants I-8).
 
 ```sh
 transom-client run <host>       # the window manager (Windows only)
+transom-client run              # open the connection window (Windows only)
 transom-client connect <host>   # headless: drive the wire, print events, send test input
 transom-client doctor           # D3D11 / DPI / monitor health check (Windows only)
 ```
 
-`run` opens the control channel to the Mac and turns each Mac window into a native
+`run` opens the connection window when no host is supplied, or opens the control
+channel directly when a host is supplied. It turns each Mac window into a native
 proxy window. `--video` also opens the video channel and decodes the stream;
 without it, windows show a placeholder pattern (useful for exercising geometry on
 its own). `--checkerboard` draws the 1px M0 test pattern in each window so the 1:1
 guarantee is visible from across the room.
 
 ```sh
-transom-client run 192.168.1.20 --control-port 7010 --video
-transom-client run 192.168.1.20 --control-port 7010 --checkerboard
+transom-client run 192.168.1.20 --control-port 47100 --video
+transom-client run 192.168.1.20 --control-port 47100 --checkerboard
 ```
 
 `connect` is the same protocol core with no GPU: it prints the control stream and
@@ -76,7 +78,7 @@ verified without a Windows box.
 
 ```sh
 # Watch the protocol and drive a resize round-trip against a running host:
-transom-client connect 127.0.0.1 --control-port 7010 --seconds 5 --resize 1:2400:1500
+transom-client connect 127.0.0.1 --control-port 47100 --seconds 5 --resize 1:2400:1500
 ```
 
 ## Build

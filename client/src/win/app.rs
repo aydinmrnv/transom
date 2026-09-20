@@ -21,13 +21,13 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowLongPtrW,
     LoadCursorW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, CREATESTRUCTW, GWLP_USERDATA,
-    IDC_ARROW, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOZORDER, SW_SHOW, WM_ACTIVATE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE,
-    WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE,
-    WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SIZING, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, CREATESTRUCTW,
+    GWLP_USERDATA, IDC_ARROW, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WM_ACTIVATE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
+    WM_NCCREATE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SIZING,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 use super::gpu::{Gpu, SourceTexture};
@@ -163,6 +163,12 @@ impl App {
                 }
                 Ok(SessionEvent::VideoClosed(reason)) => {
                     eprintln!("video channel closed{}", suffix(reason));
+                    // A video channel can die independently while control stays
+                    // open. Reconnect the whole session so the host sends a fresh
+                    // hvcC config and the decoder can recover without restarting
+                    // the app.
+                    disconnected = true;
+                    break;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -189,7 +195,7 @@ impl App {
             }
             ModelEvent::WindowAdded(w) => {
                 if !self.proxies.contains_key(&w.id) {
-                    if let Err(e) = self.create_proxy(w.id, w.source, app_ptr) {
+                    if let Err(e) = self.create_proxy(w.id, w.source, &w.title, app_ptr) {
                         eprintln!("failed to create proxy for window {}: {e}", w.id);
                     }
                 }
@@ -197,7 +203,7 @@ impl App {
             ModelEvent::WindowRectChanged { id, source, .. } => {
                 self.update_source_rect(id, source);
             }
-            ModelEvent::WindowTitleChanged { .. } => {}
+            ModelEvent::WindowTitleChanged { id, title } => self.update_title(id, &title),
             ModelEvent::WindowFocused { .. } => {}
             ModelEvent::WindowRemoved { id } => self.destroy_proxy(id),
             ModelEvent::Resynced { removed } => {
@@ -278,6 +284,7 @@ impl App {
         &mut self,
         id: u64,
         source: Rect,
+        title: &str,
         app_ptr: *mut App,
     ) -> windows::core::Result<()> {
         let instance = unsafe { GetModuleHandleW(None)? };
@@ -308,11 +315,20 @@ impl App {
         let x = spawn_x.min(wa.right - win_w as i32).max(wa.left);
         let y = spawn_y.min(wa.bottom - win_h as i32).max(wa.top);
 
+        let title_text = if title.trim().is_empty() {
+            "Transom"
+        } else {
+            title
+        };
+        let title_w: Vec<u16> = title_text
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let hwnd = unsafe {
             CreateWindowExW(
                 Default::default(),
                 CLASS_NAME,
-                w!("Transom"),
+                PCWSTR(title_w.as_ptr()),
                 WS_OVERLAPPEDWINDOW,
                 x,
                 y,
@@ -391,6 +407,24 @@ impl App {
             unsafe {
                 let _ = DestroyWindow(proxy.hwnd);
             }
+        }
+    }
+
+    fn update_title(&mut self, id: u64, title: &str) {
+        let Some(proxy) = self.proxies.get(&id) else {
+            return;
+        };
+        let title_text = if title.trim().is_empty() {
+            "Transom"
+        } else {
+            title
+        };
+        let title_w: Vec<u16> = title_text
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            let _ = SetWindowTextW(proxy.hwnd, PCWSTR(title_w.as_ptr()));
         }
     }
 

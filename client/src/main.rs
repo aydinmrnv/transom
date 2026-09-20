@@ -21,7 +21,8 @@
 //!
 //!  * `connect <host>` — headless: drive the wire, print the protocol, send test
 //!    input/resize. Runs everywhere. The integration test for the protocol.
-//!  * `run <host>` — the real window manager (Windows only).
+//!  * `run [<host>]` — the real window manager (Windows only); without a host,
+//!    it opens the connection form.
 //!  * `doctor` — D3D11 / DPI / monitor health check (Windows only).
 
 mod model;

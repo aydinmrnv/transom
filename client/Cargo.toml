@@ -1,11 +1,11 @@
 [package]
 name = "transom-client"
-version = "0.0.1-alpha"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
 license = "AGPL-3.0-or-later"
-description = "Windows client for the Transom seamless remote windowing system (pre-alpha)."
-repository = "https://github.com/aydinmrnv/transom-client"
+description = "Windows client for the Transom seamless remote windowing system."
+repository = "https://github.com/aydinmrnv/transom"
 readme = "README.md"
 publish = false
 

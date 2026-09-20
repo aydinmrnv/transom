@@ -8,8 +8,9 @@ import ArgumentParser
 /// per-window geometry on a side channel. The Windows client is the real window
 /// manager; the host never composites for a human viewer.
 ///
-/// See `docs/architecture.md` for the full design. This binary is a scaffold:
-/// only `doctor` is implemented today.
+/// See `docs/architecture.md` for the full design. The CLI exposes diagnostics,
+/// capture, encoding, serving, and protocol test commands; the signed Host app
+/// is the recommended product entry point.
 @main
 struct Transom: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -18,10 +19,10 @@ struct Transom: AsyncParsableCommand {
         discussion: """
             Transom streams individual macOS app windows to a Windows client as \
             independent native windows. This host process draws and captures on the \
-            Mac; the Windows client manages the windows. This is a pre-alpha \
-            prototype: only `doctor` does real work today.
+            Mac; the Windows client manages the windows. Use the signed Host app for \
+            the guided workflow, or `serve` for automation and diagnostics.
             """,
-        version: "0.0.1-alpha",
+        version: "0.1.0",
         subcommands: [
             Doctor.self,
             Displays.self,

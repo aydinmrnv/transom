@@ -1,160 +1,172 @@
 #!/usr/bin/env bash
 #
-# release.sh — build, sign, zip, and cut a Transom prerelease.
+# release.sh — build, package, and cut a unified Transom release.
 #
-# Two bundles, one script, parameterised (issue #8):
-#   probe -> "Transom Probe.app", tag v0.0.1-m0 (the M0 diagnostic probe)
-#   host  -> "Transom Host.app",  tag v0.1.0-m2 (the M2 host half)
+# A product release contains both halves from this repository:
+#   - Transom Host.app for macOS
+#   - transom-client.exe for Windows
+# The diagnostic probe remains available as a separate optional build.
 #
-# Both are marked --prerelease with notes that state plainly what does and does
-# not work. Neither is a finished product.
-#
-# NOT notarized. Notarization needs credentials that have not been provided; do
-# not add it without asking. On another Mac, the recipient may need to right-click
-# > Open (or clear the quarantine attribute) the first time.
+# Releases are prereleases until notarization, authentication, and broader
+# hardware coverage are complete. The host/client pair is usable on a trusted
+# private LAN.
 #
 # Usage:
-#   scripts/release.sh [probe|host] [--dry-run]   # default: host (current milestone)
-#     --dry-run  build, sign, zip only; skip gh release create
+#   scripts/release.sh [host|probe] [--dry-run]
 #
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOST_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$HOST_ROOT/.." && pwd)"
+cd "$PROJECT_ROOT"
 
-# --- args -------------------------------------------------------------------
 TARGET="host"
 DRY_RUN=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
-    probe|host) TARGET="$arg" ;;
-    *) echo "usage: $0 [probe|host] [--dry-run]" >&2; exit 2 ;;
+    host|probe) TARGET="$arg" ;;
+    *) echo "usage: $0 [host|probe] [--dry-run]" >&2; exit 2 ;;
   esac
 done
 
-# --- per-target config ------------------------------------------------------
 if [[ "$TARGET" == "probe" ]]; then
   TAG="v0.0.1-m0"
   APP_NAME="Transom Probe"
-  ZIP_PATH="$REPO_ROOT/build/Transom-Probe-${TAG}.zip"
+  ZIP_PATH="$HOST_ROOT/build/Transom-Probe-${TAG}.zip"
   RELEASE_TITLE="Transom Probe ${TAG} (diagnostic probe)"
 else
-  TAG="v0.1.0-m2"
+  TAG="v0.1.0"
   APP_NAME="Transom Host"
-  ZIP_PATH="$REPO_ROOT/build/Transom-Host-${TAG}.zip"
-  RELEASE_TITLE="Transom Host ${TAG} (host half — streams to nothing yet)"
+  ZIP_PATH="$HOST_ROOT/build/Transom-Host-${TAG}.zip"
+  CLIENT_ZIP_PATH="$HOST_ROOT/build/Transom-Client-Windows-${TAG}.zip"
+  CHECKSUMS_PATH="$HOST_ROOT/build/Transom-${TAG}-SHA256SUMS.txt"
+  RELEASE_TITLE="Transom ${TAG} (macOS host + Windows client)"
 fi
-APP_DIR="$REPO_ROOT/build/${APP_NAME}.app"
+APP_DIR="$HOST_ROOT/build/${APP_NAME}.app"
 
-# --- build + sign the app ---------------------------------------------------
-"$REPO_ROOT/scripts/make-app.sh" "$TARGET"
+"$HOST_ROOT/scripts/make-app.sh" "$TARGET"
 
 echo "==> zipping ${APP_DIR}"
 rm -f "$ZIP_PATH"
-# ditto preserves the code signature and resource forks; plain zip does not.
 ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
 echo "zip: $ZIP_PATH"
 
-# --- notes ------------------------------------------------------------------
+if [[ "$TARGET" == "host" ]]; then
+  CLIENT_TARGET="x86_64-pc-windows-gnu"
+  CLIENT_DIR="$PROJECT_ROOT/client"
+  CLIENT_BIN="$CLIENT_DIR/target/${CLIENT_TARGET}/release/transom-client.exe"
+
+  if ! command -v rustup >/dev/null 2>&1; then
+    echo "error: rustup is required to build the Windows client" >&2
+    exit 1
+  fi
+  if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+    echo "error: x86_64-w64-mingw32-gcc is required to build the Windows client" >&2
+    exit 1
+  fi
+  if ! rustup target list --installed | grep -qx "$CLIENT_TARGET"; then
+    echo "error: missing Rust target ${CLIENT_TARGET}; run: rustup target add ${CLIENT_TARGET}" >&2
+    exit 1
+  fi
+
+  CARGO_BIN="$(rustup which cargo)"
+  RUSTC_BIN="$(rustup which rustc)"
+  echo "==> building Windows client (${CLIENT_TARGET})"
+  (
+    cd "$CLIENT_DIR"
+    RUSTC="$RUSTC_BIN" \
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$(command -v x86_64-w64-mingw32-gcc)" \
+      "$CARGO_BIN" build --locked --release --target "$CLIENT_TARGET"
+  )
+
+  CLIENT_STAGE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/transom-client-release.XXXXXX")"
+  CLIENT_STAGE="$CLIENT_STAGE_ROOT/Transom Client"
+  mkdir -p "$CLIENT_STAGE"
+  cp "$CLIENT_BIN" "$CLIENT_STAGE/transom-client.exe"
+  cp "$CLIENT_DIR/README.md" "$CLIENT_STAGE/README-Windows.md"
+  cp "$PROJECT_ROOT/LICENSE" "$CLIENT_STAGE/LICENSE"
+  rm -f "$CLIENT_ZIP_PATH"
+  ditto -c -k --keepParent "$CLIENT_STAGE" "$CLIENT_ZIP_PATH"
+  rm -rf "$CLIENT_STAGE_ROOT"
+  echo "zip: $CLIENT_ZIP_PATH"
+
+  shasum -a 256 "$ZIP_PATH" "$CLIENT_ZIP_PATH" > "$CHECKSUMS_PATH"
+  echo "checksums: $CHECKSUMS_PATH"
+fi
+
 NOTES_FILE="$(mktemp)"
 if [[ "$TARGET" == "probe" ]]; then
-  cat > "$NOTES_FILE" <<'NOTES'
-# Transom Probe v0.0.1-m0 — diagnostic probe (NOT a product)
+  cat > "$NOTES_FILE" <<NOTES
+# Transom Probe ${TAG} — diagnostic probe
 
-This is **not** a working product. It is a **diagnostic instrument** for the M0
-milestone of the Transom host. It does no networking, no encoding, and is not a
-client. Its only job is to answer three questions about macOS:
+This is a diagnostic build for macOS capture and Accessibility experiments.
+It is separate from the Transom product release and does not provide the
+Windows client workflow.
 
-- **OQ-1** (the kill question): do `NSMenu` popups / sheets / completion popups
-  appear in a ScreenCaptureKit capture, and does the Accessibility API report
-  them with usable frames and a distinguishable role/subrole?
-- **OQ-2**: are AX geometry writes honored exactly, or clamped/rounded?
-- **OQ-5**: do AX rects align pixel-exactly with SCK pixels, and by how many
-  frames does the metadata lag?
-
-## Install / permissions
-
-1. Unzip and move `Transom Probe.app` where you like.
-2. Launch it. Grant **Screen Recording** and **Accessibility** in
-   System Settings › Privacy & Security. The app shows its own bundle id and
-   cdhash so you can confirm which identity holds the grant.
-3. Not notarized. First launch may need right-click › Open, or
-   `xattr -dr com.apple.quarantine "Transom Probe.app"`.
-
-## What to do
-
-Open the **Live probe** section, pick an app (e.g. Xcode) and the display, press
-Start, then open that app's menus. Watch whether the menu lands in the capture
-and whether an AX rect (orange) is drawn around it. That is OQ-1.
-
-The same logic is available headless via the `transom-host` CLI (`menuwatch`,
-`place`, `probe`, …).
+Launch it, grant Screen Recording and Accessibility in System Settings, then
+use the Live Probe view to inspect app windows, menus, and geometry alignment.
+The app is signed but not notarized; right-click and choose Open on first launch
+if macOS blocks it.
 NOTES
 else
-  cat > "$NOTES_FILE" <<'NOTES'
-# Transom Host v0.1.0-m2 — the host half (NOT a usable product)
+  cat > "$NOTES_FILE" <<NOTES
+# Transom ${TAG} — macOS host + Windows client
 
-This is the **host half** of Transom, and only the host half. It runs on the Mac:
-it tiles an app's windows non-overlapping on a virtual display, captures that
-display with ScreenCaptureKit, HEVC **4:4:4 10-bit** hardware-encodes it, and
-serves window geometry (and video) over TCP.
+Transom is one product with a macOS host and Windows client. The host tiles an
+app's windows on a virtual display, captures and encodes the display, and serves
+window geometry and video over TCP. The Windows client opens each tracked Mac
+window as a native Windows window, forwards input, and reconnects after a link
+interruption.
 
-**There is no Windows client in this release.** The client is a separate work in
-progress. So this **streams to nothing** — you can start it, grant permissions,
-watch the tile layout and the live encoder / fps / bitrate status, and connect a
-mock TCP client, but there is no decoder or renderer on the other end. It is not a
-product; it is one half of one.
+## Included artifacts
 
-## What works
+- \`Transom-Host-${TAG}.zip\` — signed macOS host app.
+- \`Transom-Client-Windows-${TAG}.zip\` — Windows x86-64 client.
+- \`Transom-${TAG}-SHA256SUMS.txt\` — SHA-256 checksums.
 
-- **Permissions** panel — Screen Recording + Accessibility, live, with this app's
-  own bundle id + cdhash so you can see *which identity* holds the grant. It is
-  `one.nullstack.transom.host`, deliberately distinct from the probe's
-  `one.nullstack.transom.probe`.
-- **Configuration** — pick a display and an app, set a private bind address and
-  ports (the private-address gate is enforced and visible), press Start.
-- **Status** — connected client (or not), live fps / bitrate / host-side encode
-  latency, the tile layout with post-clamp **actual** rects and
-  requested-vs-actual deltas (I-4 / OQ-2), and — prominently — whether the encoder
-  is really on the **4:4:4 10-bit hardware** path or has fallen back.
+## Install
 
-## What does NOT work / out of scope
+1. On the Mac, unzip and open \`Transom Host.app\`; grant Screen Recording and
+   Accessibility when prompted.
+2. Create/configure the BetterDisplay virtual display, choose the display and
+   app in Transom Host, set the Mac's private LAN address, and press Start.
+3. On Windows, unzip the client and run \`transom-client.exe\`. With no command
+   line it opens a connection window; enter the Mac address and press Connect.
 
-- No Windows client, so nothing renders the stream.
-- No input, no geometry roundtrip back to AX, no audio, no clipboard, no auth,
-  no encryption. It is **LAN-only**, and it refuses non-private bind addresses.
-
-## Install / permissions
-
-1. Unzip and move `Transom Host.app` where you like.
-2. Launch it. Grant **Screen Recording** and **Accessibility** in
-   System Settings › Privacy & Security. The app shows its own bundle id + cdhash.
-3. Not notarized. First launch may need right-click › Open, or
-   `xattr -dr com.apple.quarantine "Transom Host.app"`.
-
-The same pipeline is available headless via `transom-host serve`.
+The transport is unauthenticated and unencrypted. Use only on a trusted private
+network; do not port-forward it. The Mac app is signed but not notarized.
 NOTES
 fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "==> dry run: skipping gh release create"
-  echo "notes preview:"; echo "----"; cat "$NOTES_FILE"; echo "----"
+  echo "notes preview:"
+  echo "----"
+  cat "$NOTES_FILE"
+  echo "----"
   rm -f "$NOTES_FILE"
   exit 0
 fi
 
-# --- cut the GitHub prerelease ----------------------------------------------
 if ! command -v gh >/dev/null 2>&1; then
   echo "error: gh CLI not found; cannot create the release" >&2
   exit 1
 fi
 
 echo "==> creating prerelease ${TAG}"
-gh release create "$TAG" "$ZIP_PATH" \
-  --title "$RELEASE_TITLE" \
-  --notes-file "$NOTES_FILE" \
-  --prerelease
+if [[ "$TARGET" == "host" ]]; then
+  gh release create "$TAG" "$ZIP_PATH" "$CLIENT_ZIP_PATH" "$CHECKSUMS_PATH" \
+    --title "$RELEASE_TITLE" \
+    --notes-file "$NOTES_FILE" \
+    --prerelease
+else
+  gh release create "$TAG" "$ZIP_PATH" \
+    --title "$RELEASE_TITLE" \
+    --notes-file "$NOTES_FILE" \
+    --prerelease
+fi
 
 rm -f "$NOTES_FILE"
 echo "done."

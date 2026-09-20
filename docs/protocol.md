@@ -24,16 +24,13 @@ sockets.
 
 | Channel | v1 transport | Default port | Requirement |
 |---|---|---|---|
-| **Control** | TCP | 7000 | Ordered, reliable. Window lifecycle, geometry, input |
-| **Video** | TCP | 7001 | Lowest latency achievable on TCP. Frames may be dropped, never delayed |
+| **Control** | TCP | 47100 | Ordered, reliable. Window lifecycle, geometry, input |
+| **Video** | TCP | 47101 | Lowest latency achievable on TCP. Frames may be dropped, never delayed |
 
-> **Deployment trap (measured, issue #6):** macOS's **AirPlay Receiver listens on
-> port 7000** (`ControlCenter`, on all interfaces). A client connecting to the Mac
-> on 7000 can reach AirPlay instead of the host, which accepts the TCP handshake
-> and then speaks no Transom protocol (looks like "connected but no `hello`").
-> Either disable AirPlay Receiver (System Settings → General → AirDrop & Handoff)
-> or run the host on another port (`serve --control-port 7010`). The port numbers
-> here are defaults, not wire constants.
+> **Deployment note (measured, issue #6):** macOS's **AirPlay Receiver listens on
+> port 7000** (`ControlCenter`, on all interfaces). Transom intentionally defaults
+> to 47100/47101 so a fresh setup does not collide with it. The port numbers here
+> are defaults, not wire constants; custom values must match on both sides.
 
 ### Why TCP for v1 (not UDP)
 

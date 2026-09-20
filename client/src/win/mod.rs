@@ -1,4 +1,4 @@
-//! The native Windows window manager: `transom-client run <host>`.
+//! The native Windows window manager: `transom-client run [<host>]`.
 //!
 //! This is the real client (architecture.md): it opens the control channel, turns
 //! each Mac window into a native borderless proxy window, samples that window's
@@ -12,6 +12,7 @@
 //! protocol half is trustworthy and this half is the native shell around it.
 
 mod app;
+mod connect;
 mod decode;
 mod dpi;
 mod gpu;
@@ -33,12 +34,24 @@ struct Args {
 }
 
 pub fn run(args: &[String]) -> ExitCode {
-    let parsed = match parse(args) {
-        Ok(a) => a,
-        Err(msg) => {
-            eprintln!("run: {msg}\n");
-            print_usage();
-            return ExitCode::FAILURE;
+    let parsed = if args.is_empty() || args == ["--interactive"] {
+        match connect::show() {
+            Some(connection) => Args {
+                host: connection.host,
+                control_port: connection.control_port,
+                video_port: connection.video_port,
+                checkerboard: false,
+            },
+            None => return ExitCode::SUCCESS,
+        }
+    } else {
+        match parse(args) {
+            Ok(a) => a,
+            Err(msg) => {
+                eprintln!("run: {msg}\n");
+                print_usage();
+                return ExitCode::FAILURE;
+            }
         }
     };
 
@@ -148,16 +161,19 @@ fn print_usage() {
         "transom-client run — manage Mac windows as native Windows proxy windows\n\
          \n\
          USAGE:\n    \
-         transom-client run <host> [options]\n\
+         transom-client run [<host>] [options]\n\
          \n\
          OPTIONS:\n    \
-         --control-port <n>   control channel port (default 7000; 7010 dodges AirPlay)\n    \
-         --video              open the video channel on the default port (7001) [on by default]\n    \
+         --interactive        open the connection window (also used when host is omitted)\n    \
+         --control-port <n>   control channel port (default 47100)\n    \
+         --video              open the video channel on the default port (47101) [on by default]\n    \
          --no-video           control-plane only; every window shows the placeholder\n    \
          --video-port <n>     open the video channel on <n>\n    \
          --checkerboard       draw a 1px checkerboard test pattern in each window (M0 probe)\n\
          \n\
-         EXAMPLE:\n    \
-         transom-client run 192.168.1.20 --control-port 7010"
+         EXAMPLES:\n    \
+         transom-client run                         # open the connection window\n    \
+         transom-client run 192.168.1.20             # connect directly\n    \
+         transom-client run 192.168.1.20 --no-video"
     );
 }

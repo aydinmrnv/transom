@@ -9,7 +9,7 @@ narrow and specific. Attack those first, cheapest first.
 
 ---
 
-## M0: Probes (current)
+## M0: Probes (complete)
 
 Two independent tasks. Different repos, different machines, no dependency on each
 other. Run them in parallel.
@@ -58,9 +58,13 @@ Rust + windows-rs + D3D11. No networking, no decoder, no host. Synthetic source.
 **Exit criteria:** checkerboard stays razor sharp at 100%, 150%, and 200%
 scaling, and while dragging between monitors at different scale factors.
 
-### M0 gate
+### M0 gate (historical exit criteria)
 
-Do not start M1 until:
+The M0 gate is satisfied by the recorded host findings and the client's
+synthetic rendering path. Runtime DPI/decode validation still needs the real
+Windows machine.
+
+Before a general release, verify:
 
 - [ ] `menuwatch` has a clear answer on OQ-1
 - [ ] `place` has a clear answer on OQ-2 (exact? clamped? rounded?)

@@ -1,11 +1,12 @@
-# transom-host
+# Transom
 
-Host-side agent for **Transom**, a seamless remote windowing system: individual
+**Transom** is a seamless remote windowing system: individual
 macOS app windows streamed to a Windows PC as independent, native windows you can
 move, resize, snap, and fullscreen. Think RDS RemoteApp with a Mac host — which
 does not otherwise exist.
 
-> **⚠️ Pre-alpha research prototype.** The host half works end to end on the
+> **Early access.** Transom is a usable host/client product on the intended
+> Mac + Windows setup. The host half works end to end on the
 > target Mac: it probes HEVC 4:4:4 hardware encode, tiles windows non-overlapping,
 > captures + hardware-encodes the virtual display, and serves window rects (and
 > optionally video) to a client over TCP. It has **no auth and no encryption**
@@ -81,11 +82,9 @@ but a private address** (`10/8`, `172.16/12`, `192.168/16`, `127/8`, `169.254/16
 and defaults to `127.0.0.1`. Pass `--host <LAN-ip>` to expose it to a real client.
 Auth and encryption are explicitly out of scope until designed properly.
 
-> **Heads-up: the default control port `7000` collides with macOS AirPlay
-> Receiver** (Control Center listens on `*:7000`). If a control client connects
-> but never receives anything, either turn AirPlay Receiver off (System Settings ›
-> General › AirDrop & Handoff) or pass `--control-port <n>` (e.g. `8770`). The
-> video channel (`7001`) is unaffected. See `docs/architecture.md` §8.
+> The product defaults are control `47100` and video `47101`. They avoid the
+> macOS AirPlay Receiver collision on port `7000`. Custom ports are supported by
+> passing the same `--control-port` / `--video-port` values to both sides.
 
 ## The apps
 
@@ -108,6 +107,21 @@ open "build/Transom Host.app"
 `scripts/release.sh host` (or `probe`) cuts the matching GitHub prerelease. Neither
 app is notarized.
 
+## Use it today (trusted LAN)
+
+1. Create the BetterDisplay virtual display and make it the Mac's main display.
+2. Open the signed `Transom Host.app`, grant Screen Recording and Accessibility,
+   select that display and the app to share, then set Settings → Connection →
+   Address to the Mac's private LAN address. Press **Start**.
+3. Copy the Windows command shown in the host window and run it beside
+   `transom-client.exe`. The default ports are `47100` (control) and `47101`
+   (video); the host app and client already agree on them.
+4. Move, resize, focus, type, scroll, and close the resulting native Windows
+   proxy window. Stop the host when finished.
+
+The transport is still unauthenticated and unencrypted. Keep it on a trusted
+private network and do not port-forward it.
+
 ## Command surface
 
 | Command | Status | Purpose |
@@ -120,7 +134,7 @@ app is notarized.
 | `capture` | **real** | run the shared ScreenCaptureKit stream, verify no scaling (I-1) |
 | `encodeprobe` | **real** | probe HEVC 4:4:4 hardware encode (OQ-4) |
 | `encode` | **real** | capture + HEVC 4:4:4 10-bit hardware encode; report fps/bitrate |
-| `serve` | **real** | tile + watch an app, serve rects (+ optional video), drive the resize roundtrip (throttled AX writes, readback, I-4), and **inject client input** over TCP |
+| `serve` | **real** | tile + watch an app, serve rects + video by default, drive the resize roundtrip (throttled AX writes, readback, I-4), and **inject client input** over TCP |
 | `mockresize` | **real** | mock client: drive a Live/End resize drag against `serve` and measure the ~10Hz throttle |
 | `inject` | **real** | post a click/text/chord into a window locally; log the full coordinate chain |
 | `mock-client` | **real** | stand-in client: connect to `serve` and post input events (issue #7 verification) |
