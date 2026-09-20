@@ -52,7 +52,7 @@ struct VideoServerTests {
             let messages = await transport.messages
             try #require(messages.count == 2)
             #expect(VideoWire.decode(messages[0]) == .config(hvcc: config))
-            if case .frame(_, _, let keyframe, _) = VideoWire.decode(messages[1]) {
+            if case .frame(_, _, let keyframe, _)? = VideoWire.decode(messages[1]) {
                 #expect(keyframe)
             } else {
                 Issue.record("Expected a keyframe after config")
