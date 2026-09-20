@@ -50,7 +50,12 @@ APP_DIR="$HOST_ROOT/build/${APP_NAME}.app"
 
 echo "==> zipping ${APP_DIR}"
 rm -f "$ZIP_PATH"
-ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
+PACKAGE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/transom-host-release.XXXXXX")"
+PACKAGE_APP_DIR="$PACKAGE_ROOT/${APP_NAME}.app"
+ditto --norsrc --noqtn "$APP_DIR" "$PACKAGE_APP_DIR"
+codesign --verify --deep --strict "$PACKAGE_APP_DIR"
+ditto -c -k --keepParent "$PACKAGE_APP_DIR" "$ZIP_PATH"
+rm -rf "$PACKAGE_ROOT"
 echo "zip: $ZIP_PATH"
 
 if [[ "$TARGET" == "host" ]]; then
