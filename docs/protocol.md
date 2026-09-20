@@ -289,16 +289,23 @@ but the payload is not JSON. The first payload byte is a type tag:
                  flags bit0 = keyframe.  integers big-endian.
 ```
 
-- **`config` is sent first**, before the first frame, and again after a
+- **`config` is sent first**, before the first keyframe, and again after a
   reconnect. An `hvc1` stream carries no inline parameter sets, so the decoder
   needs the `hvcC` configuration record before it can decode anything.
+  A video connection requests a fresh keyframe and a native-size capture
+  refresh, including when the display is idle. The server suppresses deltas
+  until that keyframe and its configuration are available. A second refresh
+  releases decoders that retain one frame of pipeline delay.
 - **`frame`** carries `seq` (monotonic), `ptsMicros` (host clock, microseconds),
-  a keyframe flag, and the raw HEVC access-unit bytes. The codec is **HEVC**; the
+  a keyframe flag, and HEVC access-unit bytes in **length-prefixed NAL format**
+  (VideoToolbox `hvc1` sample data, not Annex B). The NAL length field width is
+  `(hvcC[21] & 3) + 1`; receivers must validate every length before reading it.
+  The codec is **HEVC**; the
   **chroma is selectable on the host** (`serve --chroma`, §7):
   - **`420` — HEVC Main 4:2:0 8-bit (the default).** This is what the Windows
-    client's in-box Media Foundation H.265 decoder (`CLSID_CMSH265DecoderMFT`) can
-    actually decode — Main/Main10 4:2:0 → NV12 — so real pixels appear with no
-    extra decoder. Chroma subsampling softens *colored* text edges a little (luma,
+    client decodes through an installed Media Foundation HEVC transform → NV12.
+    Windows HEVC Video Extensions must be installed. Chroma subsampling softens
+    *colored* text edges a little (luma,
     and so black-on-white text, stays full-resolution).
   - **`444` — HEVC 4:4:4 10-bit.** The crisp-text quality target (architecture.md
     OQ-4). The client's in-box Media Foundation decoder tops out at Main10 4:2:0
@@ -309,10 +316,25 @@ but the payload is not JSON. The first payload byte is a type tag:
     `444` output as `Main 10 / yuv420p10le`, so whether it is truly 4:4:4 or 10-bit
     4:2:0 is itself unverified — a separate finding from making streaming *work*.
 
-  The client does not need to be told which chroma is in use: both 4:2:0 modes
-  decode to NV12 on the same path, and if a 4:4:4 stream is sent to an in-box-only
-  client it simply decodes zero frames (the client warns after ~120 undecoded
-  access units rather than failing silently).
+  The current Windows path supports **4:2:0 8-bit**. It reads profile, chroma,
+  and bit depth from hvcC and reports unsupported formats immediately in the
+  dashboard. 10-bit/4:4:4 output conversion is not implemented.
+
+**Windows decoder boundary:** enumerate installed HEVC transforms using
+`MFTEnumEx`; do not assume a hard-coded COM class exists. Media Foundation
+requires **Annex B** for both `MF_MT_MPEG_SEQUENCE_HEADER` and input samples.
+Extract VPS/SPS/PPS from hvcC, prepend `00 00 00 01` to each NAL, replace the
+sample's NAL length fields with start codes, and prepend parameter sets to
+keyframes (including after a decoder flush). These are local decode conversions;
+the wire remains hvcC + length-prefixed samples. See Microsoft's
+[HEVC decoder contract](https://learn.microsoft.com/en-us/windows/win32/medfound/h-265---hevc-video-decoder)
+and [sequence header format](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-mt-mpeg-sequence-header-attribute).
+
+The client waits for a keyframe on connect and after a compressed-queue overrun.
+Encoded deltas retain their order in a bounded queue; replacing arbitrary
+compressed frames breaks reference dependencies. Decoded frames may be dropped
+freely. Older Mac hosts can delay the next keyframe on an idle display; update
+the host to receive the connection-triggered refresh behavior.
 
 Rect metadata lives on the **control** channel, not in the frame header; the
 client correlates by timestamp.

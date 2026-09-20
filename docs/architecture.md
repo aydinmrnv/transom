@@ -331,6 +331,49 @@ to learn whether the quality ceiling is available at all.
 
 ## 8. Open questions
 
+### HEVC blank-window diagnosis (2026-09-20, real Windows PC and Mac host)
+
+Control and resize worked, but the installed 0.3.0 client rendered a placeholder.
+The live wire probe received a 3840×2160 display, hvcC configuration, and encoded
+frames. The decoder then failed with `Class not registered (0x80040154)` despite
+HEVC Video Extensions 2.5.33.0 being installed. Its hard-coded CLSID was wrong.
+Separately, it passed VideoToolbox's length-prefixed NALs and raw hvcC directly
+to a decoder that requires Annex B. Both defects prevented video independently.
+
+The client now enumerates installed HEVC transforms, converts parameter sets and
+access units at the decode boundary, preserves compressed-frame dependencies,
+and returns concrete worker errors to the dashboard. It handles output format
+changes, row stride, rejected input retry, and COM output ownership. Display
+geometry is published before either socket reader can publish video, preventing
+the one-shot configuration from racing initialization.
+
+Actual output from the repaired client against the user's running Mac:
+
+```text
+video: HEVC decoder ready, 3840x2160, Main 4:2:0 8-bit, Annex B
+video: resuming decode at keyframe (720189 bytes)
+video: first decoded BGRA frame (33177600 bytes)
+video: first decoded frame uploaded to the display texture
+```
+
+The native proxy visibly rendered the Mac's Conductor window. An independent
+synthetic fixture decoded 11 of 12 frames at 128×96 through the real Windows
+Media Foundation decoder; the final frame remains buffered without a drain.
+This proves functional decode/presentation, not sustained 60 fps or end-to-end
+checkerboard fidelity. 100%/150% DPI and mixed-scale dragging remain unverified.
+
+An additional startup limitation was reproduced on the existing host: it emits keyframes every 120
+captured frames. ScreenCaptureKit suppresses idle frames, so a new connection
+to a static desktop can wait for more activity before a usable keyframe arrives.
+The decoder correctly waits instead of feeding an incomplete reference chain.
+The host now requests a forced keyframe at video connect and feeds its retained
+native-size capture through the encoder twice (50 ms apart). This requires no
+UI motion, scaling, or restart. The server sends config plus a keyframe before
+any deltas, including on reconnect. A queue barrier makes shutdown wait for an
+in-flight refresh before finishing the encoder. This Mac change is compiled
+and unit-tested in macOS CI; its idle-display capture behavior still requires
+verification after installing the updated host on the real Mac.
+
 ### Windows runtime findings (2026-09-19, RTX 5090, 200% DPI)
 
 The persistent dashboard and DNS-SD client were exercised on Windows against a

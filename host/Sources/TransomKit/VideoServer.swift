@@ -9,8 +9,9 @@ import Foundation
 /// again on reconnect) the parameter sets are sent before the first frame,
 /// because an `hvc1` stream is undecodable without them.
 public actor VideoServer {
-    private var active: TCPTransport?
+    private var active: (id: UUID, transport: any PacketTransport)?
     private var sentConfig = false
+    private var waitingForKeyframe = true
     private var seq: UInt64 = 0
     private let hvccProvider: @Sendable () -> Data?
 
@@ -31,13 +32,15 @@ public actor VideoServer {
 
     public func serve(listener: TCPListener) async {
         for await transport in listener.connections {
-            await handle(transport)
+            await serveConnection(transport)
         }
     }
 
-    private func handle(_ transport: TCPTransport) async {
-        active = transport
+    func serveConnection(_ transport: any PacketTransport) async {
+        let connectionID = UUID()
+        active = (connectionID, transport)
         sentConfig = false
+        waitingForKeyframe = true
         Log.encode.notice("video: client connected")
         onConnectionChange?(true)
         // The client sends nothing on this channel; the receive loop just detects
@@ -48,8 +51,10 @@ public actor VideoServer {
             // fall through to cleanup
         }
         Log.encode.notice("video: client disconnected")
-        if active === transport { active = nil }
-        onConnectionChange?(false)
+        if active?.id == connectionID {
+            active = nil
+            onConnectionChange?(false)
+        }
         await transport.close()
     }
 
@@ -57,20 +62,26 @@ public actor VideoServer {
     /// lazily before the first frame of a connection.
     public func send(_ frame: HEVCEncoder.EncodedFrame) async {
         guard let active else { return }
+        guard !waitingForKeyframe || frame.isKeyframe else { return }
         do {
-            if !sentConfig, let hvcc = hvccProvider() {
-                try await active.send(VideoWire.encodeConfig(hvcc: hvcc))
+            if !sentConfig {
+                guard let hvcc = hvccProvider() else { return }
+                try await active.transport.send(VideoWire.encodeConfig(hvcc: hvcc))
                 sentConfig = true
             }
+            waitingForKeyframe = false
             let ptsMicros =
                 frame.pts.seconds.isFinite ? UInt64(max(0, frame.pts.seconds * 1_000_000)) : 0
-            try await active.send(
+            try await active.transport.send(
                 VideoWire.encodeFrame(
                     seq: seq, ptsMicros: ptsMicros, keyframe: frame.isKeyframe, data: frame.data))
             seq += 1
         } catch {
-            self.active = nil
-            onConnectionChange?(false)
+            if self.active?.id == active.id {
+                self.active = nil
+                onConnectionChange?(false)
+            }
+            await active.transport.close()
         }
     }
 }
