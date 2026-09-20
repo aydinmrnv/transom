@@ -164,19 +164,34 @@ explicit about which is which:
   **full geometry round-trip** — the Rust client requested a resize, the Swift
   host applied it via AX, read back the actual rect, and reported `windowMoved`
   with the actual geometry, which the client consumed correctly.
-- 53 unit tests over framing, JSON, control/video message shapes, input encoding,
+- Unit tests over framing, JSON, control/video message shapes, input encoding,
   the window model, and initial proxy fitting.
 - The whole client compiles and **links to a real Windows executable**, so the
   `windows-rs` API usage (D3D11, DXGI, Win32, Media Foundation) is correct.
 
-**Pending bring-up on a real Windows box (cannot be verified from a Mac):**
+**Verified on the Windows PC (2026-09-20):**
+
+- A real 3840×2160 HEVC Main 4:2:0 8-bit stream from the Mac decoded and rendered
+  as the Conductor proxy window. Version 0.3.1 fixes decoder discovery, Annex B
+  conversion, compressed-frame queueing, and startup event ordering. Decoder
+  failures now show their actual cause in the dashboard.
+- A synthetic 128×96 HEVC regression stream decoded through the installed
+  Media Foundation decoder (`cargo test decodes_hevc_fixture_on_windows --
+  --ignored --nocapture`). This test is intentionally separate from hosted CI.
+- The earlier native resize check measured matching physical client and
+  swapchain dimensions at 200% DPI; see `docs/architecture.md` for exact output.
+
+Windows needs **HEVC Video Extensions** installed. Use **4:2:0 8-bit** in the
+Mac host's Video settings. A new connection waits for a keyframe; with the
+current Mac host a completely idle capture can delay that frame. Mac activity
+resumes the capture stream. Reconnect if the dashboard reports a decoder error.
+
+**Still unverified:**
 
 - The 1:1 pixel guarantee at 100 / 150 / 200% scaling (the checkerboard test).
 - `ResizeBuffers`-to-exact-physical-rect and `WM_DPICHANGED` across monitors.
-- **HEVC decode**: the Media Foundation path is coded to the documented contract
-  and links, but whether the in-box decoder ingests the host's 4:4:4 10-bit stream
-  is a hardware question. Any decode failure degrades to the placeholder texture,
-  so the window manager still runs.
+- End-to-end checkerboard fidelity and sustained frame-rate/latency under load.
+  The current decode path does not support 10-bit/4:4:4 output.
 
 ## `doctor`
 
