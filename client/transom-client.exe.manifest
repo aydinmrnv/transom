@@ -3,8 +3,21 @@
   <assemblyIdentity
       type="win32"
       name="one.transom.client"
-      version="0.2.0.0"
+      version="0.2.1.0"
       processorArchitecture="*"/>
+
+  <!-- Use the Windows 10/11 common-controls theme for the native connection UI. -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+          type="win32"
+          name="Microsoft.Windows.Common-Controls"
+          version="6.0.0.0"
+          processorArchitecture="*"
+          publicKeyToken="6595b64144ccf1df"
+          language="*"/>
+    </dependentAssembly>
+  </dependency>
 
   <!--
     Per-Monitor V2 DPI awareness, declared at load time.
