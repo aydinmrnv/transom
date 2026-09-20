@@ -261,6 +261,10 @@ impl Dashboard {
     }
     pub fn set_connected(&mut self, connected: bool) {
         self.state.connected = connected;
+        if !connected {
+            // Window IDs are scoped to a session and may be reused by another Mac.
+            self.state.recents.clear();
+        }
         unsafe {
             self.state.invalidate();
         }
@@ -1698,7 +1702,7 @@ unsafe extern "system" fn button_proc(
     wp: WPARAM,
     lp: LPARAM,
     _id: usize,
-    _data: usize,
+    hovered: usize,
 ) -> LRESULT {
     match msg {
         WM_PAINT => {
@@ -1709,19 +1713,23 @@ unsafe extern "system" fn button_proc(
         }
         WM_ERASEBKGND => LRESULT(1),
         WM_MOUSEMOVE => {
-            let mut tracking = TRACKMOUSEEVENT {
-                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                dwFlags: TME_LEAVE,
-                hwndTrack: hwnd,
-                dwHoverTime: 0,
-            };
-            let _ = TrackMouseEvent(&mut tracking);
-            if let Ok(parent) = GetParent(hwnd) {
-                let _ = InvalidateRect(parent, None, false);
+            if hovered == 0 {
+                let _ = SetWindowSubclass(hwnd, Some(button_proc), 1, 1);
+                let mut tracking = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tracking);
+                if let Ok(parent) = GetParent(hwnd) {
+                    let _ = InvalidateRect(parent, None, false);
+                }
             }
             DefSubclassProc(hwnd, msg, wp, lp)
         }
         WM_MOUSELEAVE => {
+            let _ = SetWindowSubclass(hwnd, Some(button_proc), 1, 0);
             if let Ok(parent) = GetParent(hwnd) {
                 let _ = InvalidateRect(parent, None, false);
             }
