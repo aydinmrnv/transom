@@ -121,6 +121,8 @@ build_bundle() {
     <key>NSHighResolutionCapable</key>             <true/>
     <key>LSApplicationCategoryType</key>           <string>${CATEGORY}</string>
     <key>NSPrincipalClass</key>                    <string>NSApplication</string>
+    <key>NSLocalNetworkUsageDescription</key>       <string>Let your Windows PC discover this Mac and connect to shared app windows on your local network.</string>
+    <key>NSBonjourServices</key>                    <array><string>_transom._tcp</string></array>
 </dict>
 </plist>
 PLIST

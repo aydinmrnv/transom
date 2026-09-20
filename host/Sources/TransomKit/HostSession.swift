@@ -371,6 +371,8 @@ public final class HostSession: @unchecked Sendable {
             statsLock.withLock { videoEnabled = true }
         }
 
+        controlListener.advertise(
+            address: config.host, videoPort: config.video ? config.videoPort : nil)
         statsLock.withLock { isRunning = true }
     }
 

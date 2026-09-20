@@ -48,8 +48,43 @@ message).
   `playoutDelayHint: 0` does not remove it (architecture.md §5). Settled.
 - The host **binds only to a private address** (10/8, 172.16/12, 192.168/16,
   127/8, 169.254/16) and refuses anything else. There is no auth and no
-  encryption; see the README security note. The client connects by IP — no
-  discovery, no Bonjour.
+  encryption; see the README security note. The client discovers local hosts
+  using DNS-SD, or connects manually by hostname/IP.
+
+### Local discovery (DNS-SD schema v1)
+
+A ready host advertises `_transom._tcp.local.` through Bonjour. The SRV port
+is the actual control port, including custom ports. Its instance label is a
+persisted UUID; the friendly Mac name is in TXT. Advertising starts after the
+entire session is ready and is withdrawn when its control listener stops.
+Loopback-only sessions are not advertised.
+
+| TXT key | Value |
+|---|---|
+| `v` | Discovery schema `1` |
+| `id` | Stable installation UUID |
+| `name` | UTF-8 computer name, for display only |
+| `addr` | Exact private IPv4 address bound by both TCP listeners |
+| `video` | Actual video TCP port, or `0` for control-only sessions |
+
+The explicit address avoids choosing the wrong interface from a multihomed
+Mac's A records. Discovery supports the existing IPv4 transport; it does not
+provide authentication, encryption, or internet connectivity.
+
+Windows uses bounded one-shot mDNS queries (RFC 6762 sections 5.1/6.7) on each
+private IPv4 interface, from ephemeral UDP ports with unicast replies. No
+Bonjour installation or exclusive bind to UDP 5353 is needed. PTR, SRV and TXT
+records may arrive separately or compressed. Malformed records, unsupported
+schemas, invalid ports, and public/loopback advertised addresses are ignored.
+A scan lasts two seconds, with dashboard refreshes about every ten seconds.
+Missing devices become saved/offline entries. Multicast-blocking networks
+require the manual hostname/IP fallback.
+
+Saved discovered devices are resolved again by `id` before every connection,
+including retries, so DHCP changes do not reuse a stale IP. Manual endpoints
+retain the supplied hostname and both ports. Only a valid control `hello`
+saves a connection; incompatible protocol versions and non-Transom endpoints
+are rejected before showing Connected. The TCP message formats are unchanged.
 
 ### Framing
 
