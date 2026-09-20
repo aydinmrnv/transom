@@ -88,3 +88,10 @@ connection succeeds, but the host currently reports zero shared windows; these
 populated-gallery tests use an explicitly labeled loopback fixture, not fabricated
 Mac content. Real Mac multi-app capture and all-monitor DPI verification remain
 separate checks; this UI pass does not claim 100%/150% or cross-monitor proof.
+Final 0.4.1 runtime check: per-card Open and Hide menus passed with local HEVC
+fixtures. The 200% DPI checkerboard probe reported:
+
+    pixel-check: DPI=192 physical=400x240 swapchain=400x240 PASS
+
+This checks the physical client/swapchain size on the current monitor. It does
+not substitute for 100%, 150%, or cross-monitor measurements.
