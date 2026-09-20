@@ -1,5 +1,7 @@
 //! Persistent native dashboard. Workers do networking; wndproc queues actions.
+use super::gallery::{self, Card, CARD_BASE, CARD_COUNT};
 use crate::connections::{self, Connection};
+use crate::{model::Window, wire::Size};
 use std::{
     collections::VecDeque,
     ffi::c_void,
@@ -11,7 +13,7 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::{SetWindowTheme, EM_SETLIMITTEXT};
+use windows::Win32::UI::Controls::{SetWindowTheme, DRAWITEMSTRUCT, EM_SETLIMITTEXT};
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -29,19 +31,24 @@ const CONTROL: usize = 107;
 const VIDEO: usize = 108;
 const STATUS: usize = 109;
 const DISCOVERY: usize = 110;
-const BG: COLORREF = COLORREF(0x00FAF8F5);
+const SEARCH: usize = 111;
+const PREVIOUS: usize = 112;
+const NEXT: usize = 113;
+const ADVANCED: usize = 114;
+const BG: COLORREF = gallery::CANVAS;
 const TEXT: COLORREF = COLORREF(0x003C3027);
 
 pub enum Action {
     Connect(Connection),
     Disconnect,
+    OpenWindow(u64),
 }
 struct Control {
     hwnd: HWND,
     id: usize,
     rect: (i32, i32, i32, i32),
     font: usize,
-    stretch: bool,
+    _stretch: bool,
 }
 struct State {
     controls: Vec<Control>,
@@ -57,6 +64,14 @@ struct State {
     active: bool,
     status: String,
     dpi: u32,
+    cards: Vec<Card>,
+    visible: Vec<usize>,
+    page: usize,
+    page_size: usize,
+    query: String,
+    manual: bool,
+    hwnd: HWND,
+    last_preview: Instant,
 }
 pub struct Dashboard {
     pub hwnd: HWND,
@@ -100,13 +115,21 @@ impl Dashboard {
             active: false,
             status,
             dpi: 96,
+            cards: vec![],
+            visible: vec![],
+            page: 0,
+            page_size: 4,
+            query: String::new(),
+            manual: false,
+            hwnd: HWND::default(),
+            last_preview: Instant::now() - Duration::from_secs(1),
         });
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_APPWINDOW | WS_EX_CONTROLPARENT,
                 CLASS,
                 w!("Transom"),
-                WS_OVERLAPPEDWINDOW,
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 780,
@@ -118,13 +141,14 @@ impl Dashboard {
             )?
         };
         unsafe {
+            state.hwnd = hwnd;
             state.dpi = GetDpiForWindow(hwnd).max(96);
             state.rebuild_fonts();
             let mut rect = RECT {
                 left: 0,
                 top: 0,
-                right: scale(744, state.dpi),
-                bottom: scale(690, state.dpi),
+                right: scale(1040, state.dpi),
+                bottom: scale(700, state.dpi),
             };
             let _ = AdjustWindowRectExForDpi(
                 &mut rect,
@@ -142,6 +166,7 @@ impl Dashboard {
                 rect.bottom - rect.top,
                 SWP_NOMOVE | SWP_NOZORDER,
             );
+            state.layout(hwnd);
             state.rebuild_rows();
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetFocus(state.control(DEVICES));
@@ -194,6 +219,11 @@ impl Dashboard {
                 set_text(self.state.control(STATUS), text);
             }
         }
+        if self.state.active != active {
+            unsafe {
+                let _ = InvalidateRect(self.hwnd, None, false);
+            }
+        }
         self.state.active = active;
         unsafe {
             let _ = EnableWindow(
@@ -216,6 +246,43 @@ impl Dashboard {
         }
         unsafe {
             self.state.rebuild_rows();
+        }
+    }
+    pub fn set_windows(&mut self, windows: Vec<(Window, bool)>) {
+        let mut old = std::mem::take(&mut self.state.cards);
+        self.state.cards = windows
+            .into_iter()
+            .map(|(w, opened)| {
+                if let Some(index) = old.iter().position(|c| c.window.id == w.id) {
+                    let mut card = old.remove(index);
+                    if card.window.source != w.source {
+                        card.pixels.clear();
+                        card.size = Size { w: 0, h: 0 };
+                    }
+                    card.window = w;
+                    card.opened = opened;
+                    card
+                } else {
+                    Card::new(w, opened)
+                }
+            })
+            .collect();
+        unsafe {
+            self.state.layout(self.hwnd);
+        }
+    }
+    pub fn update_previews(&mut self, pixels: &[u8], display: Size) {
+        if self.state.last_preview.elapsed() < Duration::from_millis(250) {
+            return;
+        }
+        self.state.last_preview = Instant::now();
+        for card in &mut self.state.cards {
+            card.update_preview(pixels, display);
+        }
+        unsafe {
+            for slot in 0..CARD_COUNT {
+                let _ = InvalidateRect(self.state.control(CARD_BASE + slot), None, false);
+            }
         }
     }
     pub fn dialog_message(&self, message: &MSG) -> bool {
@@ -338,21 +405,181 @@ impl State {
             let _ = DeleteObject(f);
         }
     }
-    unsafe fn layout(&self, hwnd: HWND) {
+    unsafe fn layout(&mut self, hwnd: HWND) {
         let mut r = RECT::default();
         let _ = GetClientRect(hwnd, &mut r);
-        let extra = (r.right - scale(744, self.dpi)).max(0);
+        let width = r.right * 96 / self.dpi as i32;
+        let height = r.bottom * 96 / self.dpi as i32;
         for c in &self.controls {
+            if c.id >= CARD_BASE {
+                continue;
+            }
             let (x, y, w, h) = c.rect;
+            let (x, y, w, h) = match c.id {
+                STATUS => (272, height - 75, width - 304, 55),
+                SEARCH => (width - 272, 36, 240, 34),
+                PREVIOUS => (width - 234, height - 117, 94, 30),
+                NEXT => (width - 128, height - 117, 94, 30),
+                UPDATE => (20, height - 52, 212, 32),
+                _ => (x, y, w, h),
+            };
+            let advanced = matches!(c.id, HOST | CONTROL | VIDEO | MANUAL | 201 | 202 | 203);
+            let _ = ShowWindow(
+                c.hwnd,
+                if advanced && !self.manual {
+                    SW_HIDE
+                } else {
+                    SW_SHOW
+                },
+            );
             let _ = MoveWindow(
                 c.hwnd,
                 scale(x, self.dpi),
                 scale(y, self.dpi),
-                scale(w, self.dpi) + if c.stretch { extra } else { 0 },
+                scale(w, self.dpi),
                 scale(h, self.dpi),
                 true,
             );
         }
+        let columns = ((width - 288) / 260).clamp(1, 4) as usize;
+        let rows = ((height - 260) / 224).clamp(1, 3) as usize;
+        self.page_size = (columns * rows).min(CARD_COUNT);
+        let matches: Vec<_> = self
+            .cards
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.window.title.to_lowercase().contains(&self.query))
+            .map(|(i, _)| i)
+            .collect();
+        self.page = self
+            .page
+            .min(matches.len().saturating_sub(1) / self.page_size);
+        self.visible = matches
+            .iter()
+            .skip(self.page * self.page_size)
+            .take(self.page_size)
+            .copied()
+            .collect();
+        let card_width = (width - 288 - (columns as i32 - 1) * 16) / columns as i32;
+        for slot in 0..CARD_COUNT {
+            let child = self.control(CARD_BASE + slot);
+            if let Some(&index) = self.visible.get(slot) {
+                set_text(child, &gallery::accessible_title(&self.cards[index]));
+                let x = 272 + (slot % columns) as i32 * (card_width + 16);
+                let y = 138 + (slot / columns) as i32 * 224;
+                let _ = MoveWindow(
+                    child,
+                    scale(x, self.dpi),
+                    scale(y, self.dpi),
+                    scale(card_width, self.dpi),
+                    scale(208, self.dpi),
+                    true,
+                );
+                let _ = ShowWindow(child, SW_SHOW);
+                let _ = InvalidateRect(child, None, false);
+            } else {
+                let _ = ShowWindow(child, SW_HIDE);
+            }
+        }
+        let _ = EnableWindow(self.control(PREVIOUS), self.page > 0);
+        let _ = EnableWindow(
+            self.control(NEXT),
+            (self.page + 1) * self.page_size < matches.len(),
+        );
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+    unsafe fn paint(&self, hwnd: HWND) {
+        let mut ps = PAINTSTRUCT::default();
+        let dc = BeginPaint(hwnd, &mut ps);
+        let mut r = RECT::default();
+        let _ = GetClientRect(hwnd, &mut r);
+        gallery::fill(dc, &r, BG);
+        gallery::fill(
+            dc,
+            &RECT {
+                right: scale(252, self.dpi),
+                ..r
+            },
+            gallery::SIDEBAR,
+        );
+        let line = |text: &str, x: i32, y: i32, w: i32, h: i32, font: usize, color: COLORREF| {
+            gallery::label(
+                dc,
+                self.fonts[font],
+                text,
+                RECT {
+                    left: scale(x, self.dpi),
+                    top: scale(y, self.dpi),
+                    right: scale(x + w, self.dpi),
+                    bottom: scale(y + h, self.dpi),
+                },
+                color,
+                DT_WORDBREAK | DT_NOPREFIX,
+            );
+        };
+        line("Transom", 20, 26, 208, 46, 1, gallery::INK);
+        line("Your Macs", 20, 92, 210, 26, 2, gallery::SECONDARY);
+        line("Windows", 272, 30, 220, 46, 1, gallery::INK);
+        line(
+            "Choose a Mac window to open on this PC.",
+            272,
+            84,
+            650,
+            28,
+            0,
+            gallery::SECONDARY,
+        );
+        if self.visible.is_empty() {
+            line(
+                if self.cards.is_empty() {
+                    if self.active {
+                        "Your shared windows will appear here"
+                    } else {
+                        "Your Mac, one window at a time"
+                    }
+                } else {
+                    "No matching windows"
+                },
+                304,
+                210,
+                540,
+                42,
+                2,
+                gallery::INK,
+            );
+            line(
+                if self.cards.is_empty() {
+                    if self.active {
+                        "Start sharing an app in Transom Host. Previews appear as soon as video arrives."
+                    } else {
+                        "Start Transom Host on your Mac, then choose it in the sidebar and connect. Open the windows you need and keep them beside your Windows apps."
+                    }
+                } else {
+                    "Try a different window title in the search box."
+                },
+                304,
+                260,
+                520,
+                105,
+                0,
+                gallery::SECONDARY,
+            );
+        }
+        let count = format!(
+            "{} shared  /  {} open on this PC",
+            self.cards.len(),
+            self.cards.iter().filter(|c| c.opened).count()
+        );
+        line(
+            &count,
+            272,
+            r.bottom * 96 / self.dpi as i32 - 111,
+            410,
+            28,
+            0,
+            gallery::SECONDARY,
+        );
+        let _ = EndPaint(hwnd, &ps);
     }
 }
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -374,7 +601,49 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let id = wp.0 & 0xffff;
             let notification = wp.0 >> 16;
             let s = &mut *ptr;
-            if (id == CONNECT || (id == DEVICES && notification == LBN_DBLCLK as usize))
+            if id >= CARD_BASE && id < CARD_BASE + CARD_COUNT {
+                if let Some(&index) = s.visible.get(id - CARD_BASE) {
+                    s.actions
+                        .push_back(Action::OpenWindow(s.cards[index].window.id));
+                }
+            } else if id == SEARCH && notification == EN_CHANGE as usize {
+                s.query = read_text(s.control(SEARCH)).to_lowercase();
+                s.page = 0;
+                s.layout(hwnd);
+            } else if id == PREVIOUS || id == NEXT {
+                if id == PREVIOUS {
+                    s.page = s.page.saturating_sub(1);
+                } else {
+                    s.page += 1;
+                }
+                s.layout(hwnd);
+            } else if id == ADVANCED {
+                s.manual = !s.manual;
+                set_text(
+                    s.control(ADVANCED),
+                    if s.manual {
+                        "Hide manual connection"
+                    } else {
+                        "Manual connection…"
+                    },
+                );
+                if s.manual {
+                    let mut r = RECT::default();
+                    let _ = GetWindowRect(hwnd, &mut r);
+                    if r.bottom - r.top < scale(730, s.dpi) {
+                        let _ = SetWindowPos(
+                            hwnd,
+                            None,
+                            0,
+                            0,
+                            r.right - r.left,
+                            scale(730, s.dpi),
+                            SWP_NOMOVE | SWP_NOZORDER,
+                        );
+                    }
+                }
+                s.layout(hwnd);
+            } else if (id == CONNECT || (id == DEVICES && notification == LBN_DBLCLK as usize))
                 && !s.active
             {
                 if let Some(c) = s.selected() {
@@ -427,8 +696,21 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_GETMINMAXINFO => {
             let m = &mut *(lp.0 as *mut MINMAXINFO);
-            m.ptMinTrackSize.x = scale(760, (*ptr).dpi);
-            m.ptMinTrackSize.y = scale(730, (*ptr).dpi);
+            m.ptMinTrackSize.x = scale(840, (*ptr).dpi);
+            m.ptMinTrackSize.y = scale(if (*ptr).manual { 730 } else { 600 }, (*ptr).dpi);
+            LRESULT(0)
+        }
+        WM_DRAWITEM => {
+            let item = &*(lp.0 as *const DRAWITEMSTRUCT);
+            if let Some(slot) = (item.CtlID as usize).checked_sub(CARD_BASE) {
+                if let Some(&index) = (&(*ptr).visible).get(slot) {
+                    gallery::draw(&(&(*ptr).cards)[index], item, &(*ptr).fonts, (*ptr).dpi);
+                }
+            }
+            LRESULT(1)
+        }
+        WM_PAINT => {
+            (*ptr).paint(hwnd);
             LRESULT(0)
         }
         WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
@@ -437,12 +719,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let _ = SetBkColor(dc, BG);
             LRESULT((*ptr).brush.0 as isize)
         }
-        WM_ERASEBKGND => {
-            let mut r = RECT::default();
-            let _ = GetClientRect(hwnd, &mut r);
-            FillRect(HDC(wp.0 as *mut c_void), &r, (*ptr).brush);
-            LRESULT(1)
-        }
+        WM_ERASEBKGND => LRESULT(1),
         WM_CLOSE => {
             let _ = DestroyWindow(hwnd);
             LRESULT(0)
@@ -487,96 +764,77 @@ unsafe fn create_controls(hwnd: HWND, s: &mut State) {
             id,
             rect,
             font,
-            stretch,
+            _stretch: stretch,
         });
     };
-    add(w!("STATIC"), "TRANSOM", 0, (28, 22, 400, 22), 2, 0, false);
-    add(
-        w!("STATIC"),
-        "Your Mac. Right here.",
-        0,
-        (28, 52, 688, 44),
-        1,
-        0,
-        true,
-    );
-    add(
-        w!("STATIC"),
-        "Move Mac windows with Alt-drag. Drag their edges to resize.",
-        0,
-        (28, 102, 688, 26),
-        0,
-        0,
-        true,
-    );
-    add(
-        w!("STATIC"),
-        "NEARBY && SAVED MACS",
-        0,
-        (28, 152, 400, 23),
-        2,
-        0,
-        false,
-    );
     add(
         w!("LISTBOX"),
         "Nearby and saved Macs",
         DEVICES,
-        (28, 183, 688, 134),
+        (20, 124, 212, 110),
         0,
         WS_TABSTOP.0 | WS_VSCROLL.0 | WS_BORDER.0 | LBS_NOTIFY as u32 | LBS_NOINTEGRALHEIGHT as u32,
-        true,
+        false,
     );
     add(
         w!("STATIC"),
-        "Looking for Macs…",
+        "Looking for nearby Macs…",
         DISCOVERY,
-        (28, 326, 688, 42),
+        (20, 242, 212, 52),
         0,
         0,
-        true,
+        false,
     );
     add(
         w!("BUTTON"),
-        "Connect to Mac",
+        "Connect",
         CONNECT,
-        (28, 376, 176, 36),
-        0,
+        (20, 304, 212, 36),
+        2,
         WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32,
+        false,
+    );
+    add(
+        w!("BUTTON"),
+        "Disconnect",
+        DISCONNECT,
+        (20, 348, 212, 32),
+        0,
+        WS_TABSTOP.0,
         false,
     );
     add(
         w!("BUTTON"),
         "Refresh",
         REFRESH,
-        (216, 376, 100, 36),
+        (20, 390, 98, 30),
         0,
         WS_TABSTOP.0,
         false,
     );
     add(
         w!("BUTTON"),
-        "Forget saved Mac",
+        "Forget",
         FORGET,
-        (328, 376, 162, 36),
+        (130, 390, 102, 30),
+        0,
+        WS_TABSTOP.0,
+        false,
+    );
+    add(
+        w!("BUTTON"),
+        "Manual connection…",
+        ADVANCED,
+        (20, 436, 212, 30),
         0,
         WS_TABSTOP.0,
         false,
     );
     add(
         w!("STATIC"),
-        "CONNECT MANUALLY",
-        0,
-        (28, 440, 400, 23),
-        2,
-        0,
-        false,
-    );
-    add(
-        w!("STATIC"),
         "Mac hostname or IP",
-        0,
-        (28, 475, 316, 22),
+        201,
+        (20, 474, 212, 22),
         0,
         0,
         false,
@@ -585,7 +843,7 @@ unsafe fn create_controls(hwnd: HWND, s: &mut State) {
         w!("EDIT"),
         "",
         HOST,
-        (28, 501, 316, 32),
+        (20, 498, 212, 28),
         0,
         WS_TABSTOP.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32,
         false,
@@ -593,8 +851,17 @@ unsafe fn create_controls(hwnd: HWND, s: &mut State) {
     add(
         w!("STATIC"),
         "Control port",
+        202,
+        (20, 534, 100, 22),
         0,
-        (356, 475, 110, 22),
+        0,
+        false,
+    );
+    add(
+        w!("STATIC"),
+        "Video port",
+        203,
+        (132, 534, 100, 22),
         0,
         0,
         false,
@@ -603,61 +870,25 @@ unsafe fn create_controls(hwnd: HWND, s: &mut State) {
         w!("EDIT"),
         "47100",
         CONTROL,
-        (356, 501, 110, 32),
+        (20, 558, 98, 28),
         0,
         WS_TABSTOP.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32,
-        false,
-    );
-    add(
-        w!("STATIC"),
-        "Video port¹",
-        0,
-        (478, 475, 110, 22),
-        0,
-        0,
         false,
     );
     add(
         w!("EDIT"),
         "47101",
         VIDEO,
-        (478, 501, 110, 32),
+        (132, 558, 100, 28),
         0,
         WS_TABSTOP.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32,
         false,
     );
     add(
         w!("BUTTON"),
-        "Connect",
+        "Connect manually",
         MANUAL,
-        (600, 499, 116, 36),
-        0,
-        WS_TABSTOP.0,
-        false,
-    );
-    add(
-        w!("STATIC"),
-        "¹ Leave blank for control only. Local network connections are not encrypted.",
-        0,
-        (28, 544, 688, 22),
-        0,
-        0,
-        true,
-    );
-    add(
-        w!("STATIC"),
-        &status,
-        STATUS,
-        (28, 581, 688, 44),
-        0,
-        0,
-        true,
-    );
-    add(
-        w!("BUTTON"),
-        "Disconnect",
-        DISCONNECT,
-        (28, 638, 138, 34),
+        (20, 596, 212, 32),
         0,
         WS_TABSTOP.0,
         false,
@@ -666,19 +897,64 @@ unsafe fn create_controls(hwnd: HWND, s: &mut State) {
         w!("BUTTON"),
         "Check for updates",
         UPDATE,
-        (180, 638, 180, 34),
+        (20, 648, 212, 32),
         0,
         WS_TABSTOP.0,
         false,
     );
     add(
-        w!("STATIC"),
-        concat!("Transom ", env!("CARGO_PKG_VERSION")),
+        w!("EDIT"),
+        "",
+        SEARCH,
+        (768, 36, 240, 34),
         0,
-        (564, 646, 152, 22),
-        2,
-        0,
+        WS_TABSTOP.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32,
         false,
+    );
+    add(
+        w!("STATIC"),
+        &status,
+        STATUS,
+        (272, 625, 736, 50),
+        0,
+        0,
+        true,
+    );
+    add(
+        w!("BUTTON"),
+        "Previous",
+        PREVIOUS,
+        (800, 583, 94, 30),
+        0,
+        WS_TABSTOP.0,
+        false,
+    );
+    add(
+        w!("BUTTON"),
+        "Next",
+        NEXT,
+        (906, 583, 94, 30),
+        0,
+        WS_TABSTOP.0,
+        false,
+    );
+    for slot in 0..CARD_COUNT {
+        add(
+            w!("BUTTON"),
+            "Open window",
+            CARD_BASE + slot,
+            (272, 138, 320, 208),
+            0,
+            WS_TABSTOP.0 | BS_OWNERDRAW as u32,
+            false,
+        );
+    }
+    let hint = wide("Search windows");
+    SendMessageW(
+        s.control(SEARCH),
+        0x1501,
+        WPARAM(0),
+        LPARAM(hint.as_ptr() as isize),
     );
     let _ = EnableWindow(s.control(DISCONNECT), false);
     SendMessageW(s.control(HOST), EM_SETLIMITTEXT, WPARAM(253), LPARAM(0));

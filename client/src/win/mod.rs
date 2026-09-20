@@ -16,6 +16,7 @@ mod connect;
 mod decode;
 mod dpi;
 mod frame;
+mod gallery;
 mod gpu;
 mod input;
 mod proxy;

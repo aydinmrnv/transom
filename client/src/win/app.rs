@@ -9,7 +9,8 @@
 //! sound because the pump never holds a Rust borrow of the `App` across
 //! `DispatchMessageW`.
 
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
@@ -19,15 +20,15 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowLongPtrW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowLongPtrW, IsZoomed,
     LoadCursorW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, CREATESTRUCTW,
     GWLP_USERDATA, IDC_ARROW, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WM_ACTIVATE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
     WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
-    WM_NCCREATE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SIZING,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
+    WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SIZING, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 use super::connect::{Action, Dashboard};
@@ -37,13 +38,29 @@ use std::sync::mpsc::{self, Receiver};
 type ConnectResult = Result<(Connection, Session, Receiver<SessionEvent>), String>;
 use super::input;
 use super::proxy::Proxy;
-use crate::model::ModelEvent;
+use crate::model::{ModelEvent, Window};
 use crate::session::{Session, SessionEvent, VideoEvent};
 use crate::wire::{ClientMessage, InputEvent, Rect, ResizePhase, Size};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetClientRect, IsIconic, IsWindowVisible, KillTimer, SetForegroundWindow, SetTimer, SW_HIDE,
+    SW_RESTORE,
+};
 
 #[cfg(windows)]
 use super::decode::DecoderWorker;
 
+struct NativeEvent {
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    rect: Option<RECT>,
+}
+thread_local! {
+    static NATIVE_EVENTS: RefCell<VecDeque<NativeEvent>> = const { RefCell::new(VecDeque::new()) };
+    static APP_POINTER: Cell<*mut App> = const { Cell::new(std::ptr::null_mut()) };
+    static IN_TICK: Cell<bool> = const { Cell::new(false) };
+}
 const CLASS_NAME: PCWSTR = w!("TransomProxyWindow");
 
 /// Reconnect backoff after the control channel drops.
@@ -68,6 +85,7 @@ pub struct App {
     session: Option<Session>,
     rx: Option<std::sync::mpsc::Receiver<SessionEvent>>,
     proxies: HashMap<u64, Proxy>,
+    windows: HashMap<u64, Window>,
     hwnd_to_id: HashMap<isize, u64>,
     source: Option<SourceTexture>,
     decoder: Option<DecoderWorker>,
@@ -118,6 +136,7 @@ impl App {
             session: None,
             rx: None,
             proxies: HashMap::new(),
+            windows: HashMap::new(),
             hwnd_to_id: HashMap::new(),
             source: None,
             decoder: None,
@@ -178,6 +197,7 @@ impl App {
     }
 
     fn poll_dashboard(&mut self) {
+        let app_ptr = self as *mut App;
         match self.dashboard.tick() {
             Some(Action::Connect(c)) => {
                 self.disconnect();
@@ -192,6 +212,26 @@ impl App {
                 self.disconnect();
                 self.dashboard
                     .set_status("Disconnected. Your Mac apps are still open.", false);
+            }
+            Some(Action::OpenWindow(id)) => {
+                if let Some(proxy) = self.proxies.get(&id) {
+                    unsafe {
+                        let _ = ShowWindow(
+                            proxy.hwnd,
+                            if IsIconic(proxy.hwnd).as_bool() {
+                                SW_RESTORE
+                            } else {
+                                SW_SHOW
+                            },
+                        );
+                        let _ = SetForegroundWindow(proxy.hwnd);
+                    }
+                } else if let Some(w) = self.windows.get(&id).cloned() {
+                    if let Err(e) = self.create_proxy(id, w.source, &w.title, app_ptr) {
+                        self.notice = Some(format!("Could not open window: {e}"));
+                    }
+                }
+                self.refresh_gallery();
             }
             None => {}
         }
@@ -234,7 +274,7 @@ impl App {
                 "Waiting for video…".into()
             };
             self.dashboard.set_status(
-                &format!("{} · {} · {} window(s)", c.name, state, self.proxies.len()),
+                &format!("{} · {} · {} window(s)", c.name, state, self.windows.len()),
                 true,
             );
         }
@@ -257,6 +297,8 @@ impl App {
         for id in ids {
             self.destroy_proxy(id);
         }
+        self.windows.clear();
+        self.refresh_gallery();
         self.pending_mouse_moves.clear();
         self.cascade = 0;
     }
@@ -298,7 +340,7 @@ impl App {
         // Move the receiver out to avoid borrowing self while we mutate it.
         let Some(rx) = self.rx.take() else { return };
         let mut disconnected = false;
-        loop {
+        for _ in 0..64 {
             match rx.try_recv() {
                 Ok(SessionEvent::Control(ev)) => self.apply_model_event(ev, app_ptr),
                 Ok(SessionEvent::Video(v)) => self.apply_video(v),
@@ -337,27 +379,35 @@ impl App {
         }
     }
 
-    fn apply_model_event(&mut self, ev: ModelEvent, app_ptr: *mut App) {
+    fn apply_model_event(&mut self, ev: ModelEvent, _app_ptr: *mut App) {
         match ev {
             ModelEvent::Connected { vds } => {
                 self.vds = Some(vds);
                 self.ensure_source(vds);
             }
             ModelEvent::WindowAdded(w) => {
-                if !self.proxies.contains_key(&w.id) {
-                    if let Err(e) = self.create_proxy(w.id, w.source, &w.title, app_ptr) {
-                        eprintln!("failed to create proxy for window {}: {e}", w.id);
-                    }
-                }
+                self.windows.insert(w.id, w);
             }
             ModelEvent::WindowRectChanged { id, source, .. } => {
+                if let Some(w) = self.windows.get_mut(&id) {
+                    w.source = source;
+                }
                 self.update_source_rect(id, source);
             }
-            ModelEvent::WindowTitleChanged { id, title } => self.update_title(id, &title),
+            ModelEvent::WindowTitleChanged { id, title } => {
+                if let Some(w) = self.windows.get_mut(&id) {
+                    w.title = title.clone();
+                }
+                self.update_title(id, &title);
+            }
             ModelEvent::WindowFocused { .. } => {}
-            ModelEvent::WindowRemoved { id } => self.destroy_proxy(id),
+            ModelEvent::WindowRemoved { id } => {
+                self.windows.remove(&id);
+                self.destroy_proxy(id);
+            }
             ModelEvent::Resynced { removed } => {
                 for id in removed {
+                    self.windows.remove(&id);
                     self.destroy_proxy(id);
                 }
             }
@@ -365,7 +415,26 @@ impl App {
                 self.notice = Some(format!("Host error {code}: {message}"));
             }
         }
+        self.refresh_gallery();
         self.update_status();
+    }
+
+    fn refresh_gallery(&mut self) {
+        let mut windows: Vec<_> = self.windows.values().cloned().collect();
+        windows.sort_by_key(|w| w.id);
+        self.dashboard.set_windows(
+            windows
+                .into_iter()
+                .map(|w| {
+                    let opened = self
+                        .proxies
+                        .get(&w.id)
+                        .map(|p| unsafe { IsWindowVisible(p.hwnd).as_bool() })
+                        .unwrap_or(false);
+                    (w, opened)
+                })
+                .collect(),
+        );
     }
 
     fn apply_video(&mut self, v: VideoEvent) {
@@ -429,6 +498,9 @@ impl App {
         let frame = self.decoder.as_ref().and_then(DecoderWorker::take_frame);
         if let (Some(bgra), Some(source)) = (frame, self.source.as_ref()) {
             source.update_bgra(&self.gpu, &bgra);
+            if let Some(vds) = self.vds {
+                self.dashboard.update_previews(&bgra, vds);
+            }
             self.video_decoded += 1;
             let recovered = self.video_notice.take().is_some();
             if self.video_decoded == 1 {
@@ -487,6 +559,11 @@ impl App {
         let win_w = fitted.w;
         let win_h = fitted.h;
         let clamped = win_w != source.w || win_h != source.h;
+        let outer = super::frame::outer_size(
+            win_w,
+            win_h,
+            super::dpi::dpi_for_window(self.dashboard.hwnd),
+        );
         let x = spawn_x.min(wa.right - win_w as i32).max(wa.left);
         let y = spawn_y.min(wa.bottom - win_h as i32).max(wa.top);
 
@@ -507,8 +584,8 @@ impl App {
                 WS_OVERLAPPEDWINDOW,
                 x,
                 y,
-                win_w as i32,
-                win_h as i32,
+                outer.0,
+                outer.1,
                 None,
                 None,
                 HINSTANCE(instance.0),
@@ -532,9 +609,16 @@ impl App {
         // The window's client rect is the fitted size, not the source size, so bring
         // the swapchain to match up front (the creation-time WM_SIZE fires before the
         // proxy is registered and is ignored). Until the host relayouts, the fitted
-        // window shows the whole source scaled to fit — the same transient resample
-        // accepted during a live drag; the roundtrip below snaps it back to 1:1.
-        proxy.resize_swapchain(&self.gpu, win_w, win_h);
+        // window crops at native scale; the host then relayouts to the requested size.
+        let mut actual = RECT::default();
+        unsafe {
+            let _ = GetClientRect(hwnd, &mut actual);
+        }
+        proxy.resize_swapchain(
+            &self.gpu,
+            actual.right.max(1) as u32,
+            actual.bottom.max(1) as u32,
+        );
         self.hwnd_to_id.insert(hwnd.0 as isize, id);
         self.proxies.insert(id, proxy);
         unsafe {
@@ -610,17 +694,22 @@ impl App {
         let Some(proxy) = self.proxies.get_mut(&id) else {
             return;
         };
-        let size_changed = proxy.set_source(source);
-        if size_changed && !proxy.in_size_move {
+        proxy.set_source(source);
+        if (proxy.width != source.w || proxy.height != source.h) && !proxy.in_size_move {
             let hwnd = proxy.hwnd;
+            let outer =
+                super::frame::outer_size(source.w, source.h, super::dpi::dpi_for_window(hwnd));
             unsafe {
+                if IsZoomed(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
                 let _ = SetWindowPos(
                     hwnd,
                     None,
                     0,
                     0,
-                    source.w as i32,
-                    source.h as i32,
+                    outer.0,
+                    outer.1,
                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
@@ -649,81 +738,86 @@ impl App {
         let id = *self.hwnd_to_id.get(&(hwnd.0 as isize))?;
 
         match msg {
-            // Eat the whole non-client area: borderless, but native resize/snap
-            // stay because it's still a WS_OVERLAPPEDWINDOW (client AGENTS.md).
+            // Client pixels exclude the native caption and frame.
             WM_SIZE => {
-                let w = (lparam.0 & 0xFFFF) as u32;
-                let h = ((lparam.0 >> 16) & 0xFFFF) as u32;
+                let mut r = RECT::default();
+                unsafe {
+                    let _ = GetClientRect(hwnd, &mut r);
+                }
+                let w = r.right.max(0) as u32;
+                let h = r.bottom.max(0) as u32;
+                let mut request = false;
                 if let Some(proxy) = self.proxies.get_mut(&id) {
                     proxy.resize_swapchain(&self.gpu, w, h);
-                    let source = self.source.as_ref();
-                    if let Some(proxy) = self.proxies.get_mut(&id) {
-                        proxy.render(&self.gpu, source);
-                    }
+                    request = w > 0
+                        && h > 0
+                        && !proxy.in_size_move
+                        && (w != proxy.source.w || h != proxy.source.h);
+                    proxy.render(&self.gpu, self.source.as_ref());
+                }
+                if request {
+                    self.send(&ClientMessage::RequestResize {
+                        id,
+                        size: Size { w, h },
+                        phase: ResizePhase::End,
+                    });
                 }
                 Some(LRESULT(0))
             }
 
             WM_ENTERSIZEMOVE => {
-                // Any queued hover belongs to the just-started local window
-                // gesture, not to the remote Mac app.
                 self.pending_mouse_moves.remove(&id);
                 if let Some(proxy) = self.proxies.get_mut(&id) {
                     proxy.begin_size_move();
-                    let size = Size {
-                        w: proxy.width,
-                        h: proxy.height,
-                    };
+                }
+
+                Some(LRESULT(0))
+            }
+            WM_SIZING => {
+                let r = unsafe { &*(lparam.0 as *const RECT) };
+                let size = super::frame::client_size(
+                    (r.right - r.left).max(1) as u32,
+                    (r.bottom - r.top).max(1) as u32,
+                    super::dpi::dpi_for_window(hwnd),
+                );
+                let mut begin = false;
+                let mut live = false;
+                if let Some(proxy) = self.proxies.get_mut(&id) {
+                    begin = !proxy.resizing;
+                    proxy.resizing = true;
+                    live = proxy.should_send_live(Instant::now());
+                }
+                if begin {
                     self.send(&ClientMessage::RequestResize {
                         id,
                         size,
                         phase: ResizePhase::Begin,
                     });
                 }
-                Some(LRESULT(0))
-            }
-
-            WM_SIZING => {
-                // lParam is a RECT* of the proposed *window* rect; with our
-                // NCCALCSIZE the client fills it, so its size is the client size.
-                let now = Instant::now();
-                let (w, h) = unsafe {
-                    let r = &*(lparam.0 as *const RECT);
-                    (
-                        (r.right - r.left).max(1) as u32,
-                        (r.bottom - r.top).max(1) as u32,
-                    )
-                };
-                if let Some(proxy) = self.proxies.get_mut(&id) {
-                    if proxy.should_send_live(now) {
-                        self.send(&ClientMessage::RequestResize {
-                            id,
-                            size: Size { w, h },
-                            phase: ResizePhase::Live,
-                        });
-                    }
-                    let source = self.source.as_ref();
-                    if let Some(proxy) = self.proxies.get_mut(&id) {
-                        proxy.render(&self.gpu, source);
-                    }
+                if live {
+                    self.send(&ClientMessage::RequestResize {
+                        id,
+                        size,
+                        phase: ResizePhase::Live,
+                    });
                 }
-                // TRUE: we accept the proposed rect.
                 Some(LRESULT(1))
             }
-
             WM_EXITSIZEMOVE => {
                 if let Some(proxy) = self.proxies.get_mut(&id) {
+                    let resized = proxy.resizing;
                     proxy.end_size_move();
                     let size = Size {
                         w: proxy.width,
                         h: proxy.height,
                     };
-                    // Authoritative 1:1 snap request.
-                    self.send(&ClientMessage::RequestResize {
-                        id,
-                        size,
-                        phase: ResizePhase::End,
-                    });
+                    if resized {
+                        self.send(&ClientMessage::RequestResize {
+                            id,
+                            size,
+                            phase: ResizePhase::End,
+                        });
+                    }
                 }
                 Some(LRESULT(0))
             }
@@ -811,9 +905,13 @@ impl App {
             }
 
             WM_CLOSE => {
-                // Ask the host to close the Mac window; the proxy is torn down when
-                // the host replies with `windowDestroyed`.
-                self.send(&ClientMessage::RequestClose { id });
+                // Close the local view, never the remote document. The card can
+                // reopen the same HWND without changing its position or size.
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+                self.pending_mouse_moves.remove(&id);
+                self.refresh_gallery();
                 Some(LRESULT(0))
             }
 
@@ -871,13 +969,8 @@ pub fn register_class() -> windows::core::Result<()> {
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         if msg == windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST {
-            return LRESULT(super::frame::hit_test(hwnd, lparam) as isize);
-        }
-        // Both forms matter: creation sends wParam=FALSE before the proxy is
-        // registered; later frame recalculation can send TRUE. Leave the supplied
-        // window rect intact as the client rect, independent of App lookup.
-        if msg == WM_NCCALCSIZE {
-            return LRESULT(0);
+            let hit = DefWindowProcW(hwnd, msg, wparam, lparam);
+            return LRESULT(super::frame::hit_test(hit.0 as u32) as isize);
         }
         // Stash the App pointer on NCCREATE, before any other message needs it.
         if msg == WM_NCCREATE {
@@ -891,12 +984,44 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
 
-        // Sound because the pump never holds a Rust borrow across DispatchMessageW.
-        if let Some(result) = (*app_ptr).handle_message(hwnd, msg, wparam, lparam) {
-            result
-        } else {
-            DefWindowProcW(hwnd, msg, wparam, lparam)
+        match msg {
+            WM_SIZE | WM_ENTERSIZEMOVE | WM_SIZING | WM_EXITSIZEMOVE | WM_DPICHANGED | WM_PAINT
+            | WM_ACTIVATE | WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN
+            | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MOUSEWHEEL | WM_MOUSEHWHEEL
+            | WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP | WM_CLOSE | WM_DESTROY => {
+                let rect = if msg == WM_SIZING || msg == WM_DPICHANGED {
+                    Some(*(lparam.0 as *const RECT))
+                } else {
+                    None
+                };
+                NATIVE_EVENTS.with(|queue| {
+                    let mut q = queue.borrow_mut();
+                    // Coalesce paint/size/hover before they can flood the modal tick.
+                    if matches!(msg, WM_PAINT | WM_SIZE | WM_MOUSEMOVE) {
+                        q.retain(|e| e.hwnd != hwnd || e.msg != msg);
+                    }
+                    q.push_back(NativeEvent {
+                        hwnd,
+                        msg,
+                        wp: wparam,
+                        lp: lparam,
+                        rect,
+                    });
+                });
+                if msg == WM_PAINT {
+                    let _ = windows::Win32::Graphics::Gdi::ValidateRect(hwnd, None);
+                    return LRESULT(0);
+                }
+                if msg == WM_CLOSE || msg == WM_DPICHANGED {
+                    return LRESULT(0);
+                }
+                if msg == WM_SIZING {
+                    return LRESULT(1);
+                }
+            }
+            _ => {}
         }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 }
 
@@ -912,11 +1037,12 @@ pub fn run_pump(mut app: Box<App>) {
     // Initial connect attempt; the pump keeps retrying on the backoff.
     unsafe { (*app_ptr).connect() };
 
+    APP_POINTER.with(|p| p.set(app_ptr));
+    // Thread timer dispatches inside *any* native modal loop, including the
+    // dashboard, menus, and proxy movement. Wndprocs only queue owned data.
+    let timer = unsafe { SetTimer(None, 0, 16, Some(modal_tick)) };
     loop {
-        unsafe { (*app_ptr).poll_dashboard() };
-        // 1. Fold in any protocol events (may create/destroy windows).
-        unsafe { (*app_ptr).drain_session(app_ptr) };
-        unsafe { (*app_ptr).poll_decoder() };
+        tick(app_ptr);
 
         // 2. Pump all pending Win32 messages. No Rust borrow of App is held here,
         //    so the reentrant wndproc's `*app_ptr` access is sound.
@@ -943,11 +1069,6 @@ pub fn run_pump(mut app: Box<App>) {
             break;
         }
 
-        // 3. Send at most one hover position per window for this message batch,
-        //    then render. Neither operation floods the UI thread during a drag.
-        unsafe { (*app_ptr).flush_mouse_moves() };
-        unsafe { (*app_ptr).render_all() };
-
         // 4. If every window has closed and we were connected, exit; otherwise
         //    wait briefly for input or the next channel poll.
         unsafe {
@@ -959,6 +1080,10 @@ pub fn run_pump(mut app: Box<App>) {
         }
     }
 
+    unsafe {
+        let _ = KillTimer(None, timer);
+    }
+    APP_POINTER.with(|p| p.set(std::ptr::null_mut()));
     // Clean shutdown of the session's threads.
     unsafe {
         if let Some(s) = (*app_ptr).session.take() {
@@ -966,6 +1091,36 @@ pub fn run_pump(mut app: Box<App>) {
         }
     }
     let _ = app; // keep the box alive until here
+}
+
+fn tick(app_ptr: *mut App) {
+    if IN_TICK.with(|busy| busy.replace(true)) {
+        return;
+    }
+    unsafe {
+        for _ in 0..256 {
+            let event = NATIVE_EVENTS.with(|q| q.borrow_mut().pop_front());
+            let Some(event) = event else { break };
+            let lp = event
+                .rect
+                .as_ref()
+                .map(|r| LPARAM(r as *const RECT as isize))
+                .unwrap_or(event.lp);
+            (*app_ptr).handle_message(event.hwnd, event.msg, event.wp, lp);
+        }
+        (*app_ptr).poll_dashboard();
+        (*app_ptr).drain_session(app_ptr);
+        (*app_ptr).poll_decoder();
+        (*app_ptr).flush_mouse_moves();
+        (*app_ptr).render_all();
+    }
+    IN_TICK.with(|busy| busy.set(false));
+}
+unsafe extern "system" fn modal_tick(_: HWND, _: u32, _: usize, _: u32) {
+    let app = APP_POINTER.with(Cell::get);
+    if !app.is_null() {
+        tick(app);
+    }
 }
 
 /// Post `WM_QUIT` (used by a future tray/quit path).
