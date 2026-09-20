@@ -386,24 +386,29 @@ public final class HostSession: @unchecked Sendable {
         self.encoder = enc
         statsLock.withLock { usingHardware = enc.usingHardware }
 
+        let cap = DisplayCapture(display: disp, fps: config.fps)
+        self.capture = cap
+
         let videoServer = VideoServer(hvccProvider: { enc.parameterSetsHVCC })
-        await videoServer.setOnConnectionChange { [weak self] connected in
+        await videoServer.setOnConnectionChange { [weak self, weak enc, weak cap] connected in
             self?.statsLock.withLock { self?.videoConnected = connected }
+            if connected {
+                enc?.requestKeyframe()
+                cap?.requestRefresh()
+            }
         }
         let listener = try TCPListener(host: config.host, port: config.videoPort, label: "video")
         self.videoListener = listener
 
         let (frames, frameSink) = AsyncStream.makeStream(
             of: HEVCEncoder.EncodedFrame.self, bufferingPolicy: .bufferingNewest(4))
-        enc.onEncodedFrame = { [weak self] frame in
-            // Pass the encoder's format read-back in from here (we hold `enc`
-            // strongly) rather than reading `self.encoder` off this VT thread.
-            self?.recordEncodedFrame(frame, formatSummary: enc.outputFormatSummary)
+        enc.onEncodedFrame = { [weak self, weak enc] frame in
+            // Read the encoder directly instead of self.encoder on a VT thread;
+            // keep it weak so the callback does not retain its own encoder.
+            self?.recordEncodedFrame(frame, formatSummary: enc?.outputFormatSummary ?? "unknown")
             frameSink.yield(frame)
         }
 
-        let cap = DisplayCapture(display: disp, fps: config.fps)
-        self.capture = cap
         let frameDuration = CMTimeMake(value: 1, timescale: Int32(config.fps))
         cap.onPixelBuffer = { [weak self] pixelBuffer, pts in
             self?.markEncodeStart()

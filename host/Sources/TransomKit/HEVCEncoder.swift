@@ -187,6 +187,14 @@ public final class HEVCEncoder: @unchecked Sendable {
     private let compression: VTCompressionSession
     private let transfer: VTPixelTransferSession
     private let v410Pool: CVPixelBufferPool
+    private let keyframeLock = NSLock()
+    private var forceNextKeyframe = false
+
+    /// A newly connected decoder has no reference frames. Safe to call from
+    /// the video server actor; the capture/encode queue consumes the request.
+    public func requestKeyframe() {
+        keyframeLock.withLock { forceNextKeyframe = true }
+    }
 
     public init(config: Config) throws {
         self.config = config
@@ -292,6 +300,9 @@ public final class HEVCEncoder: @unchecked Sendable {
         VTSessionSetProperty(
             session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
             value: config.maxKeyFrameInterval as CFNumber)
+        VTSessionSetProperty(
+            session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+            value: (Double(config.maxKeyFrameInterval) / Double(max(1, config.fps))) as CFNumber)
     }
 
     private static func readUsingHardware(_ session: VTCompressionSession) -> Bool {
@@ -339,15 +350,23 @@ public final class HEVCEncoder: @unchecked Sendable {
             guard let self, status == noErr, let sampleBuffer else { return }
             self.emit(sampleBuffer)
         }
+        let forceKeyframe = keyframeLock.withLock {
+            let requested = forceNextKeyframe
+            forceNextKeyframe = false
+            return requested
+        }
+        let frameProperties: CFDictionary? = forceKeyframe
+            ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
         let encodeStatus = VTCompressionSessionEncodeFrame(
             compression,
             imageBuffer: dest,
             presentationTimeStamp: pts,
             duration: duration,
-            frameProperties: nil,
+            frameProperties: frameProperties,
             infoFlagsOut: nil,
             outputHandler: handler)
         guard encodeStatus == noErr else {
+            if forceKeyframe { requestKeyframe() }
             throw EncoderError.encodeFailed(encodeStatus)
         }
     }

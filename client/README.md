@@ -182,9 +182,9 @@ explicit about which is which:
   swapchain dimensions at 200% DPI; see `docs/architecture.md` for exact output.
 
 Windows needs **HEVC Video Extensions** installed. Use **4:2:0 8-bit** in the
-Mac host's Video settings. A new connection waits for a keyframe; with the
-current Mac host a completely idle capture can delay that frame. Mac activity
-resumes the capture stream. Reconnect if the dashboard reports a decoder error.
+Mac host's Video settings. Update the Mac host too: it now produces a keyframe
+on connection even if the desktop is idle. Older hosts can delay that frame
+until more Mac activity. Reconnect if the dashboard reports a decoder error.
 
 **Still unverified:**
 

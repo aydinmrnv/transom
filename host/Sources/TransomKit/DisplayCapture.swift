@@ -30,6 +30,8 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     private let display: DisplayInfo
     private let fps: Int
     private let queue = DispatchQueue(label: "one.transom.host.capture")
+    // Accessed only on the capture queue, including explicit refreshes.
+    private var lastPixelPTS = CMTime.invalid
 
     private let lock = NSLock()
     private var stream: SCStream?
@@ -96,6 +98,39 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             return current
         }
         if let s { try? await s.stopCapture() }
+        // Drain an in-flight explicit refresh before the caller finishes the
+        // encoder. Refreshes queued after this observe stream == nil.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { continuation.resume() }
+        }
+    }
+
+    /// SCK emits no complete frames while a display is idle. Feed its retained
+    /// native-size image through the encoder on connect, then once more to
+    /// release a decoder's one-frame pipeline delay. This changes no Mac UI.
+    public func requestRefresh() {
+        queue.async { [weak self] in self?.refreshOnCaptureQueue() }
+        queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.refreshOnCaptureQueue()
+        }
+    }
+
+    private func refreshOnCaptureQueue() {
+        let buffer = lock.withLock { stream == nil ? nil : latestPixelBuffer }
+        guard let buffer else { return }
+        emitPixelBuffer(buffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+    }
+
+    private func emitPixelBuffer(_ buffer: CVPixelBuffer, pts: CMTime) {
+        guard let pixelHook = onPixelBuffer else { return }
+        // A captured sample can have been queued before an explicit refresh.
+        // Keep encoder timestamps monotonic without altering any pixels.
+        let timestamp = lastPixelPTS.isValid && CMTimeCompare(pts, lastPixelPTS) <= 0
+            ? CMTimeAdd(lastPixelPTS, CMTime(value: 1, timescale: 1_000_000)) : pts
+        lastPixelPTS = timestamp
+        let signpostState = Log.signposter.beginInterval("capture")
+        pixelHook(buffer, timestamp)
+        Log.signposter.endInterval("capture", signpostState)
     }
 
     /// Latest frame as a CGImage at **native pixels**, converted on demand. Nil
@@ -149,24 +184,19 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             pixelFormat: fmt,
             matchesNativePixels: dw == display.pixelWidth && dh == display.pixelHeight)
 
-        let (ctx, frameHook, pixelHook):
+        let (ctx, frameHook):
             (
-                CIContext, (@Sendable (CGImage) -> Void)?,
-                (@Sendable (CVPixelBuffer, CMTime) -> Void)?
+                CIContext, (@Sendable (CGImage) -> Void)?
             ) = lock.withLock {
                 latestPixelBuffer = pixelBuffer
                 _stats = stats
-                return (ciContext, onFrame, onPixelBuffer)
+                return (ciContext, onFrame)
             }
 
         // Zero-copy tap first: hand the raw IOSurface buffer straight to the
         // encoder before spending anything on the CGImage path (I-1). Signposted
         // so the capture→handoff interval is measurable in Instruments.
-        if let pixelHook {
-            let signpostState = Log.signposter.beginInterval("capture")
-            pixelHook(pixelBuffer, sampleBuffer.presentationTimeStamp)
-            Log.signposter.endInterval("capture", signpostState)
-        }
+        emitPixelBuffer(pixelBuffer, pts: sampleBuffer.presentationTimeStamp)
 
         if let frameHook {
             let image = ctx.createCGImage(

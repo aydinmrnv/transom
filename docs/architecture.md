@@ -362,11 +362,17 @@ Media Foundation decoder; the final frame remains buffered without a drain.
 This proves functional decode/presentation, not sustained 60 fps or end-to-end
 checkerboard fidelity. 100%/150% DPI and mixed-scale dragging remain unverified.
 
-Remaining startup limitation on the existing host: it emits keyframes every 120
+An additional startup limitation was reproduced on the existing host: it emits keyframes every 120
 captured frames. ScreenCaptureKit suppresses idle frames, so a new connection
 to a static desktop can wait for more activity before a usable keyframe arrives.
 The decoder correctly waits instead of feeding an incomplete reference chain.
-An initial-keyframe request/snapshot on the host is a separate follow-up.
+The host now requests a forced keyframe at video connect and feeds its retained
+native-size capture through the encoder twice (50 ms apart). This requires no
+UI motion, scaling, or restart. The server sends config plus a keyframe before
+any deltas, including on reconnect. A queue barrier makes shutdown wait for an
+in-flight refresh before finishing the encoder. This Mac change is compiled
+and unit-tested in macOS CI; its idle-display capture behavior still requires
+verification after installing the updated host on the real Mac.
 
 ### Windows runtime findings (2026-09-19, RTX 5090, 200% DPI)
 

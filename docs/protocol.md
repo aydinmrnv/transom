@@ -289,9 +289,13 @@ but the payload is not JSON. The first payload byte is a type tag:
                  flags bit0 = keyframe.  integers big-endian.
 ```
 
-- **`config` is sent first**, before the first frame, and again after a
+- **`config` is sent first**, before the first keyframe, and again after a
   reconnect. An `hvc1` stream carries no inline parameter sets, so the decoder
   needs the `hvcC` configuration record before it can decode anything.
+  A video connection requests a fresh keyframe and a native-size capture
+  refresh, including when the display is idle. The server suppresses deltas
+  until that keyframe and its configuration are available. A second refresh
+  releases decoders that retain one frame of pipeline delay.
 - **`frame`** carries `seq` (monotonic), `ptsMicros` (host clock, microseconds),
   a keyframe flag, and HEVC access-unit bytes in **length-prefixed NAL format**
   (VideoToolbox `hvc1` sample data, not Annex B). The NAL length field width is
@@ -329,8 +333,8 @@ and [sequence header format](https://learn.microsoft.com/en-us/windows/win32/med
 The client waits for a keyframe on connect and after a compressed-queue overrun.
 Encoded deltas retain their order in a bounded queue; replacing arbitrary
 compressed frames breaks reference dependencies. Decoded frames may be dropped
-freely. An idle Mac can delay the next keyframe because its current encoder
-interval is measured in captured frames, not wall-clock time.
+freely. Older Mac hosts can delay the next keyframe on an idle display; update
+the host to receive the connection-triggered refresh behavior.
 
 Rect metadata lives on the **control** channel, not in the frame header; the
 client correlates by timestamp.
