@@ -90,9 +90,15 @@ impl Proxy {
             return; // minimized; nothing to size to
         }
         if width == self.width && height == self.height && self.rtv.is_some() {
+            self.report_pixel_size();
             return;
         }
-        self.rtv = None; // drop the only back-buffer reference
+        // The immediate context also retains the bound RTV after drawing. Drop
+        // that reference before ResizeBuffers, not only our Rust COM handle.
+        unsafe {
+            gpu.context.OMSetRenderTargets(None, None);
+        }
+        self.rtv = None;
         let hr = unsafe {
             self.swapchain.ResizeBuffers(
                 0, // keep buffer count
@@ -107,6 +113,33 @@ impl Proxy {
             self.height = height;
         }
         let _ = self.ensure_rtv(gpu);
+        self.report_pixel_size();
+    }
+
+    fn report_pixel_size(&self) {
+        if !self.checkerboard {
+            return;
+        }
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+        let mut rect = RECT::default();
+        unsafe {
+            if GetClientRect(self.hwnd, &mut rect).is_ok() {
+                if let Ok(desc) = self.swapchain.GetDesc1() {
+                    let matches = desc.Width == (rect.right - rect.left) as u32
+                        && desc.Height == (rect.bottom - rect.top) as u32;
+                    println!(
+                        "pixel-check: DPI={} physical={}x{} swapchain={}x{} {}",
+                        super::dpi::dpi_for_window(self.hwnd),
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        desc.Width,
+                        desc.Height,
+                        if matches { "PASS" } else { "FAIL" }
+                    );
+                }
+            }
+        }
     }
 
     /// Draw one frame and present. `source_tex` is the shared decoded VDS texture;

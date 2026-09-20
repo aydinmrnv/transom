@@ -13,5 +13,6 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=transom-client.rc");
+    println!("cargo:rerun-if-changed=resources/transom.ico");
     println!("cargo:rerun-if-changed=transom-client.exe.manifest");
 }

@@ -1,6 +1,6 @@
 [package]
 name = "transom-client"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.74"
 license = "AGPL-3.0-or-later"
@@ -25,6 +25,9 @@ path = "src/updater.rs"
 version = "0.58"
 features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_Storage_FileSystem",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_Direct3D11",

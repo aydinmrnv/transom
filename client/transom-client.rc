@@ -5,3 +5,5 @@
 #define RT_MANIFEST 24
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "transom-client.exe.manifest"
+
+101 ICON "resources/transom.ico"

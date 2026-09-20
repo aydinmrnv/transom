@@ -51,6 +51,36 @@ can be pointed at the real Swift host to check the two halves agree byte-for-byt
 The Windows half is `#[cfg(windows)]` and depends only on `windows` (features
 added as needed; no new crates — invariants I-8).
 
+## Quick connect
+
+1. Open Transom Host on the Mac, choose a display and app, and press **Start**.
+   Enable **Settings → Connection → Choose a LAN address automatically**
+   (default on new installations). Allow Local Network access if macOS asks.
+2. Open Transom on Windows. Choose your Mac under **Nearby & saved Macs** and
+   press **Connect to Mac**, or double-click its name. Custom ports are automatic.
+3. Keep the dashboard open for connection, window count, video errors, and retry
+   status. **Disconnect** closes the local proxy windows, leaving Mac apps open.
+   Closing the dashboard exits the client.
+
+Successful connections are stored in `%LocalAppData%\Transom\connections.json`.
+Discovered Macs are resolved by stable identity when their IP changes. Saved
+devices remain visible while offline; **Forget saved Mac** removes a saved entry.
+Scans refresh about every ten seconds, or immediately with **Refresh**.
+
+If no Mac appears, check that the host is sharing, Local Network permission is
+allowed, and the host is not bound to loopback. Both computers must share a local
+network that permits mDNS. **Connect manually** accepts a hostname such as
+`Mac-Studio.local` or an IP, with independent control/video ports. Leave video
+blank for control-only diagnostics. Connections remain unencrypted and
+unauthenticated, for trusted LAN use only.
+
+The native dashboard supports keyboard navigation and per-monitor DPI sizing.
+Discovery and connection attempts run in background workers; Disconnect also
+cancels a pending attempt. CLI connections open the same persistent dashboard.
+Resize Mac windows by dragging their edges; hold **Alt** while dragging inside
+one to move or snap it using Windows' native move loop. Ordinary clicks in the
+interior continue to go to the Mac app.
+
 ## Commands
 
 ```sh

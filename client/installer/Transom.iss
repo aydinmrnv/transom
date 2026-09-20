@@ -3,7 +3,7 @@
 ;   ISCC.exe /DAppVersion=0.2.0 client\installer\Transom.iss
 
 #ifndef AppVersion
-  #define AppVersion "0.2.0-dev"
+  #define AppVersion "0.3.0"
 #endif
 
 #define AppName "Transom"
@@ -27,6 +27,7 @@ OutputBaseFilename=TransomSetup-v{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\resources\transom.ico
 Uninstallable=yes
 UninstallDisplayIcon={app}\{#AppExeName}
 CloseApplications=yes

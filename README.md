@@ -16,6 +16,15 @@ does not otherwise exist.
 > protocol (its GPU/decode runtime needs a real Windows box; see
 > [`client/README.md`](client/README.md)).
 
+## Quick connect
+
+Start sharing in Transom Host on the Mac, then open Transom on Windows and
+select the Mac by name under **Nearby & saved Macs**. No IP address is needed.
+Successful connections are remembered, including custom ports; discovered Macs
+are found again when their IP changes. On an existing host installation, enable
+**Settings → Connection → Choose a LAN address automatically**. Both computers
+must share a trusted local network. See [the Windows guide](client/README.md).
+
 ## The problem
 
 Parsec already streams a Mac desktop to Windows beautifully, but its windowed

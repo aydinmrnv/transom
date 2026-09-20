@@ -24,6 +24,10 @@ struct ContentView: View {
     // Persisted config — the source of truth is the Settings window (Cmd-,); these
     // read the same UserDefaults keys and are consumed at Start (HostDefaults).
     @AppStorage(HostDefaults.bindAddress) private var bindAddress = "127.0.0.1"
+    @AppStorage(HostDefaults.automaticAddress) private var automaticAddress = true
+    @State private var activeAddress: String?
+    @State private var detectedAddress = HostDiscovery.localAddresses().first ?? ""
+    private var effectiveAddress: String { activeAddress ?? (automaticAddress ? detectedAddress : bindAddress) }
     @AppStorage(HostDefaults.controlPort) private var controlPort = HostDefaults.defaultControlPort
     @AppStorage(HostDefaults.videoPort) private var videoPort = HostDefaults.defaultVideoPort
     @AppStorage(HostDefaults.bitrateMbps) private var bitrateMbps = 40
@@ -43,7 +47,7 @@ struct ContentView: View {
         HEVCEncoder.Format(rawValue: chroma) ?? .hevc420_8bit
     }
 
-    private var hostIsPrivate: Bool { PrivateAddress.isPrivateIPv4(bindAddress) }
+    private var hostIsPrivate: Bool { PrivateAddress.isPrivateIPv4(effectiveAddress) }
     private var permissionsReady: Bool { accessibility && (!videoEnabled || screenRecording) }
     /// Both ports must be real TCP endpoints. Without this gate, `startServing()`
     /// would `UInt16(clamping:)` an out-of-range value into a *different* port than
@@ -79,7 +83,13 @@ struct ContentView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear(perform: refreshAll)
-        .onReceive(permTimer) { _ in refreshPermissions() }
+        .onReceive(permTimer) { _ in
+            refreshPermissions()
+            if !host.running && !host.starting {
+                activeAddress = nil
+                detectedAddress = HostDiscovery.localAddresses().first ?? ""
+            }
+        }
     }
 
     // MARK: - Header
@@ -287,7 +297,7 @@ struct ContentView: View {
     }
 
     private var configSummary: String {
-        var parts = ["\(bindAddress)", "control \(controlPort)"]
+        var parts = ["\(effectiveAddress)", "control \(controlPort)"]
         if videoEnabled {
             parts.append("video \(videoPort)")
             parts.append("HEVC \(videoFormat.chromaTag)")
@@ -312,15 +322,17 @@ struct ContentView: View {
                 Spacer()
                 Button("Copy command") { copyWindowsCommand() }
             }
-            Text("Run this on Windows after pressing Start:")
+            Text("After pressing Start, open Transom on Windows and choose \(HostDiscovery.computerName) from Nearby Macs. No IP address needed.")
                 .font(.caption).foregroundStyle(.secondary)
-            Text(windowsCommand)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-            if bindAddress == "127.0.0.1" {
+            DisclosureGroup("Manual connection command") {
+                Text(windowsCommand)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if effectiveAddress.hasPrefix("127.") {
                 Label(
-                    "127.0.0.1 only accepts connections from this Mac. Set a private LAN address in Settings for a separate Windows PC.",
+                    "127.0.0.1 only accepts connections from this Mac. Enable automatic LAN address selection in Settings for your Windows PC.",
                     systemImage: "info.circle"
                 )
                 .font(.caption2).foregroundStyle(.orange)
@@ -337,9 +349,11 @@ struct ContentView: View {
     }
 
     private var windowsCommand: String {
-        var command = "transom-client run \(bindAddress) --control-port \(controlPort)"
+        var command = "transom-client run \(effectiveAddress) --control-port \(controlPort)"
         if videoEnabled {
             command += " --video-port \(videoPort)"
+        } else {
+            command += " --no-video"
         }
         return command
     }
@@ -638,8 +652,14 @@ struct ContentView: View {
         guard let app = apps.first(where: { $0.pid == selectedAppPID }),
             let disp = displays.first(where: { $0.id == selectedDisplayID })
         else { return }
+        let address = automaticAddress ? (HostDiscovery.localAddresses().first ?? "") : bindAddress
+        guard PrivateAddress.isPrivateIPv4(address) else {
+            host.startError = "No private network address is available. Connect this Mac to Ethernet or Wi-Fi."
+            return
+        }
+        activeAddress = address
         let config = HostConfig(
-            target: app, display: disp, host: bindAddress,
+            target: app, display: disp, host: address,
             controlPort: UInt16(clamping: controlPort), videoPort: UInt16(clamping: videoPort),
             gutter: gutter, tile: true, video: videoEnabled, bitrateMbps: bitrateMbps, fps: fps,
             videoFormat: videoFormat, namesakeModifiers: namesakeModifiers, logInput: logInput)

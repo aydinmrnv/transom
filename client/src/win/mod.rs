@@ -15,6 +15,7 @@ mod app;
 mod connect;
 mod decode;
 mod dpi;
+mod frame;
 mod gpu;
 mod input;
 mod proxy;
@@ -35,20 +36,12 @@ struct Args {
 
 pub fn run(args: &[String]) -> ExitCode {
     let parsed = if args.is_empty() || args == ["--interactive"] {
-        match connect::show() {
-            Some(connection) => Args {
-                host: connection.host,
-                control_port: connection.control_port,
-                video_port: connection.video_port,
-                checkerboard: false,
-            },
-            None => return ExitCode::SUCCESS,
-        }
+        None
     } else {
         match parse(args) {
-            Ok(a) => a,
+            Ok(a) => Some(a),
             Err(msg) => {
-                eprintln!("run: {msg}\n");
+                connect::show_error(Default::default(), &msg);
                 print_usage();
                 return ExitCode::FAILURE;
             }
@@ -64,7 +57,10 @@ pub fn run(args: &[String]) -> ExitCode {
     let gpu = match gpu::Gpu::new() {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("failed to create D3D11 device: {e}");
+            connect::show_error(
+                Default::default(),
+                &format!("Could not initialize graphics: {e}"),
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -74,28 +70,20 @@ pub fn run(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let cfg = AppConfig {
-        host: parsed.host,
-        control_port: parsed.control_port,
-        video_port: parsed.video_port,
-        checkerboard: parsed.checkerboard,
-    };
-
-    println!(
-        "transom-client: managing windows from {}:{}{}{}",
-        cfg.host,
-        cfg.control_port,
-        cfg.video_port
-            .map(|p| format!(" (video {p})"))
-            .unwrap_or_else(|| " (no video)".into()),
-        if cfg.checkerboard {
-            " [checkerboard test pattern]"
-        } else {
-            ""
+    let dashboard = match connect::Dashboard::new() {
+        Ok(d) => d,
+        Err(e) => {
+            connect::show_error(Default::default(), &format!("Could not open Transom: {e}"));
+            return ExitCode::FAILURE;
         }
-    );
-
-    app::run_pump(Box::new(App::new(gpu, cfg)));
+    };
+    let cfg = parsed.map(|p| AppConfig {
+        host: p.host,
+        control_port: p.control_port,
+        video_port: p.video_port,
+        checkerboard: p.checkerboard,
+    });
+    app::run_pump(Box::new(App::new(gpu, cfg, dashboard)));
     ExitCode::SUCCESS
 }
 
@@ -148,8 +136,14 @@ fn parse(args: &[String]) -> Result<Args, String> {
         i += 1;
     }
 
+    let host = host.ok_or("missing Mac hostname or IP address")?;
+    crate::connections::Connection::manual(
+        &host,
+        &control_port.to_string(),
+        &video_port.map(|p| p.to_string()).unwrap_or_default(),
+    )?;
     Ok(Args {
-        host: host.ok_or("missing host (the Mac's IP, e.g. 192.168.1.20)")?,
+        host,
         control_port,
         video_port,
         checkerboard,

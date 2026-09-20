@@ -331,6 +331,42 @@ to learn whether the quality ceiling is available at all.
 
 ## 8. Open questions
 
+### Windows runtime findings (2026-09-19, RTX 5090, 200% DPI)
+
+The persistent dashboard and DNS-SD client were exercised on Windows against a
+local protocol fixture, not a real Mac capture session. Discovery found the
+friendly name and custom control port; quick connect created a native proxy;
+Disconnect removed it while retaining the dashboard. A saved identity survived
+app restart, displayed an actionable offline retry message, and reconnected
+when the fixture returned on a different port.
+
+Target-machine testing also found two pre-existing pixel-path bugs:
+
+- Creation-time `WM_NCCALCSIZE` with `wParam=FALSE` was reaching default frame
+  handling before the proxy ID existed. A requested 640×400 window had a
+  **614×329 physical client area** at 192 DPI. The class procedure now handles
+  both forms independently of proxy registration. It retains
+  `WS_OVERLAPPEDWINDOW`; native edge hit-test codes restore Windows resizing,
+  with Alt-drag for moving/snapping the borderless window. Microsoft's
+  [custom-frame documentation](https://learn.microsoft.com/en-us/windows/win32/dwm/customframe)
+  confirms that removing the frame also removes its default hit testing.
+- The D3D immediate context retained its bound render-target view, even after
+  the Rust handle was dropped. It is now unbound before `ResizeBuffers`.
+
+Actual output from the final code, before and after a native edge drag:
+
+```text
+pixel-check: DPI=192 physical=640x400 swapchain=640x400 PASS
+pixel-check: DPI=192 physical=484x304 swapchain=484x304 PASS
+```
+
+`--checkerboard` now reports physical client and swapchain dimensions at creation
+and resize. This proves that specific surface-size equality at **200%** on this
+machine. **100%, 150%, cross-scale monitor dragging, real Mac geometry readback,
+and end-to-end HEVC/pixel fidelity remain unverified here.** The fixture did not
+encode video or apply Mac AX geometry; CI compilation does not substitute for
+those hardware checks.
+
 These are unresolved. They are ordered by how likely they are to kill the
 project. Do not paper over them.
 

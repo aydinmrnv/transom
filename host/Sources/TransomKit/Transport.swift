@@ -270,4 +270,14 @@ public final class TCPListener: @unchecked Sendable {
         listener.cancel()
         continuation.finish()
     }
+
+    /// Advertise only once the entire host pipeline is ready. Cancellation of
+    /// this listener withdraws the service, including on partial-start failure.
+    public func advertise(address: String, videoPort: UInt16?) {
+        guard !address.hasPrefix("127.") else { return }
+        listener.service = NWListener.Service(
+            name: HostDiscovery.identity, type: HostDiscovery.serviceType,
+            domain: "local.",
+            txtRecord: HostDiscovery.txtRecord(address: address, videoPort: videoPort))
+    }
 }

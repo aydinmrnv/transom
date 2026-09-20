@@ -8,6 +8,7 @@ import TransomKit
 /// literals here means the two views can never drift onto different keys — the bug
 /// that silently splits a setting into two.
 enum HostDefaults {
+    static let automaticAddress = "host.automaticAddress"
     static let bindAddress = "host.bindAddress"
     static let controlPort = "host.controlPort"
     static let videoPort = "host.videoPort"
@@ -31,6 +32,10 @@ enum HostDefaults {
     /// are preserved; only the untouched 7000/7001 pair is migrated.
     static func migrateLegacyPorts() {
         let defaults = UserDefaults.standard
+        if defaults.object(forKey: automaticAddress) == nil,
+            defaults.object(forKey: bindAddress) != nil {
+            defaults.set(false, forKey: automaticAddress)
+        }
         guard defaults.bool(forKey: "host.portDefaultsMigrated") == false else { return }
         let oldControl = defaults.object(forKey: controlPort) as? Int ?? 7000
         let oldVideo = defaults.object(forKey: videoPort) as? Int ?? 7001
@@ -67,16 +72,24 @@ struct HostSettingsView: View {
 
 private struct ConnectionSettings: View {
     @AppStorage(HostDefaults.bindAddress) private var bindAddress = "127.0.0.1"
+    @AppStorage(HostDefaults.automaticAddress) private var automaticAddress = true
     @AppStorage(HostDefaults.controlPort) private var controlPort = HostDefaults.defaultControlPort
     @AppStorage(HostDefaults.videoPort) private var videoPort = HostDefaults.defaultVideoPort
 
-    private var isPrivate: Bool { PrivateAddress.isPrivateIPv4(bindAddress) }
+    private var effectiveAddress: String { automaticAddress ? (HostDiscovery.localAddresses().first ?? "") : bindAddress }
+    private var isPrivate: Bool { PrivateAddress.isPrivateIPv4(effectiveAddress) }
     private func portValid(_ p: Int) -> Bool { HostDefaults.portRange.contains(p) }
 
     var body: some View {
         Form {
             Section("Bind") {
-                TextField("Address", text: $bindAddress)
+                Toggle("Choose a LAN address automatically", isOn: $automaticAddress)
+                if automaticAddress {
+                    Text(effectiveAddress.isEmpty ? "No active private network. Connect to Ethernet or Wi-Fi." : "Sharing on \(effectiveAddress)")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    TextField("Address", text: $bindAddress)
+                }
                 TextField("Control port", value: $controlPort, format: .number.grouping(.never))
                 TextField("Video port", value: $videoPort, format: .number.grouping(.never))
                 if !portValid(controlPort) || !portValid(videoPort) {
@@ -107,7 +120,7 @@ private struct ConnectionSettings: View {
                     .foregroundStyle(isPrivate ? Color.secondary : Color.red)
                     .fixedSize(horizontal: false, vertical: true)
                 } icon: {
-                    Image(systemName: isPrivate ? "lock.fill" : "exclamationmark.triangle.fill")
+                    Image(systemName: isPrivate ? "network" : "exclamationmark.triangle.fill")
                         .foregroundStyle(isPrivate ? .green : .red)
                 }
                 Text("Connection changes apply the next time you press Start.")
