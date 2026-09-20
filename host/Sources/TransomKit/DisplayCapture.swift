@@ -97,9 +97,17 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         config.queueDepth = 5
         config.showsCursor = true
         config.scalesToFit = false
-        config.backgroundColor = CGColor(gray: 0, alpha: 1)
+        // ScreenCaptureKit declares backgroundColor as unowned(unsafe). Keep the
+        // CGColor alive through SCStream's configuration copy; releasing the
+        // temporary immediately after assignment leaves a dangling pointer and
+        // crashes in CGColorCreateCopy when the app starts capture in the
+        // background.
+        let backgroundColor = CGColor(gray: 0, alpha: 1)
+        config.backgroundColor = backgroundColor
 
-        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        let stream = withExtendedLifetime(backgroundColor) {
+            SCStream(filter: filter, configuration: config, delegate: nil)
+        }
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await stream.startCapture()
         lock.withLock { self.stream = stream }
