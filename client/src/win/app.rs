@@ -232,6 +232,7 @@ impl App {
                     }
                 }
                 self.refresh_gallery();
+                self.update_status();
             }
             None => {}
         }
@@ -666,6 +667,9 @@ impl App {
             unsafe {
                 let _ = DestroyWindow(proxy.hwnd);
             }
+            // HWND values may be reused. Discard old notifications before a new
+            // proxy can inherit the handle during a fast reconnect.
+            NATIVE_EVENTS.with(|q| q.borrow_mut().retain(|e| e.hwnd != proxy.hwnd));
         }
     }
 
@@ -720,7 +724,9 @@ impl App {
     fn render_all(&mut self) {
         let source = self.source.as_ref();
         for proxy in self.proxies.values_mut() {
-            proxy.render(&self.gpu, source);
+            if unsafe { IsWindowVisible(proxy.hwnd).as_bool() && !IsIconic(proxy.hwnd).as_bool() } {
+                proxy.render(&self.gpu, source);
+            }
         }
     }
 

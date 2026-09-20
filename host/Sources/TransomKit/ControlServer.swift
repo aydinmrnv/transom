@@ -118,6 +118,8 @@ public actor ControlServer {
 
     private static func message(for event: WindowWatcher.WindowEvent) -> ControlMessage {
         switch event {
+        case .sharingFailed(let message):
+            return .error(code: 2, message: message)
         case .created(let id, let rect, let title):
             return .windowCreated(id: id, rect: rect, title: title, kind: .normal)
         case .moved(let id, let rect):

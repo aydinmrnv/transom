@@ -388,3 +388,12 @@ Still deferred:
 
 Reconnect and state resync are **implemented** (§4): the host keeps running when
 the client drops, and a reconnecting client gets a full resync.
+
+### Window gallery lifecycle (0.4.0 client)
+
+`windowCreated` adds a shared window to the selector. The client opens a local
+view only when selected; hiding that view sends no `requestClose`. App names
+may prefix titles. Native Windows caption/frame pixels are excluded from the
+streamed client area and input coordinates. A move-only gesture emits no
+`requestResize`; Begin/Live/End are reserved for size changes. Existing v1 hosts
+continue to work with the selector. Multiple shared apps require the newer host.

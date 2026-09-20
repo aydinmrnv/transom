@@ -60,6 +60,12 @@ public struct AXWindow {
     public var role: String { stringAttribute(kAXRoleAttribute) ?? "?" }
     public var subrole: String { stringAttribute(kAXSubroleAttribute) ?? "-" }
 
+    public var isMinimized: Bool {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXMinimizedAttribute as CFString, &value) == .success else { return false }
+        return (value as? Bool) ?? false
+    }
+
     /// Current position in AX global points, or nil if AX will not report it.
     public func position() -> CGPoint? {
         readAXValue(kAXPositionAttribute, type: .cgPoint) { raw in

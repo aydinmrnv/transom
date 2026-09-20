@@ -6,7 +6,7 @@ move, resize, snap, and fullscreen. Think RDS RemoteApp with a Mac host — whic
 does not otherwise exist.
 
 > **Early access.** The client is a real window manager, not a scaffold: it
-> speaks the wire protocol, opens a native borderless proxy window per Mac window,
+> speaks the wire protocol, opens a native proxy window for each selected Mac window,
 > holds the 1:1 D3D11 pixel pipeline, and round-trips resize/focus/input. What is
 > **proven** vs **pending hardware bring-up** is spelled out under
 > [Verification status](#verification-status) — read it before trusting anything.
@@ -53,23 +53,26 @@ added as needed; no new crates — invariants I-8).
 
 ## Quick connect
 
-1. Open Transom Host on the Mac, choose a display and app, and press **Start**.
-   Enable **Settings → Connection → Choose a LAN address automatically**
-   (default on new installations). Allow Local Network access if macOS asks.
-2. Open Transom on Windows. Choose your Mac under **Nearby & saved Macs** and
-   press **Connect to Mac**, or double-click its name. Custom ports are automatic.
-3. Keep the dashboard open for connection, window count, video errors, and retry
-   status. **Disconnect** closes the local proxy windows, leaving Mac apps open.
-   Closing the dashboard exits the client.
+1. Open Transom Host on the Mac, choose the virtual sharing display and select
+   one or more app cards. Press **Start sharing**. The chosen windows must fit
+   on that display; Transom reads their actual geometry back before sharing.
+2. Open Transom on Windows. Choose your Mac under **Your Macs** and press
+   **Connect**, or double-click its name. Custom ports are automatic.
+3. Choose a preview card to **Open window**. Search filters by app/window title;
+   Previous/Next reaches additional cards. **Show window** brings an open view back.
+4. Move a window with its local Windows title bar; use the edges to resize.
+   Closing the local view returns it to the gallery and leaves the Mac document
+   open. The Mac app's own close control still closes its remote document.
+5. **Disconnect** closes the local views. Closing the dashboard exits Transom.
 
 Successful connections are stored in `%LocalAppData%\Transom\connections.json`.
 Discovered Macs are resolved by stable identity when their IP changes. Saved
-devices remain visible while offline; **Forget saved Mac** removes a saved entry.
+devices remain visible while offline; **Forget** removes a saved entry.
 Scans refresh about every ten seconds, or immediately with **Refresh**.
 
 If no Mac appears, check that the host is sharing, Local Network permission is
 allowed, and the host is not bound to loopback. Both computers must share a local
-network that permits mDNS. **Connect manually** accepts a hostname such as
+network that permits mDNS. **Manual connection…** reveals fields for a hostname such as
 `Mac-Studio.local` or an IP, with independent control/video ports. Leave video
 blank for control-only diagnostics. Connections remain unencrypted and
 unauthenticated, for trusted LAN use only.
@@ -77,9 +80,10 @@ unauthenticated, for trusted LAN use only.
 The native dashboard supports keyboard navigation and per-monitor DPI sizing.
 Discovery and connection attempts run in background workers; Disconnect also
 cancels a pending attempt. CLI connections open the same persistent dashboard.
-Resize Mac windows by dragging their edges; hold **Alt** while dragging inside
-one to move or snap it using Windows' native move loop. Ordinary clicks in the
-interior continue to go to the Mac app.
+The local title bar supports native move, resize, minimize and maximize.
+**Alt-drag** inside the view remains an optional move shortcut. Ordinary clicks
+in the streamed content go to the Mac app. Video continues during native drags;
+a move does not reposition or resize the source window on the Mac.
 
 ## Commands
 

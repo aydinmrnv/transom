@@ -27,8 +27,13 @@ public final class WindowWatcher: @unchecked Sendable {
         case destroyed(id: UInt64)
         case titleChanged(id: UInt64, title: String)
         case focused(id: UInt64)
+        case sharingFailed(message: String)
     }
 
+    /// Called before a newly created/restored standard window enters the stream.
+    /// All watchers share one run-loop, so global admission is serialized.
+    public var prepareNewWindow: (@Sendable (AXUIElement) -> Bool)?
+    private var seeding = false
     public var onEvent: (@Sendable (WindowEvent) -> Void)?
 
     private let appName: String?
@@ -49,6 +54,8 @@ public final class WindowWatcher: @unchecked Sendable {
         kAXWindowResizedNotification,
         kAXTitleChangedNotification,
         kAXUIElementDestroyedNotification,
+        kAXWindowMiniaturizedNotification,
+        kAXWindowDeminiaturizedNotification,
     ]
 
     public init(pid: pid_t, display: DisplayInfo, registry: WindowRegistry, appName: String? = nil) {
@@ -82,6 +89,8 @@ public final class WindowWatcher: @unchecked Sendable {
         CFRunLoopAddSource(
             CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(obs), .defaultMode)
 
+        seeding = true
+        defer { seeding = false }
         // Seed with the windows that already exist.
         for win in AXWindow.windows(pid: pid) where win.role == (kAXWindowRole as String) {
             registerAndAnnounce(win.element)
@@ -105,7 +114,7 @@ public final class WindowWatcher: @unchecked Sendable {
         case kAXFocusedWindowChangedNotification:
             let (id, isNew) = registry.id(for: element)
             if isNew { registerAndAnnounce(element, alreadyMinted: id) }
-            emit(.focused(id: id))
+            if registry.entry(for: id) != nil { emit(.focused(id: id)) }
         case kAXWindowMovedNotification, kAXWindowResizedNotification:
             let (id, _) = registry.id(for: element)
             if let rect = rect(of: element) {
@@ -117,7 +126,9 @@ public final class WindowWatcher: @unchecked Sendable {
             let title = displayTitle(AXWindow(element: element, index: -1).title)
             registry.updateTitle(id: id, title: title)
             emit(.titleChanged(id: id, title: title))
-        case kAXUIElementDestroyedNotification:
+        case kAXWindowDeminiaturizedNotification:
+            registerAndAnnounce(element)
+        case kAXUIElementDestroyedNotification, kAXWindowMiniaturizedNotification:
             if let id = registry.remove(element: element) {
                 emit(.destroyed(id: id))
             }
@@ -141,6 +152,13 @@ public final class WindowWatcher: @unchecked Sendable {
             }
         }
         let win = AXWindow(element: element, index: -1)
+        guard !win.isMinimized else { return }
+        if !seeding && registry.entry(for: id) == nil && win.subrole == (kAXStandardWindowSubrole as String) {
+            guard prepareNewWindow?(element) ?? true else {
+                _ = registry.remove(element: element)
+                return
+            }
+        }
         let title = displayTitle(win.title)
         let r = rect(of: element) ?? WireRect(x: 0, y: 0, w: 0, h: 0)
         registry.record(id: id, rect: r, title: title)

@@ -36,7 +36,7 @@ const PREVIOUS: usize = 112;
 const NEXT: usize = 113;
 const ADVANCED: usize = 114;
 const BG: COLORREF = gallery::CANVAS;
-const TEXT: COLORREF = COLORREF(0x003C3027);
+const TEXT: COLORREF = gallery::INK;
 
 pub enum Action {
     Connect(Connection),
@@ -54,6 +54,7 @@ struct State {
     controls: Vec<Control>,
     fonts: [HFONT; 3],
     brush: HBRUSH,
+    sidebar_brush: HBRUSH,
     actions: VecDeque<Action>,
     saved: Vec<Connection>,
     nearby: Vec<Connection>,
@@ -105,6 +106,7 @@ impl Dashboard {
             controls: vec![],
             fonts: [HFONT::default(); 3],
             brush: unsafe { CreateSolidBrush(BG) },
+            sidebar_brush: unsafe { CreateSolidBrush(gallery::SIDEBAR) },
             actions: VecDeque::new(),
             saved,
             nearby: vec![],
@@ -302,6 +304,7 @@ impl Drop for Dashboard {
                 let _ = DeleteObject(font);
             }
             let _ = DeleteObject(self.state.brush);
+            let _ = DeleteObject(self.state.sidebar_brush);
         }
     }
 }
@@ -601,7 +604,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let id = wp.0 & 0xffff;
             let notification = wp.0 >> 16;
             let s = &mut *ptr;
-            if id >= CARD_BASE && id < CARD_BASE + CARD_COUNT {
+            if (CARD_BASE..CARD_BASE + CARD_COUNT).contains(&id) {
                 if let Some(&index) = s.visible.get(id - CARD_BASE) {
                     s.actions
                         .push_back(Action::OpenWindow(s.cards[index].window.id));
@@ -702,9 +705,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_DRAWITEM => {
             let item = &*(lp.0 as *const DRAWITEMSTRUCT);
+            let state = &*ptr;
             if let Some(slot) = (item.CtlID as usize).checked_sub(CARD_BASE) {
-                if let Some(&index) = (&(*ptr).visible).get(slot) {
-                    gallery::draw(&(&(*ptr).cards)[index], item, &(*ptr).fonts, (*ptr).dpi);
+                if let Some(&index) = state.visible.get(slot) {
+                    gallery::draw(&state.cards[index], item, &state.fonts, state.dpi);
                 }
             }
             LRESULT(1)
@@ -716,8 +720,15 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
             let dc = HDC(wp.0 as *mut c_void);
             let _ = SetTextColor(dc, TEXT);
-            let _ = SetBkColor(dc, BG);
-            LRESULT((*ptr).brush.0 as isize)
+            let child = HWND(lp.0 as *mut c_void);
+            let id = GetDlgCtrlID(child) as usize;
+            let sidebar = msg == WM_CTLCOLORSTATIC && matches!(id, DISCOVERY | 201 | 202 | 203);
+            let _ = SetBkColor(dc, if sidebar { gallery::SIDEBAR } else { BG });
+            LRESULT(if sidebar {
+                (*ptr).sidebar_brush.0 as isize
+            } else {
+                (*ptr).brush.0 as isize
+            })
         }
         WM_ERASEBKGND => LRESULT(1),
         WM_CLOSE => {

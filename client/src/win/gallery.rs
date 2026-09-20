@@ -38,6 +38,8 @@ impl Card {
             || r.y.saturating_add(r.h) > display.h
             || pixels.len() < display.w as usize * display.h as usize * 4
         {
+            self.pixels.clear();
+            self.size = Size { w: 0, h: 0 };
             return;
         }
         let ratio = (320.0 / r.w as f64).min(180.0 / r.h as f64).min(1.0);
@@ -223,6 +225,6 @@ mod tests {
         assert_eq!(c.pixels, vec![2, 2, 2, 2, 4, 4, 4, 4]);
         c.window.source.x = u32::MAX;
         c.update_preview(&[], Size { w: 2, h: 2 });
-        assert_eq!(c.pixels.len(), 8);
+        assert!(c.pixels.is_empty());
     }
 }

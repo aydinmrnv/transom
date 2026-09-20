@@ -668,3 +668,32 @@ one? Unknown.
 | `Live` throttled ~10Hz, `End` authoritative | AX cannot keep up with `WM_SIZING`; the last live is coalesced and flushed, never dropped; `End` is the 1:1 snap (2.1, ResizeThrottle) |
 | Accept the DWM frame | Many-windows requirement forecloses exclusive fullscreen (5) |
 | Encoder pool deferred | Solves a problem we do not have at 2-3 windows (3.4) |
+
+## Window gallery and native chrome (0.4.0)
+
+The Windows dashboard catalogs shared windows and shows decoded preview cards.
+Opening a proxy is explicit; closing its local Windows caption hides the view
+without requesting that the Mac close its document. Thumbnails are downsampled
+UI previews, separate from the unscaled interactive rendering path.
+
+Native Windows captions replace the earlier borderless frame. Captured Mac title
+bar dragging previously moved the sprite-sheet source instead of the PC view.
+`AdjustWindowRectExForDpi` now accounts for the local frame; `GetClientRect` still
+sets the exact swapchain size. A thread timer continues bounded session, decode
+and presentation work inside native modal loops. Wndprocs queue owned events,
+including copies of temporary RECTs, so SetWindowPos cannot reenter mutable App
+state. Move-only gestures produce no resize requests. Outside an active resize,
+a pending geometry response crops/letterboxes rather than resampling.
+
+The Mac app can select several apps. One global tiling pass fits them together,
+reads AX geometry back, rejects overlaps/out-of-display placements, and attempts
+to restore original geometry on failure. Each app watcher shares the same ID
+registry, stream and resize clamp. Window titles include their app name without
+changing the v1 wire schema. The virtual-display pixel budget still applies.
+
+Verification: 71 Windows unit tests passed locally, including thumbnail crop
+bounds and native chrome size calculations at 96/144/192 DPI. macOS CI compiled
+and tested the initial redesign. These are not real drag, physical-pixel or Mac
+multi-app runtime measurements. This PC was locked during the attempted visual
+check; those checks remain pending until it is unlocked. Previous 0.3.1 live
+video results do not verify the new native frame.

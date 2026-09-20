@@ -61,7 +61,7 @@ public enum TileService {
     {
         var placeable: [(win: AXWindow, sizePoints: CGSize, sizePixels: TileSize)] = []
         for win in pids.flatMap({ AXWindow.windows(pid: $0) }) where win.role == (kAXWindowRole as String) {
-            guard let size = win.size() else { continue }
+            guard !win.isMinimized, let size = win.size() else { continue }
             let px = TileSize(
                 width: Int(
                     Coordinates.vdsPixels(fromAXPoints: size.width, scale: display.scale).rounded()),

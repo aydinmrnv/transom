@@ -273,7 +273,7 @@ public final class HostSession: @unchecked Sendable {
         // keep the requested-vs-actual placements for the Status view (I-4/OQ-2).
         let targets = [config.target] + config.additionalTargets
         if config.tile {
-            switch TileService.layout(pids: targets.map(\.pid), display: disp, gutter: config.gutter, fit: targets.count > 1)
+            switch TileService.layout(pids: targets.map(\.pid), display: disp, gutter: config.gutter, fit: true)
             {
             case .success(let placements):
                 statsLock.withLock { tilePlacements = placements }
@@ -290,6 +290,27 @@ public final class HostSession: @unchecked Sendable {
             let watcher = WindowWatcher(pid: target.pid, display: disp, registry: registry,
                 appName: target.name)
             watcher.onEvent = { event in eventSink.yield(event) }
+            if config.tile {
+                let pids = targets.map(\.pid)
+                let gutter = config.gutter
+                watcher.prepareNewWindow = { [weak self] element in
+                    switch TileService.layout(pids: pids, display: disp, gutter: gutter, fit: true) {
+                    case .success(let placements):
+                        self?.statsLock.withLock { self?.tilePlacements = placements; self?.tileError = nil }
+                        return true
+                    case .failure(let error):
+                        // Keep a rejected new document from covering another
+                        // shared crop. The document remains open and can be restored.
+                        let minimized = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+                        let message = minimized == .success
+                            ? "The new window does not fit on the sharing display and was minimized. Share fewer apps, then restore it on the Mac."
+                            : "The new window does not fit and could not be minimized. Stop sharing and choose fewer apps."
+                        self?.statsLock.withLock { self?.tileError = error.description }
+                        eventSink.yield(.sharingFailed(message: message))
+                        return false
+                    }
+                }
+            }
             return watcher
         }
         self.watchers = watchers
@@ -336,7 +357,9 @@ public final class HostSession: @unchecked Sendable {
                     for watcher in watchers { try watcher.start() }
                     cont.resume()
                 } catch {
+                    for watcher in watchers { watcher.stop() }
                     cont.resume(throwing: error)
+                    return
                 }
                 CFRunLoopRun()
             }
