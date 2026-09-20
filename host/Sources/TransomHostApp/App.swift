@@ -32,6 +32,7 @@ struct TransomHostApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         HostDefaults.migrateLegacyPorts()
+        HostDefaults.repairStaleBindAddress()
         // Ensure we are a regular, focusable app even when launched oddly.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)

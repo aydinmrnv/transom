@@ -30,6 +30,9 @@ struct ContentView: View {
     private let timer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
     private let accent = Color(red: 0.15, green: 0.36, blue: 0.86)
     private var effectiveAddress: String { activeAddress ?? (automaticAddress ? detectedAddress : bindAddress) }
+    private var hostIsAssigned: Bool {
+        effectiveAddress.hasPrefix("127.") || HostDiscovery.localAddresses().contains(effectiveAddress)
+    }
     private var permissionsReady: Bool { accessibility && (!videoEnabled || screenRecording) }
     private var portsValid: Bool {
         HostDefaults.portRange.contains(controlPort) && HostDefaults.portRange.contains(videoPort)
@@ -37,7 +40,7 @@ struct ContentView: View {
     }
     private var canStart: Bool {
         permissionsReady && !selectedPIDs.isEmpty && selectedDisplayID != 0
-            && PrivateAddress.isPrivateIPv4(effectiveAddress) && portsValid && !host.starting
+            && PrivateAddress.isPrivateIPv4(effectiveAddress) && hostIsAssigned && portsValid && !host.starting
     }
 
     var body: some View {
@@ -274,6 +277,7 @@ struct ContentView: View {
                 if !PrivateAddress.isPrivateIPv4(effectiveAddress) {
                     Text("Connect this Mac to Ethernet or Wi-Fi, or select a private address in Settings.").foregroundStyle(.red)
                 }
+                if !hostIsAssigned { Text("This address is no longer assigned to the Mac. Choose a current address in Settings.").foregroundStyle(.red) }
                 if !portsValid { Text("Choose valid, different control and video ports in Settings.").foregroundStyle(.red) }
                 if host.running {
                     Text("\(Int(host.status.measuredFPS)) fps   \(String(format: "%.1f", host.status.measuredBitrateMbps)) Mbps")
@@ -290,6 +294,7 @@ struct ContentView: View {
     }
 
     private func refreshAll() {
+        HostDefaults.repairStaleBindAddress()
         displays = Displays.all()
         apps = AppResolver.runningApps().filter { $0.pid != ProcessInfo.processInfo.processIdentifier }
         if selectedPIDs.isEmpty {

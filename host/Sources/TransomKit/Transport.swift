@@ -21,6 +21,7 @@ public protocol PacketTransport: Sendable {
 
 public enum TransportError: Error, CustomStringConvertible, Equatable {
     case refusedPublicBind(String)
+    case addressNotAvailable(String, available: [String])
     case badPort(UInt16)
     case listenerFailed(String)
 
@@ -31,6 +32,12 @@ public enum TransportError: Error, CustomStringConvertible, Equatable {
                 "refusing to bind to \"\(host)\": Transom has no auth or encryption and must "
                 + "only listen on a private address (10/8, 172.16/12, 192.168/16, 127/8, "
                 + "169.254/16). See the security note in the README."
+        case .addressNotAvailable(let host, let available):
+            let current = available.isEmpty ? "No private LAN addresses are currently available." :
+                "Current private addresses: \(available.joined(separator: ", "))."
+            return
+                "can't bind to \"\(host)\": this address is not assigned to this Mac. "
+                + current + " Choose a current address in Settings and try again."
         case .badPort(let p):
             return "invalid port \(p)"
         case .listenerFailed(let m):
@@ -184,6 +191,7 @@ private final class ConnectGate: @unchecked Sendable {
 public final class TCPListener: @unchecked Sendable {
     private let listener: NWListener
     private let queue: DispatchQueue
+    private let host: String
     public let connections: AsyncStream<TCPTransport>
     private let continuation: AsyncStream<TCPTransport>.Continuation
 
@@ -205,6 +213,7 @@ public final class TCPListener: @unchecked Sendable {
 
         self.listener = try NWListener(using: params)
         self.queue = DispatchQueue(label: "one.transom.host.net.\(label)")
+        self.host = host
         (self.connections, self.continuation) = AsyncStream.makeStream()
 
         let continuation = self.continuation
@@ -248,13 +257,11 @@ public final class TCPListener: @unchecked Sendable {
                     if gate.finish() { cont.resume() }
                 case .failed(let error):
                     if gate.finish() {
-                        cont.resume(
-                            throwing: TransportError.listenerFailed(error.localizedDescription))
+                        cont.resume(throwing: self.listenerError(error))
                     }
                 case .waiting(let error):
                     if gate.finish() {
-                        cont.resume(
-                            throwing: TransportError.listenerFailed(error.localizedDescription))
+                        cont.resume(throwing: self.listenerError(error))
                     }
                 case .cancelled:
                     if gate.finish() { cont.resume(throwing: CancellationError()) }
@@ -279,5 +286,14 @@ public final class TCPListener: @unchecked Sendable {
             name: HostDiscovery.identity, type: HostDiscovery.serviceType,
             domain: "local.",
             txtRecord: HostDiscovery.txtRecord(address: address, videoPort: videoPort))
+    }
+
+    private func listenerError(_ error: NWError) -> TransportError {
+        let message = error.localizedDescription
+        if message.localizedCaseInsensitiveContains("assign requested address") {
+            return .addressNotAvailable(
+                host, available: HostDiscovery.localAddresses())
+        }
+        return .listenerFailed(message)
     }
 }

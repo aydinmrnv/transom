@@ -45,6 +45,21 @@ enum HostDefaults {
         }
         defaults.set(true, forKey: "host.portDefaultsMigrated")
     }
+
+    /// Exact-interface binding is safer than 0.0.0.0, but it means a DHCP or
+    /// VPN change can leave a previously valid address unusable. Repair only a
+    /// stale private address; keep an invalid/public value visible so the user
+    /// can correct the security setting instead of silently changing intent.
+    static func repairStaleBindAddress() {
+        let defaults = UserDefaults.standard
+        guard let saved = defaults.string(forKey: bindAddress),
+            PrivateAddress.isPrivateIPv4(saved),
+            !saved.hasPrefix("127."),
+            !HostDiscovery.localAddresses().contains(saved),
+            let replacement = HostDiscovery.localAddresses().first
+        else { return }
+        defaults.set(replacement, forKey: bindAddress)
+    }
 }
 
 /// The standard macOS Settings window (Cmd-,). Every control binds to a

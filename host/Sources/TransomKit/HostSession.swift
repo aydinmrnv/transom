@@ -480,6 +480,15 @@ public final class HostSession: @unchecked Sendable {
         guard PrivateAddress.isPrivateIPv4(config.host) else {
             throw ProbeError(TransportError.refusedPublicBind(config.host).description)
         }
+        let addressIsAssigned = config.host.hasPrefix("127.")
+            || HostDiscovery.localAddresses().contains(config.host)
+        guard addressIsAssigned else {
+            throw ProbeError(
+                TransportError.addressNotAvailable(
+                    config.host, available: HostDiscovery.localAddresses()
+                ).description
+            )
+        }
         if config.video && config.controlPort == config.videoPort {
             throw ProbeError("control and video ports must be different")
         }
