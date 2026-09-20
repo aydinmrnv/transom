@@ -463,6 +463,15 @@ back and **report the delta**. The delta is the entire point of that command.
 > Receiver** (`ControlCenter` listens on `*:7000`), so a client connecting to the
 > Mac on 7000 can reach AirPlay instead of `serve`. Recorded in protocol.md §1.
 
+> **PHASE 6 FINDING (2026-09-19): exact-interface binds become stale.** The host
+> deliberately binds to the configured private IPv4 address, not `0.0.0.0`. After
+> a DHCP/VPN/interface change, a previously valid address can remain in
+> UserDefaults even though macOS no longer owns it; Network.framework then reports
+> `EADDRNOTAVAIL` / “Can't assign requested address.” The host now enumerates the
+> current non-loopback IPv4 interfaces, repairs stale private settings to the first
+> current private address on launch, and shows a current-address picker. It still
+> refuses public addresses and never broadens the bind to all interfaces.
+
 ### OQ-3: Is there a stable window identity across AX and SCK?
 
 SCK's `SCWindow` exposes a `CGWindowID`. AX exposes `AXUIElement`. Correlating

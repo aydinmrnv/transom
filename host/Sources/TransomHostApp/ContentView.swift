@@ -48,6 +48,11 @@ struct ContentView: View {
     }
 
     private var hostIsPrivate: Bool { PrivateAddress.isPrivateIPv4(effectiveAddress) }
+    private var hostIsAssigned: Bool {
+        guard !effectiveAddress.isEmpty else { return false }
+        if effectiveAddress.hasPrefix("127.") { return true }
+        return HostDiscovery.localAddresses().contains(effectiveAddress)
+    }
     private var permissionsReady: Bool { accessibility && (!videoEnabled || screenRecording) }
     /// Both ports must be real TCP endpoints. Without this gate, `startServing()`
     /// would `UInt16(clamping:)` an out-of-range value into a *different* port than
@@ -58,6 +63,7 @@ struct ContentView: View {
     }
     private var canStart: Bool {
         permissionsReady && selectedAppPID != 0 && selectedDisplayID != 0 && hostIsPrivate
+            && hostIsAssigned
             && portsValid && !host.running && !host.starting
     }
 
@@ -131,14 +137,14 @@ struct ContentView: View {
         if host.starting { return "Starting…" }
         if !permissionsReady { return "Needs permissions" }
         if selectedAppPID == 0 || selectedDisplayID == 0 { return "Ready to configure" }
-        if !hostIsPrivate || !portsValid { return "Check settings" }
+        if !hostIsPrivate || !hostIsAssigned || !portsValid { return "Check settings" }
         return "Ready to share"
     }
 
     private var readinessColor: Color {
         if host.running { return .green }
         if host.starting { return .orange }
-        if !permissionsReady || !hostIsPrivate || !portsValid { return .red }
+        if !permissionsReady || !hostIsPrivate || !hostIsAssigned || !portsValid { return .red }
         return .accentColor
     }
 
@@ -261,6 +267,9 @@ struct ContentView: View {
                 } else if !hostIsPrivate {
                     Text("Bind address isn't private — fix it in Settings (⌘,) before Start.")
                         .font(.caption).foregroundStyle(.red)
+                } else if !hostIsAssigned {
+                    Text("Bind address is no longer assigned to this Mac — choose a current address in Settings.")
+                        .font(.caption).foregroundStyle(.red)
                 } else if !portsValid {
                     Text(
                         "Ports must be valid and different — fix them in Settings (⌘,) before Start."
@@ -336,6 +345,13 @@ struct ContentView: View {
                     systemImage: "info.circle"
                 )
                 .font(.caption2).foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            } else if !hostIsAssigned {
+                Label(
+                    "This saved address is no longer on the Mac. Choose a current address in Settings before starting.",
+                    systemImage: "wifi.exclamationmark"
+                )
+                .font(.caption2).foregroundStyle(.red)
                 .fixedSize(horizontal: false, vertical: true)
             } else {
                 Text("LAN-only bind · no authentication or encryption · trusted network only")
@@ -635,6 +651,7 @@ struct ContentView: View {
     }
 
     private func refreshAll() {
+        HostDefaults.repairStaleBindAddress()
         displays = Displays.all()
         apps = AppResolver.runningApps()
         if selectedDisplayID == 0 || !displays.contains(where: { $0.id == selectedDisplayID }) {
