@@ -623,12 +623,6 @@ impl App {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Option<LRESULT> {
-        // Creation-time WM_NCCALCSIZE arrives before hwnd_to_id is populated.
-        // Eat the frame now too, otherwise the first client rect is smaller than
-        // the swapchain by a title bar and borders (especially at 200% DPI).
-        if msg == WM_NCCALCSIZE && wparam.0 != 0 {
-            return Some(LRESULT(0));
-        }
         let id = *self.hwnd_to_id.get(&(hwnd.0 as isize))?;
 
         match msg {
@@ -853,6 +847,15 @@ pub fn register_class() -> windows::core::Result<()> {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
+        if msg == windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST {
+            return LRESULT(super::frame::hit_test(hwnd, lparam) as isize);
+        }
+        // Both forms matter: creation sends wParam=FALSE before the proxy is
+        // registered; later frame recalculation can send TRUE. Leave the supplied
+        // window rect intact as the client rect, independent of App lookup.
+        if msg == WM_NCCALCSIZE {
+            return LRESULT(0);
+        }
         // Stash the App pointer on NCCREATE, before any other message needs it.
         if msg == WM_NCCREATE {
             let cs = &*(lparam.0 as *const CREATESTRUCTW);

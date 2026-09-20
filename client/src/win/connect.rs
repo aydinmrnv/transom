@@ -502,7 +502,7 @@ unsafe fn create_controls(hwnd: HWND, s: &mut State) {
     );
     add(
         w!("STATIC"),
-        "Open shared Mac apps as native windows on this PC.",
+        "Move Mac windows with Alt-drag. Drag their edges to resize.",
         0,
         (28, 102, 688, 26),
         0,

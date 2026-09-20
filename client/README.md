@@ -77,6 +77,9 @@ unauthenticated, for trusted LAN use only.
 The native dashboard supports keyboard navigation and per-monitor DPI sizing.
 Discovery and connection attempts run in background workers; Disconnect also
 cancels a pending attempt. CLI connections open the same persistent dashboard.
+Resize Mac windows by dragging their edges; hold **Alt** while dragging inside
+one to move or snap it using Windows' native move loop. Ordinary clicks in the
+interior continue to go to the Mac app.
 
 ## Commands
 

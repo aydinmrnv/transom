@@ -22,10 +22,13 @@ pub fn scan() -> io::Result<Vec<Connection>> {
     let mut sockets = Vec::new();
     for ip in interfaces() {
         if let Ok(s) = UdpSocket::bind((ip, 0)) {
-            s.set_nonblocking(true)?;
-            s.set_multicast_ttl_v4(255)?;
+            if s.set_nonblocking(true).is_err() || s.set_multicast_ttl_v4(255).is_err() {
+                continue;
+            }
             #[cfg(windows)]
-            set_interface(&s, ip)?;
+            if set_interface(&s, ip).is_err() {
+                continue;
+            }
             if s.send_to(&query(SERVICE, 12), MDNS).is_ok() {
                 sockets.push(s);
             }

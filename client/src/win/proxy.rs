@@ -64,7 +64,6 @@ impl Proxy {
             checkerboard,
         };
         proxy.ensure_rtv(gpu)?;
-        proxy.report_pixel_size();
         Ok(proxy)
     }
 
@@ -91,6 +90,7 @@ impl Proxy {
             return; // minimized; nothing to size to
         }
         if width == self.width && height == self.height && self.rtv.is_some() {
+            self.report_pixel_size();
             return;
         }
         // The immediate context also retains the bound RTV after drawing. Drop

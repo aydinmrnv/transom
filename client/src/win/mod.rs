@@ -15,6 +15,7 @@ mod app;
 mod connect;
 mod decode;
 mod dpi;
+mod frame;
 mod gpu;
 mod input;
 mod proxy;
@@ -135,8 +136,14 @@ fn parse(args: &[String]) -> Result<Args, String> {
         i += 1;
     }
 
+    let host = host.ok_or("missing Mac hostname or IP address")?;
+    crate::connections::Connection::manual(
+        &host,
+        &control_port.to_string(),
+        &video_port.map(|p| p.to_string()).unwrap_or_default(),
+    )?;
     Ok(Args {
-        host: host.ok_or("missing host (the Mac's IP, e.g. 192.168.1.20)")?,
+        host,
         control_port,
         video_port,
         checkerboard,
