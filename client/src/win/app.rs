@@ -623,13 +623,17 @@ impl App {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Option<LRESULT> {
+        // Creation-time WM_NCCALCSIZE arrives before hwnd_to_id is populated.
+        // Eat the frame now too, otherwise the first client rect is smaller than
+        // the swapchain by a title bar and borders (especially at 200% DPI).
+        if msg == WM_NCCALCSIZE && wparam.0 != 0 {
+            return Some(LRESULT(0));
+        }
         let id = *self.hwnd_to_id.get(&(hwnd.0 as isize))?;
 
         match msg {
             // Eat the whole non-client area: borderless, but native resize/snap
             // stay because it's still a WS_OVERLAPPEDWINDOW (client AGENTS.md).
-            WM_NCCALCSIZE if wparam.0 != 0 => Some(LRESULT(0)),
-
             WM_SIZE => {
                 let w = (lparam.0 & 0xFFFF) as u32;
                 let h = ((lparam.0 >> 16) & 0xFFFF) as u32;

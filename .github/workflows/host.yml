@@ -35,3 +35,14 @@ jobs:
 
       - name: Lint (swift-format)
         run: swift format lint --recursive Sources Package.swift
+
+      - name: Package preview host app
+        run: |
+          scripts/make-app.sh host --adhoc
+          ditto -c -k --sequesterRsrc --keepParent "build/Transom Host.app" "build/Transom-Mac-Host-preview.zip"
+
+      - name: Upload preview host
+        uses: actions/upload-artifact@v4
+        with:
+          name: Transom-Mac-Host
+          path: host/build/Transom-Mac-Host-preview.zip
