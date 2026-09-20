@@ -1,6 +1,6 @@
 [package]
 name = "transom-client"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 rust-version = "1.74"
 license = "AGPL-3.0-or-later"
@@ -39,6 +39,7 @@ features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Imaging",
     "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",

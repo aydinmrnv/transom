@@ -1,5 +1,33 @@
 # Window gallery and local window movement
 
+## Navigation cleanup (0.4.2)
+
+Keep the navy acrylic material, but give each destination one job: Windows opens
+shared windows; Macs selects and manages discovered/saved connections; Settings
+contains manual connection fields and updates. Remove the duplicate Screen View,
+Desktop/Files tabs, session-only Recents, fake Open Any App action, promotional
+sidebar tile and redundant device menu. Search, sorting, pagination, grid/list,
+and the per-window Open/Hide menu remain functional controls.
+
+Replace the improvised hardware drawing with a render of Apple's actual Mac
+Studio model. Use neutral window symbols rather than guessing app logos from
+document titles. Connection availability must distinguish discovery from a
+working session; deduplicate saved and discovered copies of the same endpoint.
+Verify the three destinations, device selection, search and preview/open behavior
+on Windows before packaging. The earlier reference-layout notes below document
+the previous revision, not requirements to retain redundant controls.
+
+Runtime verification of 0.4.2 on ALIENWARE_A51: the Apple model render loads from
+the executable with correct alpha; Macs lists the discovered real Mac and the
+isolated local test host separately; Windows displays eight decoded fixture
+previews. Name/host-order selection, title filtering, Enter-to-open without
+disconnecting, and compact gallery pagination passed. Settings and the model
+panel fit at 1464x934 and 1114x726 DIPs at 200% scaling. Disabled actions have a
+muted fill. All 73 tests, including Media Foundation decode, pass; release build,
+format and clippy with warnings denied pass. This revision does not change the
+proxy renderer or movement loop. The earlier measured 200% physical/swapchain
+equality stands; 100%, 150% and cross-monitor measurements remain unverified.
+
 The Windows app is a window launcher: choose a Mac, inspect real previews, and
 open only the windows needed on this PC. Closing a local window returns it to
 the gallery without closing the Mac document. The Mac host chooses which apps

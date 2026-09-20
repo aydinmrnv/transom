@@ -56,11 +56,12 @@ added as needed; no new crates â€” invariants I-8).
 1. Open Transom Host on the Mac, choose the virtual sharing display and select
    one or more app cards. Press **Start sharing**. The chosen windows must fit
    on that display; Transom reads their actual geometry back before sharing.
-2. Open Transom on Windows. Use the device panel’s **…** menu to choose a discovered or saved Mac, then
-   press **Connect**. Custom ports are automatic.
-3. Choose a preview card to **Open window**. Search filters by app/window title;
-   Previous/Next reaches additional cards. **Show window** brings an open view back. Each card’s **…** menu can open or
-   hide its local view. Grid/list views and Recents make larger collections easier to browse.
+2. Open Transom on Windows. In **Macs**, select a nearby or saved Mac and
+   press **Connect**. Discovered connections include the correct ports.
+3. **Windows** shows actual previews of shared windows. Select a card to open
+   it on this PC. Search filters titles; grid/list, sorting and pagination help
+   browse larger collections. A card's options menu opens or hides its local view.
+   Enter in search opens the sole matching window; it never disconnects.
 4. Move a window with its local Windows title bar; use the edges to resize.
    Closing the local view returns it to the gallery and leaves the Mac document
    open. The Mac app's own close control still closes its remote document.
@@ -68,20 +69,22 @@ added as needed; no new crates â€” invariants I-8).
 
 Successful connections are stored in `%LocalAppData%\Transom\connections.json`.
 Discovered Macs are resolved by stable identity when their IP changes. Saved
-devices remain visible while offline; **Forget saved Mac** in the device menu removes a saved entry.
-Scans refresh about every ten seconds, or immediately with **Refresh nearby Macs** in the device menu.
+and discovered entries for the same endpoint are combined. In **Macs**, use
+**Forget saved Mac** to remove an offline entry or **Refresh Macs** to scan now.
+Discovery also refreshes automatically. Disconnect before selecting another Mac.
 
 If no Mac appears, check that the host is sharing, Local Network permission is
 allowed, and the host is not bound to loopback. Both computers must share a local
-network that permits mDNS. **Manual connectionâ€¦** reveals fields for a hostname such as
-`Mac-Studio.local` or an IP, with independent control/video ports. Leave video
-blank for control-only diagnostics. Connections remain unencrypted and
-unauthenticated, for trusted LAN use only.
+network that permits mDNS. **Settings** has manual hostname/IP and control/video
+port fields, plus the updater. Leave video blank for control-only diagnostics.
+Connections remain unencrypted and unauthenticated, for trusted LAN use only.
 
-The native dark dashboard uses Windows acrylic with translucent navy panels,
+The native dashboard uses Windows acrylic with translucent navy panels,
 Direct2D previews, and DirectWrite text. Windows versions without acrylic use
-an opaque navy fallback. Desktop shows a read-only preview of the shared display;
-Files filters the shared Finder windows. No remote file transfer is implied.
+an opaque navy fallback. Its three destinations are Windows, Macs, and Settings;
+there are no placeholder Desktop/Files tabs or remote app-launch controls.
+The Mac Studio artwork is rendered from Apple's original model; see
+[`assets/README.md`](assets/README.md) for provenance and reproduction.
 The dashboard supports keyboard navigation and per-monitor DPI sizing.
 Discovery and connection attempts run in background workers; Disconnect also
 cancels a pending attempt. CLI connections open the same persistent dashboard.

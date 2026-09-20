@@ -133,10 +133,10 @@ pub unsafe fn draw_glass(card: &Card, p: &Paint<'_>, w: f32, h: f32, focused: bo
             false,
         );
     } else {
-        app_icon(p, title, 14., h - 43.);
+        p.icon("\u{E8A7}", rect(14., h - 41., 30., 30.), 20., glass::MUTED);
         p.text(
             title,
-            rect(63., h - 43., w - 111., 34.),
+            rect(55., h - 43., w - 103., 34.),
             14.,
             true,
             glass::TEXT,
@@ -147,42 +147,6 @@ pub unsafe fn draw_glass(card: &Card, p: &Paint<'_>, w: f32, h: f32, focused: bo
         p.dot(w - 16., 18., 4., glass::GREEN);
     }
 }
-unsafe fn app_icon(p: &Paint<'_>, title: &str, x: f32, y: f32) {
-    let app = title.split(" — ").next().unwrap_or(title).to_lowercase();
-    let (color, glyph) = if app.contains("safari") {
-        (0x238DE5, "\u{E774}")
-    } else if app.contains("xcode") {
-        (0x288FE8, "\u{E943}")
-    } else if app.contains("terminal") {
-        (0x152331, "\u{E756}")
-    } else if app.contains("finder") {
-        (0x3D9CEE, "\u{E8B7}")
-    } else if app.contains("messages") {
-        (0x45B75A, "\u{E8F2}")
-    } else if app.contains("music") {
-        (0xE93C60, "\u{E189}")
-    } else if app.contains("notes") {
-        (0xD8B542, "\u{E70B}")
-    } else {
-        (0x285F99, "\u{E737}")
-    };
-    p.gradient(rect(x, y, 34., 34.), 7., color, 0x16283E, 1.);
-    p.stroke(rect(x, y, 34., 34.), 7., 0x91B2D0, 0.4, 0.7);
-    p.icon(glyph, rect(x, y, 34., 34.), 21., 0xF4F8FC);
-    if app.contains("photos") {
-        p.fill(rect(x, y, 34., 34.), 7., 0xF4F6FB, 1.);
-        for (i, c) in [
-            0xED5C75, 0xED933D, 0xE9C848, 0x80BD64, 0x52B7B8, 0x508FE2, 0x886DE0, 0xC66EC8,
-        ]
-        .iter()
-        .enumerate()
-        {
-            let a = i as f32 * std::f32::consts::PI / 4.;
-            p.dot(x + 17. + a.cos() * 7., y + 17. + a.sin() * 7., 5., *c);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

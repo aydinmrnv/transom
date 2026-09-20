@@ -272,7 +272,7 @@ impl App {
     }
 
     fn update_status(&mut self) {
-        if let Some(c) = &self.selected {
+        if self.selected.is_some() {
             let state = if let Some(n) = &self.notice {
                 n.clone()
             } else if let Some(n) = &self.video_notice {
@@ -284,10 +284,7 @@ impl App {
             } else {
                 "Waiting for video…".into()
             };
-            self.dashboard.set_status(
-                &format!("{} · {} · {} window(s)", c.name, state, self.windows.len()),
-                true,
-            );
+            self.dashboard.set_status(&state, true);
         }
     }
 

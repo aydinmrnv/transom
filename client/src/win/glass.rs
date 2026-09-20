@@ -8,7 +8,9 @@ use windows::Win32::{
         DirectWrite::*,
         Dwm::*,
         Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+        Imaging::*,
     },
+    System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
     UI::{Controls::MARGINS, WindowsAndMessaging::GetClientRect},
 };
 
@@ -38,6 +40,7 @@ pub fn rect(x: f32, y: f32, w: f32, h: f32) -> D2D_RECT_F {
 pub struct Glass {
     pub target: ID2D1HwndRenderTarget,
     write: IDWriteFactory,
+    mac_studio: Option<ID2D1Bitmap>,
     pub acrylic: bool,
 }
 impl Glass {
@@ -97,9 +100,16 @@ impl Glass {
                 cyBottomHeight: -1,
             },
         );
+        let mac_studio = load_mac_studio(&target)
+            .map_err(|e| {
+                eprintln!("Mac Studio artwork: {e}");
+                e
+            })
+            .ok();
         Ok(Self {
             target,
             write,
+            mac_studio,
             acrylic,
         })
     }
@@ -118,6 +128,7 @@ impl Glass {
         Ok(Paint {
             rt: &self.target,
             write: &self.write,
+            mac_studio: self.mac_studio.as_ref(),
         })
     }
     pub unsafe fn end(&self) -> Result<()> {
@@ -127,6 +138,29 @@ impl Glass {
 pub struct Paint<'a> {
     pub rt: &'a ID2D1RenderTarget,
     write: &'a IDWriteFactory,
+    mac_studio: Option<&'a ID2D1Bitmap>,
+}
+
+// Decode the embedded model render once per render target. WIC preserves alpha;
+// never re-read from disk or access the network while painting the dashboard.
+unsafe fn load_mac_studio(target: &ID2D1RenderTarget) -> Result<ID2D1Bitmap> {
+    let wic: IWICImagingFactory =
+        CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+    let stream = wic.CreateStream()?;
+    stream.InitializeFromMemory(include_bytes!("../../assets/mac-studio.png"))?;
+    let decoder =
+        wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnLoad)?;
+    let frame = decoder.GetFrame(0)?;
+    let converter = wic.CreateFormatConverter()?;
+    converter.Initialize(
+        &frame,
+        &GUID_WICPixelFormat32bppPBGRA,
+        WICBitmapDitherTypeNone,
+        None,
+        0.,
+        WICBitmapPaletteTypeCustom,
+    )?;
+    target.CreateBitmapFromWicBitmap(&converter, None)
 }
 impl Paint<'_> {
     pub unsafe fn fill(&self, r: D2D_RECT_F, radius: f32, rgb: u32, alpha: f32) {
@@ -153,32 +187,6 @@ impl Paint<'_> {
                 width,
                 None,
             );
-        }
-    }
-    pub unsafe fn dashed(&self, r: D2D_RECT_F, radius: f32, rgb: u32) {
-        if let (Ok(factory), Ok(brush)) = (
-            self.rt.GetFactory(),
-            self.rt.CreateSolidColorBrush(&color(rgb, 0.85), None),
-        ) {
-            if let Ok(style) = factory.CreateStrokeStyle(
-                &D2D1_STROKE_STYLE_PROPERTIES {
-                    dashStyle: D2D1_DASH_STYLE_DASH,
-                    dashCap: D2D1_CAP_STYLE_ROUND,
-                    ..Default::default()
-                },
-                None,
-            ) {
-                self.rt.DrawRoundedRectangle(
-                    &D2D1_ROUNDED_RECT {
-                        rect: r,
-                        radiusX: radius,
-                        radiusY: radius,
-                    },
-                    &brush,
-                    1.,
-                    &style,
-                );
-            }
         }
     }
     pub unsafe fn gradient(&self, r: D2D_RECT_F, radius: f32, top: u32, bottom: u32, alpha: f32) {
@@ -401,35 +409,26 @@ impl Paint<'_> {
         self.fill(rect(x + 16., y + 6., 23., 23.), 3., 0x152D4C, 0.5);
         self.stroke(rect(x + 16., y + 6., 23., 23.), 3., 0x77CCFF, 1., 2.);
     }
-    pub unsafe fn mac(&self, x: f32, y: f32, w: f32) {
-        let h = w * 0.40;
-        self.fill(rect(x + 3., y + h - 3., w - 6., 10.), 5., 0x000000, 0.4);
-        self.gradient(rect(x, y + 15., w, h), 12., 0xD6D9E2, 0x858D9B, 1.);
-        self.gradient(
-            rect(x + 1., y, w - 2., h * 0.48),
-            12.,
-            0xB9BECD,
-            0xE4E5ED,
-            1.,
-        );
-        self.line(
-            x + 12.,
-            y + h * 0.48,
-            x + w - 12.,
-            y + h * 0.48,
-            0xF0F2F8,
-            0.6,
-        );
-        self.fill(rect(x + 20., y + h * 0.72, 4., 4.), 2., 0x16212C, 1.);
-        self.fill(rect(x + 30., y + h * 0.72, 4., 4.), 2., 0x16212C, 1.);
-        self.fill(rect(x + 43., y + h * 0.72, 18., 2.), 1., 0x16212C, 1.);
-        self.dot(x + w - 18., y + h * 0.74, 1.2, 0xF8FCFF);
-        // Small machined mark; hardware details never pretend to identify a Mac model.
-        self.fill(
-            rect(x + w * 0.46, y + h * 0.14, w * 0.08, 3.),
-            1.5,
-            0x353B47,
-            1.,
-        );
+    pub unsafe fn mac(&self, area: D2D_RECT_F) {
+        if let Some(bitmap) = self.mac_studio {
+            let size = bitmap.GetSize();
+            let k =
+                ((area.right - area.left) / size.width).min((area.bottom - area.top) / size.height);
+            let dest = rect(
+                area.left + (area.right - area.left - size.width * k) / 2.,
+                area.top + (area.bottom - area.top - size.height * k) / 2.,
+                size.width * k,
+                size.height * k,
+            );
+            self.rt.DrawBitmap(
+                bitmap,
+                Some(&dest),
+                1.,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+        } else {
+            self.icon("\u{E7F4}", area, 48., MUTED);
+        }
     }
 }

@@ -3,7 +3,7 @@
 ;   ISCC.exe /DAppVersion=0.2.0 client\installer\Transom.iss
 
 #ifndef AppVersion
-  #define AppVersion "0.4.1"
+  #define AppVersion "0.4.2"
 #endif
 
 #define AppName "Transom"
@@ -44,6 +44,7 @@ Source: "..\target\release\transom-client.exe"; DestDir: "{app}"; Flags: ignorev
 Source: "..\target\release\transom-updater.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace
 Source: "..\README.md"; DestDir: "{app}"; DestName: "README-Windows.md"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\assets\README.md"; DestDir: "{app}"; DestName: "Artwork-notices.md"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "run"; WorkingDir: "{app}"

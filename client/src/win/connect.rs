@@ -7,7 +7,7 @@ use super::{
 use crate::{
     connections::{self, Connection},
     model::Window,
-    wire::{Rect, Size, WindowKind},
+    wire::Size,
 };
 use std::{
     collections::VecDeque,
@@ -35,24 +35,15 @@ use windows::{
 };
 const CLASS: PCWSTR = w!("TransomDashboard");
 const CONNECT: usize = 1;
-const SCREEN: usize = 2;
-const MENU: usize = 3;
 const NAV_CONNECTIONS: usize = 10;
 const NAV_APPS: usize = 11;
-const NAV_RECENTS: usize = 12;
 const NAV_SETTINGS: usize = 13;
-const TAB_APPS: usize = 20;
-const TAB_DESKTOP: usize = 21;
-const TAB_FILES: usize = 22;
 const SEARCH: usize = 30;
 const SORT: usize = 31;
 const GRID: usize = 32;
 const LIST: usize = 33;
 const PREVIOUS: usize = 40;
 const NEXT: usize = 41;
-const OPEN_ANY: usize = 42;
-const MORE_APPS: usize = 43;
-const HELP: usize = 44;
 const HOST: usize = 50;
 const CONTROL: usize = 51;
 const VIDEO: usize = 52;
@@ -62,9 +53,12 @@ const REFRESH: usize = 55;
 const MINIMIZE: usize = 60;
 const MAXIMIZE: usize = 61;
 const CLOSE: usize = 62;
-const SHOW_MENU: u32 = WM_APP + 30;
 const SHOW_CARD_MENU: u32 = WM_APP + 31;
+const SHOW_SORT_MENU: u32 = WM_APP + 32;
 const CARD_MENU_BASE: usize = 2000;
+const MAC_BASE: usize = 3000;
+const FORGET: usize = 56;
+const ADD_MAC: usize = 57;
 const SIDEBAR: i32 = 236;
 pub enum Action {
     Connect(Connection),
@@ -96,7 +90,6 @@ struct State {
     status: String,
     discovery: String,
     cards: Vec<Card>,
-    desktop: Card,
     visible: Vec<usize>,
     page: usize,
     page_size: usize,
@@ -104,7 +97,6 @@ struct State {
     view: usize,
     list: bool,
     sort_name: bool,
-    recents: Vec<u64>,
     last_preview: Instant,
 }
 pub struct Dashboard {
@@ -154,28 +146,13 @@ impl Dashboard {
             status,
             discovery: "Looking for nearby Macs…".into(),
             cards: vec![],
-            desktop: Card::new(
-                Window {
-                    id: 0,
-                    title: "Shared display".into(),
-                    kind: WindowKind::Normal,
-                    source: Rect {
-                        x: 0,
-                        y: 0,
-                        w: 0,
-                        h: 0,
-                    },
-                },
-                false,
-            ),
             visible: vec![],
             page: 0,
             page_size: 8,
             query: String::new(),
-            view: NAV_CONNECTIONS,
+            view: NAV_APPS,
             list: false,
             sort_name: true,
-            recents: vec![],
             last_preview: Instant::now() - Duration::from_secs(1),
         });
         let hwnd = unsafe {
@@ -228,7 +205,12 @@ impl Dashboard {
                     self.state.discovery = if self.state.nearby.is_empty() {
                         "No nearby Macs. Start sharing in Transom Host.".into()
                     } else {
-                        format!("{} Mac(s) available nearby", self.state.nearby.len())
+                        let count = self.state.nearby.len();
+                        format!(
+                            "{} {} available nearby",
+                            count,
+                            if count == 1 { "Mac" } else { "Macs" }
+                        )
                     };
                     unsafe {
                         self.state.rebuild_rows();
@@ -238,7 +220,7 @@ impl Dashboard {
             }
             self.state.next_scan = Instant::now() + Duration::from_secs(8);
             unsafe {
-                self.state.invalidate();
+                self.state.layout();
             }
         }
         if self.state.scan.is_none() && Instant::now() >= self.state.next_scan {
@@ -260,25 +242,29 @@ impl Dashboard {
         }
     }
     pub fn set_connected(&mut self, connected: bool) {
-        self.state.connected = connected;
-        if !connected {
-            // Window IDs are scoped to a session and may be reused by another Mac.
-            self.state.recents.clear();
+        if connected && !self.state.connected {
+            self.state.view = NAV_APPS;
+            self.state.page = 0;
         }
+        self.state.connected = connected;
         unsafe {
-            self.state.invalidate();
+            self.state.layout();
         }
     }
     pub fn remember(&mut self, c: Connection) {
-        let id = c.id.clone();
-        connections::remember(&mut self.state.saved, c);
+        connections::remember(&mut self.state.saved, c.clone());
         if let Err(e) = connections::save(&self.state.preferences, &self.state.saved) {
             self.state.discovery = format!("Connected, but could not save this Mac: {e}");
         }
         unsafe {
             self.state.rebuild_rows();
         }
-        if let Some(i) = self.state.rows.iter().position(|c| c.id == id) {
+        if let Some(i) = self
+            .state
+            .rows
+            .iter()
+            .position(|row| row.same_destination(&c))
+        {
             self.state.selected_device = i;
         }
         unsafe {
@@ -304,10 +290,6 @@ impl Dashboard {
                 }
             })
             .collect();
-        if self.state.cards.is_empty() {
-            self.state.desktop.pixels.clear();
-            self.state.desktop.size = Size { w: 0, h: 0 };
-        }
         unsafe {
             self.state.layout();
         }
@@ -320,15 +302,6 @@ impl Dashboard {
         for c in &mut self.state.cards {
             c.update_preview(pixels, display);
         }
-        self.state.desktop.window.source = Rect {
-            x: 0,
-            y: 0,
-            w: display.w,
-            h: display.h,
-        };
-        self.state
-            .desktop
-            .update_preview_sized(pixels, display, 1280, 720);
         unsafe {
             for slot in 0..CARD_COUNT {
                 let _ = InvalidateRect(self.state.control(CARD_BASE + slot), None, false);
@@ -336,8 +309,32 @@ impl Dashboard {
             self.state.invalidate();
         }
     }
-    pub fn dialog_message(&self, message: &MSG) -> bool {
+    pub fn dialog_message(&mut self, message: &MSG) -> bool {
         unsafe {
+            // Enter in search opens its only result; never triggers Disconnect.
+            if message.message == WM_KEYDOWN
+                && message.wParam.0 == 13
+                && GetFocus() == self.state.control(SEARCH)
+            {
+                let matches = self.state.matches();
+                if matches.len() == 1 {
+                    self.state
+                        .actions
+                        .push_back(Action::OpenWindow(self.state.cards[matches[0]].window.id));
+                }
+                return true;
+            }
+            if message.message == WM_KEYDOWN
+                && message.wParam.0 == 13
+                && [HOST, CONTROL, VIDEO]
+                    .iter()
+                    .any(|id| GetFocus() == self.state.control(*id))
+            {
+                if !self.state.active {
+                    let _ = PostMessageW(self.hwnd, WM_COMMAND, WPARAM(MANUAL), LPARAM(0));
+                }
+                return true;
+            }
             (message.hwnd == self.hwnd || IsChild(self.hwnd, message.hwnd).as_bool())
                 && IsDialogMessageW(self.hwnd, message).as_bool()
         }
@@ -371,21 +368,18 @@ impl State {
     fn start_scan(&mut self) {
         let (tx, rx) = mpsc::channel();
         self.scan = Some(rx);
+        unsafe {
+            self.layout();
+        }
         std::thread::spawn(move || {
             let _ = tx.send(crate::discovery::scan());
         });
     }
     unsafe fn rebuild_rows(&mut self) {
-        let selected = self.selected().map(|c| c.id);
-        let mut rows = self.nearby.clone();
-        for c in &self.saved {
-            if !rows.iter().any(|n| n.id == c.id) {
-                rows.push(c.clone());
-            }
-        }
-        self.rows = rows;
+        let selected = self.selected();
+        self.rows = connections::available(&self.nearby, &self.saved);
         self.selected_device = selected
-            .and_then(|id| self.rows.iter().position(|c| c.id == id))
+            .and_then(|old| self.rows.iter().position(|c| c.same_destination(&old)))
             .unwrap_or(0);
         self.layout();
     }
@@ -432,21 +426,10 @@ impl State {
             .cards
             .iter()
             .enumerate()
-            .filter(|(_, c)| {
-                let title = c.window.title.to_lowercase();
-                title.contains(&self.query)
-                    && (self.view != NAV_RECENTS || self.recents.contains(&c.window.id))
-                    && (self.view != TAB_FILES || title.contains("finder"))
-            })
+            .filter(|(_, c)| c.window.title.to_lowercase().contains(&self.query))
             .map(|(i, _)| i)
             .collect();
-        if self.view == NAV_RECENTS {
-            entries.sort_by_key(|&i| {
-                self.recents
-                    .iter()
-                    .position(|id| *id == self.cards[i].window.id)
-            });
-        } else if self.sort_name {
+        if self.sort_name {
             entries.sort_by_key(|&i| self.cards[i].window.title.to_lowercase());
         }
         entries
@@ -459,42 +442,49 @@ impl State {
         let _ = GetClientRect(self.hwnd, &mut r);
         let w = r.right * 96 / self.dpi as i32;
         let h = r.bottom * 96 / self.dpi as i32;
-        for (id, y) in [
-            (NAV_CONNECTIONS, 112),
-            (NAV_APPS, 164),
-            (NAV_RECENTS, 216),
-            (NAV_SETTINGS, 268),
-        ] {
-            self.place(id, 10, y, 210, 50, true);
-        }
+        self.place(NAV_APPS, 10, 112, 210, 50, true);
+        self.place(NAV_CONNECTIONS, 10, 164, 210, 50, true);
+        self.place(NAV_SETTINGS, 10, h - 114, 210, 50, true);
         self.place(MINIMIZE, w - 140, 0, 46, 32, true);
         self.place(MAXIMIZE, w - 94, 0, 46, 32, true);
         self.place(CLOSE, w - 48, 0, 46, 32, true);
-        self.place(CONNECT, w - 450, 96, 162, 52, true);
-        self.place(SCREEN, w - 274, 96, 164, 52, true);
-        self.place(MENU, w - 96, 96, 52, 52, true);
-        self.place(MORE_APPS, 16, h - 172, 192, 100, true);
-        self.place(HELP, 178, h - 55, 34, 30, true);
-        for (id, x, ww) in [
-            (TAB_APPS, 240, 168),
-            (TAB_DESKTOP, 420, 140),
-            (TAB_FILES, 572, 110),
-        ] {
-            self.place(id, x, 215, ww, 52, true);
-        }
-        let gallery = self.view != NAV_SETTINGS && self.view != TAB_DESKTOP;
-        self.place(SEARCH, w - 290, 227, 250, 27, gallery);
-        self.place(SORT, w - 216, 288, 124, 34, gallery);
-        self.place(GRID, w - 86, 289, 36, 34, gallery);
-        self.place(LIST, w - 46, 289, 32, 34, gallery);
+        self.place(CONNECT, w - 216, 94, 174, 48, true);
+        let gallery = self.view == NAV_APPS;
+        let macs = self.view == NAV_CONNECTIONS;
+        self.place(SEARCH, 280, 299, (w - 590).min(440), 27, gallery);
+        self.place(SORT, w - 280, 294, 164, 36, gallery);
+        self.place(GRID, w - 104, 294, 36, 36, gallery);
+        self.place(LIST, w - 62, 294, 36, 36, gallery);
+        set_text(
+            self.control(SORT),
+            if self.sort_name {
+                "Sort: Name"
+            } else {
+                "Sort: Host order"
+            },
+        );
+        self.place(ADD_MAC, w - 366, 226, 154, 40, macs);
+        self.place(REFRESH, w - 198, 226, 172, 40, macs);
+        self.place(FORGET, w - 216, 292, 190, 36, macs);
+        let can_forget = self
+            .selected()
+            .is_some_and(|c| self.saved.iter().any(|n| n.same_destination(&c)));
+        let _ = EnableWindow(self.control(FORGET), can_forget && !self.active);
+        let _ = EnableWindow(self.control(REFRESH), self.scan.is_none());
         let cols = ((w - SIDEBAR - 30) / 274).clamp(1, 4) as usize;
         let rows = ((h - 348 - 62) / 204).clamp(1, 3) as usize;
-        self.page_size = if self.list {
+        self.page_size = if macs {
+            ((h - 410) / 88).clamp(1, CARD_COUNT as i32) as usize
+        } else if self.list {
             ((h - 422) / 84).clamp(1, 12) as usize
         } else {
             (cols * rows).min(CARD_COUNT)
         };
-        let matches = self.matches();
+        let matches = if macs {
+            (0..self.rows.len()).collect()
+        } else {
+            self.matches()
+        };
         self.page = self
             .page
             .min(matches.len().saturating_sub(1) / self.page_size);
@@ -573,32 +563,28 @@ impl State {
                 self.place(CARD_MENU_BASE + slot, 0, 0, 1, 1, false);
             }
         }
-        let used_rows = self.visible.len().div_ceil(cols);
-        let add_y = 348 + used_rows as i32 * 204;
-        self.place(
-            OPEN_ANY,
-            SIDEBAR + 2,
-            add_y,
-            cw,
-            144,
-            gallery && !self.list && add_y + 144 < h - 24 && !self.visible.is_empty(),
-        );
-        self.place(
-            PREVIOUS,
-            w - 416,
-            h - 52,
-            92,
-            30,
-            gallery && matches.len() > self.page_size,
-        );
-        self.place(
-            NEXT,
-            w - 316,
-            h - 52,
-            80,
-            30,
-            gallery && matches.len() > self.page_size,
-        );
+        for slot in 0..CARD_COUNT {
+            if let Some(&i) = self.visible.get(slot).filter(|_| macs) {
+                set_text(
+                    self.control(MAC_BASE + slot),
+                    &format!("Select {} ({})", self.rows[i].name, self.rows[i].host),
+                );
+                self.place(
+                    MAC_BASE + slot,
+                    246,
+                    348 + slot as i32 * 88,
+                    w - 274,
+                    76,
+                    true,
+                );
+                let _ = EnableWindow(self.control(MAC_BASE + slot), !self.active);
+            } else {
+                self.place(MAC_BASE + slot, 0, 0, 1, 1, false);
+            }
+        }
+        let pages = (gallery || macs) && matches.len() > self.page_size;
+        self.place(PREVIOUS, w - 240, h - 52, 98, 32, pages);
+        self.place(NEXT, w - 132, h - 52, 98, 32, pages);
         let _ = EnableWindow(self.control(PREVIOUS), self.page > 0);
         let _ = EnableWindow(
             self.control(NEXT),
@@ -609,8 +595,7 @@ impl State {
         self.place(CONTROL, 268, 496, 210, 36, settings);
         self.place(VIDEO, 500, 496, 238, 36, settings);
         self.place(MANUAL, 268, 560, 210, 44, settings);
-        self.place(REFRESH, 492, 560, 160, 44, settings);
-        self.place(UPDATE, 268, 652, 210, 40, settings);
+        self.place(UPDATE, 800, 380, 220, 40, settings);
         let _ = EnableWindow(self.control(CONNECT), self.active || !self.rows.is_empty());
         let _ = EnableWindow(self.control(MANUAL), !self.active);
         self.invalidate();
@@ -683,7 +668,7 @@ impl State {
             580.,
             390.,
             0x204FA9,
-            0.17,
+            0.12,
         );
         p.fill(rect(0., 0., 222., h), 0., 0x0E1929, 0.24);
         p.line(222., 32., 222., h, 0x18283B, 1.);
@@ -696,229 +681,214 @@ impl State {
             glass::TEXT,
             false,
         );
-        p.text(
-            "Your Mac apps, anywhere.",
-            rect(36., 64., 174., 23.),
-            12.,
-            false,
-            glass::MUTED,
-            false,
-        );
-        p.text(
-            concat!("Transom v", env!("CARGO_PKG_VERSION")),
-            rect(22., h - 50., 145., 25.),
-            12.,
-            false,
-            0x8798B4,
-            false,
-        );
-        let hero = rect(236., 38., w - 250., 156.);
-        p.gradient(hero, 14., 0x233044, 0x111C2B, 0.67);
-        p.glow(hero, w * 0.62, 80., 380., 250., 0x2D62E5, 0.23);
-        p.stroke(hero, 14., glass::LINE, 0.7, 0.8);
-        let compact = w < 1300.;
-        let info_x = if compact { 440. } else { 520. };
-        let info_width = (w - 450. - info_x - 24.).max(150.);
-        p.mac(
-            if compact { 266. } else { 280. },
-            82.,
-            if compact { 148. } else { 190. },
-        );
+        let hero = rect(236., 48., w - 260., 148.);
+        p.gradient(hero, 12., 0x233044, 0x111C2B, 0.67);
+        p.stroke(hero, 12., glass::LINE, 0.65, 0.8);
         let selected = self.selected();
         let name = selected
             .as_ref()
             .map(|c| c.name.as_str())
-            .unwrap_or("My Mac");
+            .unwrap_or("No Mac selected");
+        // The protocol does not identify hardware. Only use Studio artwork when
+        // the selected host's name identifies it; otherwise use a neutral Mac.
+        if name.to_lowercase().contains("studio") {
+            p.mac(rect(260., 60., 184., 128.));
+        } else {
+            p.icon("\u{E7F4}", rect(282., 80., 136., 90.), 52., glass::MUTED);
+        }
         p.text(
             name,
-            rect(info_x, 58., info_width, 34.),
+            rect(474., 72., w - 720., 36.),
             24.,
             true,
             glass::TEXT,
             false,
         );
-        let online = self.connected
-            || selected
-                .as_ref()
-                .map(|c| self.nearby.iter().any(|n| n.id == c.id))
-                .unwrap_or(false);
+        let nearby = selected
+            .as_ref()
+            .is_some_and(|c| self.nearby.iter().any(|n| n.same_destination(c)));
+        let label = if self.connected {
+            "Connected"
+        } else if self.active {
+            "Connecting…"
+        } else if nearby {
+            "Available nearby"
+        } else if selected.is_some() {
+            "Saved Mac"
+        } else {
+            "Select a device in Macs"
+        };
         p.dot(
-            info_x + 6.,
-            110.,
+            479.,
+            125.,
             4.,
-            if online { glass::GREEN } else { 0x8694AA },
-        );
-        p.text(
-            if online {
-                "Online"
-            } else if selected.is_some() {
-                "Saved Mac"
+            if self.connected {
+                glass::GREEN
             } else {
-                "Choose a Mac"
+                glass::MUTED
             },
-            rect(info_x + 18., 97., 140., 25.),
-            13.,
-            false,
-            if online { glass::GREEN } else { glass::MUTED },
-            false,
         );
         p.text(
-            selected
-                .as_ref()
-                .map(|c| c.host.as_str())
-                .unwrap_or("Start Transom Host to discover your Mac"),
-            rect(info_x, 128., info_width, 28.),
-            14.,
+            label,
+            rect(492., 110., w - 740., 28.),
+            13.,
             false,
             glass::MUTED,
             false,
         );
-        p.fill(rect(236., 212., w - 250., 59.), 14., 0x101B2C, 0.38);
-        p.stroke(rect(236., 212., w - 250., 59.), 14., glass::LINE, 0.50, 0.8);
-        if self.view != NAV_SETTINGS && self.view != TAB_DESKTOP {
-            p.fill(rect(w - 326., 220., 310., 43.), 12., 0x111D2C, 0.82);
-            p.stroke(rect(w - 326., 220., 310., 43.), 12., glass::LINE, 0.9, 1.);
-            p.icon(
-                "\u{E721}",
-                rect(w - 319., 226., 24., 28.),
-                18.,
-                glass::MUTED,
-            );
-            let heading = if self.view == NAV_RECENTS {
-                "Recently opened"
-            } else if self.view == TAB_FILES {
-                "Finder windows"
-            } else {
-                "Launch an app"
-            };
+        p.text(
+            selected.as_ref().map(|c| c.host.as_str()).unwrap_or(""),
+            rect(474., 145., w - 720., 24.),
+            12.,
+            false,
+            glass::MUTED,
+            false,
+        );
+
+        if self.view == NAV_APPS {
             p.text(
-                heading,
-                rect(246., 286., 450., 29.),
-                16.,
+                "Shared windows",
+                rect(246., 220., 460., 36.),
+                22.,
                 true,
                 glass::TEXT,
                 false,
             );
+            let detail = if self.connected {
+                format!(
+                    "{} windows · {} open on this PC",
+                    self.cards.len(),
+                    self.cards.iter().filter(|c| c.opened).count()
+                )
+            } else {
+                "Connect to your Mac to browse its shared windows.".into()
+            };
             p.text(
-                if self.view == TAB_FILES {
-                    "Use Finder on your Mac to browse your files."
-                } else {
-                    "Select an app to open in a window on this PC."
-                },
-                rect(246., 314., (w - 480.).max(280.), 25.),
+                &detail,
+                rect(246., 256., w - 280., 26.),
                 13.,
                 false,
                 glass::MUTED,
                 false,
             );
+            p.fill(
+                rect(246., 291., (w - 556.).min(474.), 44.),
+                8.,
+                0x111D2C,
+                0.96,
+            );
+            p.stroke(
+                rect(246., 291., (w - 556.).min(474.), 44.),
+                8.,
+                glass::LINE,
+                0.8,
+                0.8,
+            );
+            p.icon("\u{E721}", rect(252., 300., 24., 24.), 15., glass::MUTED);
             if self.visible.is_empty() {
                 let (title, detail) = if !self.query.is_empty() {
-                    ("No matching apps", "Try another app or window title.")
-                } else if !self.connected {
+                    ("No matching windows", "Try another window title.")
+                } else if self.connected {
                     (
-                        "Your Mac apps belong here",
-                        "Connect to your Mac to see its shared windows.",
-                    )
-                } else if self.view == NAV_RECENTS {
-                    (
-                        "Your recent windows",
-                        "Windows you open in this session will appear here.",
-                    )
-                } else if self.view == TAB_FILES {
-                    (
-                        "Share Finder from your Mac",
-                        "Select Finder in Transom Host to browse its windows here.",
+                        "No shared windows",
+                        "On your Mac, select apps with open windows in Transom Host.",
                     )
                 } else {
                     (
-                        "Choose apps on your Mac",
-                        "Select the apps you want to share in Transom Host.",
+                        "Connect to a Mac",
+                        "Choose a nearby or saved device in Macs, then connect.",
                     )
                 };
-                p.stroke(rect(246., 365., w - 280., 220.), 12., glass::LINE, 0.8, 1.);
-                p.icon("\u{E8A7}", rect(270., 390., 52., 52.), 32., glass::MUTED);
+                p.icon("\u{E8A7}", rect(270., 403., 48., 48.), 28., glass::MUTED);
                 p.text(
                     title,
-                    rect(338., 391., w - 398., 44.),
-                    21.,
+                    rect(336., 399., w - 388., 40.),
+                    20.,
                     true,
                     glass::TEXT,
                     false,
                 );
                 p.text(
                     detail,
-                    rect(338., 436., w - 398., 30.),
+                    rect(336., 443., w - 388., 30.),
                     14.,
                     false,
                     glass::MUTED,
                     false,
                 );
-                p.text(
-                    &self.discovery,
-                    rect(270., 525., w - 320., 30.),
-                    13.,
-                    false,
-                    glass::MUTED,
-                    false,
-                );
             }
-        } else if self.view == TAB_DESKTOP {
+        } else if self.view == NAV_CONNECTIONS {
             p.text(
-                "Shared display",
-                rect(246., 290., 450., 30.),
-                18.,
-                true,
-                glass::TEXT,
-                false,
-            );
-            p.text(
-                "Live preview of the Mac sharing display. Open an app for control.",
-                rect(246., 320., w - 280., 30.),
-                13.,
-                false,
-                glass::MUTED,
-                false,
-            );
-            let area = rect(246., 370., w - 280., h - 445.);
-            p.fill(area, 10., 0x070D16, 0.9);
-            if self.desktop.size.w > 0 {
-                let sw = self.desktop.size.w as f32;
-                let sh = self.desktop.size.h as f32;
-                let k = ((area.right - area.left) / sw).min((area.bottom - area.top) / sh);
-                p.bitmap(
-                    &self.desktop.pixels,
-                    self.desktop.size.w,
-                    self.desktop.size.h,
-                    rect(
-                        area.left + (area.right - area.left - sw * k) / 2.,
-                        area.top + (area.bottom - area.top - sh * k) / 2.,
-                        sw * k,
-                        sh * k,
-                    ),
-                );
-            } else {
-                p.text(
-                    "Waiting for a video connection",
-                    area,
-                    17.,
-                    false,
-                    glass::MUTED,
-                    true,
-                );
-            }
-        } else {
-            p.text(
-                "Connection settings",
-                rect(268., 292., 600., 36.),
+                "Macs",
+                rect(246., 220., 430., 36.),
                 22.,
                 true,
                 glass::TEXT,
                 false,
             );
             p.text(
-                "Connect manually or manage your local connection.",
-                rect(268., 330., 650., 28.),
-                14.,
+                if self.active {
+                    "Disconnect before selecting another Mac."
+                } else {
+                    "Select a Mac, then connect. Nearby Macs appear automatically."
+                },
+                rect(246., 265., w - 500., 28.),
+                13.,
+                false,
+                glass::MUTED,
+                false,
+            );
+            p.text(
+                if self.scan.is_some() {
+                    "Looking for nearby Macs…"
+                } else {
+                    &self.discovery
+                },
+                rect(246., 303., w - 490., 25.),
+                12.,
+                false,
+                glass::MUTED,
+                false,
+            );
+            if self.rows.is_empty() {
+                p.text(
+                    "No Macs found",
+                    rect(270., 390., w - 320., 40.),
+                    20.,
+                    true,
+                    glass::TEXT,
+                    false,
+                );
+                p.text(
+                    "Start Transom Host on your Mac, or add its hostname manually.",
+                    rect(270., 436., w - 320., 30.),
+                    14.,
+                    false,
+                    glass::MUTED,
+                    false,
+                );
+            }
+        } else {
+            p.text(
+                "Settings",
+                rect(268., 238., 600., 36.),
+                22.,
+                true,
+                glass::TEXT,
+                false,
+            );
+            p.text(
+                "Manual connection",
+                rect(268., 300., 600., 30.),
+                16.,
+                true,
+                glass::TEXT,
+                false,
+            );
+            p.text(
+                "Use this when your Mac does not appear in the nearby list.",
+                rect(268., 335., 680., 28.),
+                13.,
                 false,
                 glass::MUTED,
                 false,
@@ -948,8 +918,28 @@ impl State {
                 false,
             );
             p.text(
-                "Leave video blank for control only. Use a trusted local network.",
+                if self.active {
+                    "Disconnect to start a manual connection."
+                } else {
+                    "Leave video blank for control only."
+                },
                 rect(268., 610., 700., 30.),
+                13.,
+                false,
+                glass::MUTED,
+                false,
+            );
+            p.text(
+                "Updates",
+                rect(800., 300., 220., 30.),
+                16.,
+                true,
+                glass::TEXT,
+                false,
+            );
+            p.text(
+                concat!("Transom ", env!("CARGO_PKG_VERSION")),
+                rect(800., 335., 220., 28.),
                 13.,
                 false,
                 glass::MUTED,
@@ -959,44 +949,18 @@ impl State {
                 p.stroke(rect(x, y, ww, 48.), 8., glass::LINE, 1., 1.);
             }
         }
+        let pages = self.view != NAV_SETTINGS
+            && if self.view == NAV_CONNECTIONS {
+                self.rows.len()
+            } else {
+                self.matches().len()
+            } > self.page_size;
         p.text(
             &self.status,
-            rect(550., h - 48., (w - 740.).max(170.), 30.),
+            rect(246., h - 48., w - if pages { 520. } else { 280. }, 28.),
             12.,
             false,
             glass::MUTED,
-            false,
-        );
-        p.fill(rect(w - 154., h - 56., 136., 38.), 13., 0x142338, 0.6);
-        p.stroke(
-            rect(w - 154., h - 56., 136., 38.),
-            13.,
-            glass::LINE,
-            0.8,
-            1.,
-        );
-        p.dot(
-            w - 132.,
-            h - 37.,
-            5.,
-            if self.connected {
-                glass::GREEN
-            } else {
-                0x7E8DA3
-            },
-        );
-        p.text(
-            if self.connected {
-                "Connected"
-            } else if self.active {
-                "Connecting"
-            } else {
-                "Offline"
-            },
-            rect(w - 117., h - 52., 90., 30.),
-            12.,
-            false,
-            glass::TEXT,
             false,
         );
     }
@@ -1029,17 +993,77 @@ impl State {
             }
         } else if (CARD_MENU_BASE..CARD_MENU_BASE + CARD_COUNT).contains(&id) {
             p.icon("\u{E712}", rect(0., 0., w, h), 17., glass::MUTED);
-        } else if [NAV_CONNECTIONS, NAV_APPS, NAV_RECENTS, NAV_SETTINGS].contains(&id) {
-            let active = self.view == id
-                || (id == NAV_APPS && [TAB_APPS, TAB_DESKTOP, TAB_FILES].contains(&self.view));
+        } else if (MAC_BASE..MAC_BASE + CARD_COUNT).contains(&id) {
+            if let Some(&i) = self.visible.get(id - MAC_BASE) {
+                let c = &self.rows[i];
+                let selected = i == self.selected_device;
+                p.fill(
+                    rect(1., 1., w - 2., h - 2.),
+                    10.,
+                    if selected { 0x203858 } else { 0x182333 },
+                    0.85,
+                );
+                p.stroke(
+                    rect(1., 1., w - 2., h - 2.),
+                    10.,
+                    if selected { 0x558FFF } else { glass::LINE },
+                    0.9,
+                    1.,
+                );
+                p.icon("\u{E7F4}", rect(18., 18., 40., 40.), 25., glass::MUTED);
+                p.text(
+                    &c.name,
+                    rect(78., 10., w - 270., 29.),
+                    16.,
+                    true,
+                    glass::TEXT,
+                    false,
+                );
+                p.text(
+                    &format!(
+                        "{}  ·  {} / {}",
+                        c.host,
+                        c.control_port,
+                        c.video_port
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "no video".into())
+                    ),
+                    rect(78., 40., w - 270., 23.),
+                    12.,
+                    false,
+                    glass::MUTED,
+                    false,
+                );
+                let nearby = self.nearby.iter().any(|n| n.same_destination(c));
+                let status = if selected && self.connected {
+                    "Connected"
+                } else if selected && self.active {
+                    "Connecting…"
+                } else if selected {
+                    "Selected"
+                } else if nearby {
+                    "Nearby"
+                } else {
+                    "Saved"
+                };
+                p.text(
+                    status,
+                    rect(w - 175., 20., 150., 36.),
+                    13.,
+                    false,
+                    if selected { 0x8BB4FF } else { glass::MUTED },
+                    true,
+                );
+            }
+        } else if [NAV_CONNECTIONS, NAV_APPS, NAV_SETTINGS].contains(&id) {
+            let active = self.view == id;
             if active {
-                p.gradient(rect(1., 1., w - 2., h - 2.), 11., 0x203D83, 0x1C2D60, 0.94);
-                p.fill(rect(1., 10., 3., h - 20.), 1.5, 0x4A86FF, 1.);
+                p.fill(rect(1., 1., w - 2., h - 2.), 10., 0x20385C, 0.9);
+                p.fill(rect(1., 12., 3., h - 24.), 1.5, 0x4A86FF, 1.);
             }
             let (icon, name) = match id {
-                NAV_CONNECTIONS => ("\u{E977}", "Connections"),
-                NAV_APPS => ("\u{E80A}", "Apps"),
-                NAV_RECENTS => ("\u{E81C}", "Recents"),
+                NAV_CONNECTIONS => ("\u{E977}", "Macs"),
+                NAV_APPS => ("\u{E8A7}", "Windows"),
                 _ => ("\u{E713}", "Settings"),
             };
             p.icon(icon, rect(14., 10., 35., 30.), 21., glass::MUTED);
@@ -1050,76 +1074,6 @@ impl State {
                 false,
                 glass::TEXT,
                 false,
-            );
-        } else if [TAB_APPS, TAB_DESKTOP, TAB_FILES].contains(&id) {
-            let active = self.view == id
-                || (id == TAB_APPS
-                    && [NAV_CONNECTIONS, NAV_APPS, NAV_RECENTS].contains(&self.view));
-            if active {
-                p.gradient(rect(1., 1., w - 2., h - 2.), 12., 0x213C79, 0x1B2C56, 1.);
-                p.stroke(rect(1., 1., w - 2., h - 2.), 12., 0x426AB8, 0.9, 0.8);
-            }
-            let (icon, name) = match id {
-                TAB_APPS => ("\u{E80A}", "Applications"),
-                TAB_DESKTOP => ("\u{E7F4}", "Desktop"),
-                _ => ("\u{E8B7}", "Files"),
-            };
-            p.icon(icon, rect(18., 10., 30., 32.), 21., glass::MUTED);
-            p.text(
-                name,
-                rect(59., 9., w - 62., 34.),
-                14.,
-                active,
-                glass::TEXT,
-                false,
-            );
-        } else if id == MORE_APPS {
-            p.gradient(rect(1., 1., w - 2., h - 2.), 12., 0x16253F, 0x111D32, 0.93);
-            p.stroke(rect(1., 1., w - 2., h - 2.), 12., glass::LINE, 0.6, 0.8);
-            p.icon("\u{E8A7}", rect(14., 15., 26., 26.), 20., 0x87B8FF);
-            p.text(
-                "Share more apps",
-                rect(50., 15., w - 56., 26.),
-                13.,
-                true,
-                glass::TEXT,
-                false,
-            );
-            p.text(
-                "Choose apps in Transom Host",
-                rect(16., 48., w - 26., 22.),
-                11.,
-                false,
-                glass::MUTED,
-                false,
-            );
-            p.text(
-                "and open them here.",
-                rect(16., 68., w - 26., 20.),
-                11.,
-                false,
-                glass::MUTED,
-                false,
-            );
-        } else if id == OPEN_ANY {
-            p.dashed(rect(1., 1., w - 2., h - 2.), 11., 0x677F9F);
-            p.line(w / 2., 29., w / 2., 53., glass::MUTED, 2.);
-            p.line(w / 2. - 12., 41., w / 2. + 12., 41., glass::MUTED, 2.);
-            p.text(
-                "Open Any App",
-                rect(8., 65., w - 16., 28.),
-                14.,
-                false,
-                glass::TEXT,
-                true,
-            );
-            p.text(
-                "Find a shared app on your Mac.",
-                rect(8., 93., w - 16., 25.),
-                12.,
-                false,
-                0x8D9EB9,
-                true,
             );
         } else if [MINIMIZE, MAXIMIZE, CLOSE].contains(&id) {
             if pressed {
@@ -1141,8 +1095,8 @@ impl State {
                 glass::MUTED,
             );
         } else {
-            let primary = id == CONNECT || id == MANUAL;
-            let bare = [SORT, HELP].contains(&id);
+            let primary = (id == CONNECT || id == MANUAL) && !disabled;
+            let bare = id == SORT;
             let selected = (id == GRID && !self.list) || (id == LIST && self.list);
             if !bare {
                 p.gradient(
@@ -1179,21 +1133,8 @@ impl State {
                         false,
                     );
                 }
-                SCREEN => {
-                    p.icon("\u{E7F4}", rect(14., 10., 28., h - 20.), 20., col);
-                    p.text(
-                        "Screen View",
-                        rect(53., 5., w - 59., h - 10.),
-                        14.,
-                        false,
-                        col,
-                        false,
-                    );
-                }
-                MENU => p.icon("\u{E712}", rect(0., 0., w, h), 19., col),
                 GRID => p.icon("\u{E80A}", rect(0., 0., w, h), 17., col),
                 LIST => p.icon("\u{E8FD}", rect(0., 0., w, h), 17., col),
-                HELP => p.icon("\u{E897}", rect(0., 0., w, h), 19., glass::MUTED),
                 SORT => {
                     p.text(
                         if self.sort_name {
@@ -1225,6 +1166,42 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut State;
     if ptr.is_null() {
         return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+    if msg == SHOW_SORT_MENU {
+        let by_name = (*ptr).sort_name;
+        if let Ok(menu) = CreatePopupMenu() {
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | if by_name { MF_CHECKED } else { MF_UNCHECKED },
+                1,
+                w!("Name (A–Z)"),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | if by_name { MF_UNCHECKED } else { MF_CHECKED },
+                2,
+                w!("Host order"),
+            );
+            let mut anchor = RECT::default();
+            let _ = GetWindowRect((*ptr).control(SORT), &mut anchor);
+            let choice = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_NONOTIFY,
+                anchor.left,
+                anchor.bottom,
+                0,
+                hwnd,
+                None,
+            )
+            .0;
+            let _ = DestroyMenu(menu);
+            if choice != 0 {
+                (*ptr).sort_name = choice == 1;
+                (*ptr).page = 0;
+                (*ptr).layout();
+            }
+        }
+        return LRESULT(0);
     }
     if msg == SHOW_CARD_MENU {
         let snapshot = {
@@ -1269,70 +1246,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 let state = &mut *ptr;
                 if choice == 1 {
                     state.actions.push_back(Action::OpenWindow(id));
-                    state.recents.retain(|v| *v != id);
-                    state.recents.insert(0, id);
                 } else if choice == 2 {
                     state.actions.push_back(Action::HideWindow(id));
                 }
             }
-        }
-        return LRESULT(0);
-    }
-    // Popup menus pump messages. Do not retain a State borrow through that loop.
-    if msg == SHOW_MENU {
-        let rows = (*ptr).rows.clone();
-        let selected = (*ptr).selected_device;
-        let active = (*ptr).active;
-        if let Ok(menu) = CreatePopupMenu() {
-            for (i, c) in rows.iter().enumerate() {
-                let name = wide(&c.name);
-                let flags = MF_STRING
-                    | if active { MF_GRAYED } else { MF_ENABLED }
-                    | if i == selected {
-                        MF_CHECKED
-                    } else {
-                        MF_UNCHECKED
-                    };
-                let _ = AppendMenuW(menu, flags, 2000 + i, PCWSTR(name.as_ptr()));
-            }
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_STRING, 100000, w!("Refresh nearby Macs"));
-            let _ = AppendMenuW(menu, MF_STRING, 100001, w!("Connection settings"));
-            if !rows.is_empty() {
-                let _ = AppendMenuW(menu, MF_STRING, 100002, w!("Forget saved Mac"));
-            }
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-            let chosen = TrackPopupMenu(
-                menu,
-                TPM_RETURNCMD | TPM_NONOTIFY,
-                pt.x,
-                pt.y,
-                0,
-                hwnd,
-                None,
-            )
-            .0 as usize;
-            let _ = DestroyMenu(menu);
-            let s = &mut *ptr;
-            if (2000..2000 + rows.len()).contains(&chosen) {
-                if let Some(i) = s.rows.iter().position(|c| c.id == rows[chosen - 2000].id) {
-                    s.selected_device = i;
-                }
-            } else if chosen == 100000 && s.scan.is_none() {
-                s.start_scan();
-            } else if chosen == 100001 {
-                s.view = NAV_SETTINGS;
-            } else if chosen == 100002 {
-                if let Some(c) = rows.get(selected) {
-                    s.saved.retain(|n| n.id != c.id);
-                    if let Err(e) = connections::save(&s.preferences, &s.saved) {
-                        s.status = format!("Could not save connections: {e}");
-                    }
-                    s.rebuild_rows();
-                }
-            }
-            s.layout();
         }
         return LRESULT(0);
     }
@@ -1385,13 +1302,19 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 if let Some(&index) = s.visible.get(id - CARD_BASE) {
                     let wid = s.cards[index].window.id;
                     s.actions.push_back(Action::OpenWindow(wid));
-                    s.recents.retain(|id| *id != wid);
-                    s.recents.insert(0, wid);
                 }
             } else if (CARD_MENU_BASE..CARD_MENU_BASE + CARD_COUNT).contains(&id)
                 && notice == BN_CLICKED as usize
             {
                 let _ = PostMessageW(hwnd, SHOW_CARD_MENU, WPARAM(id - CARD_MENU_BASE), LPARAM(0));
+            } else if (MAC_BASE..MAC_BASE + CARD_COUNT).contains(&id)
+                && notice == BN_CLICKED as usize
+                && !s.active
+            {
+                if let Some(&i) = s.visible.get(id - MAC_BASE) {
+                    s.selected_device = i;
+                    s.layout();
+                }
             } else if id == SEARCH && notice == EN_CHANGE as usize {
                 s.query = read_text(s.control(SEARCH)).to_lowercase();
                 s.page = 0;
@@ -1405,22 +1328,32 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                             s.actions.push_back(Action::Connect(c));
                         }
                     }
-                    MENU => {
-                        let _ = PostMessageW(hwnd, SHOW_MENU, WPARAM(0), LPARAM(0));
-                    }
-                    NAV_CONNECTIONS | NAV_APPS | NAV_RECENTS | NAV_SETTINGS | TAB_APPS
-                    | TAB_DESKTOP | TAB_FILES => {
+                    NAV_CONNECTIONS | NAV_APPS | NAV_SETTINGS => {
                         s.view = id;
                         s.page = 0;
                         s.layout();
                     }
-                    SCREEN => {
-                        s.view = TAB_DESKTOP;
+                    ADD_MAC => {
+                        s.view = NAV_SETTINGS;
+                        s.page = 0;
                         s.layout();
+                        let _ = SetFocus(s.control(HOST));
+                    }
+                    FORGET if !s.active => {
+                        if let Some(c) = s.selected() {
+                            s.saved.retain(|n| !n.same_destination(&c));
+                            if let Err(e) = connections::save(&s.preferences, &s.saved) {
+                                s.status = format!("Could not save connections: {e}");
+                            } else {
+                                s.status =
+                                    "Saved connection removed. Nearby Macs remain discoverable."
+                                        .into();
+                            }
+                            s.rebuild_rows();
+                        }
                     }
                     SORT => {
-                        s.sort_name = !s.sort_name;
-                        s.layout();
+                        let _ = PostMessageW(hwnd, SHOW_SORT_MENU, WPARAM(0), LPARAM(0));
                     }
                     GRID | LIST => {
                         s.list = id == LIST;
@@ -1434,18 +1367,6 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     NEXT => {
                         s.page += 1;
                         s.layout();
-                    }
-                    OPEN_ANY => {
-                        s.view = TAB_APPS;
-                        s.query.clear();
-                        s.page = 0;
-                        set_text(s.control(SEARCH), "");
-                        s.layout();
-                        let _ = SetFocus(s.control(SEARCH));
-                    }
-                    MORE_APPS | HELP => {
-                        s.status="On your Mac, choose apps in Transom Host and start sharing. Connect here, then open an app card.".into();
-                        s.invalidate();
                     }
                     MANUAL if !s.active => {
                         match Connection::manual(
@@ -1591,26 +1512,19 @@ unsafe fn create_controls(s: &mut State) {
     };
     for (id, name) in [
         (CONNECT, "Connect"),
-        (SCREEN, "Screen View"),
-        (MENU, "Choose Mac and connection options"),
-        (NAV_CONNECTIONS, "Connections"),
-        (NAV_APPS, "Apps"),
-        (NAV_RECENTS, "Recents"),
+        (NAV_CONNECTIONS, "Macs"),
+        (NAV_APPS, "Windows"),
         (NAV_SETTINGS, "Settings"),
-        (TAB_APPS, "Applications"),
-        (TAB_DESKTOP, "Desktop"),
-        (TAB_FILES, "Files"),
-        (SORT, "Sort windows"),
+        (SORT, "Sort: Name"),
         (GRID, "Grid view"),
         (LIST, "List view"),
         (PREVIOUS, "Previous"),
         (NEXT, "Next"),
-        (OPEN_ANY, "Open Any App"),
-        (MORE_APPS, "Share more apps"),
-        (HELP, "Help"),
         (MANUAL, "Connect manually"),
         (UPDATE, "Check for updates"),
         (REFRESH, "Refresh Macs"),
+        (FORGET, "Forget saved Mac"),
+        (ADD_MAC, "Add Mac manually"),
         (MINIMIZE, "Minimize"),
         (MAXIMIZE, "Maximize or restore"),
         (CLOSE, "Close"),
@@ -1618,6 +1532,12 @@ unsafe fn create_controls(s: &mut State) {
         add(w!("BUTTON"), name, id, BS_OWNERDRAW as u32);
     }
     for slot in 0..CARD_COUNT {
+        add(
+            w!("BUTTON"),
+            "Select Mac",
+            MAC_BASE + slot,
+            BS_OWNERDRAW as u32,
+        );
         add(
             w!("BUTTON"),
             "Open window",
@@ -1641,7 +1561,7 @@ unsafe fn create_controls(s: &mut State) {
     ] {
         add(w!("EDIT"), value, id, ES_AUTOHSCROLL as u32);
     }
-    let cue = wide("Search Mac apps…");
+    let cue = wide("Search windows…");
     SendMessageW(
         s.control(SEARCH),
         0x1501,
