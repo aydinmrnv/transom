@@ -19,7 +19,6 @@ struct ContentView: View {
     @AppStorage(HostDefaults.videoPort) private var videoPort = HostDefaults.defaultVideoPort
     @AppStorage(HostDefaults.bitrateMbps) private var bitrateMbps = 40
     @AppStorage(HostDefaults.fps) private var fps = 60
-    @AppStorage(HostDefaults.gutter) private var gutter = Tiler.defaultGutter
     @AppStorage(HostDefaults.video) private var videoEnabled = true
     @AppStorage(HostDefaults.chroma) private var chroma = HEVCEncoder.Format.hevc420_8bit.rawValue
     @AppStorage(HostDefaults.namesakeModifiers) private var namesakeModifiers = false
@@ -62,7 +61,14 @@ struct ContentView: View {
             .background(Color(nsColor: .controlBackgroundColor))
         }
         .tint(accent)
-        .onAppear(perform: refreshAll)
+        .onAppear {
+            refreshAll()
+            // An installer can explicitly resume an already authorized session
+            // after replacing the bundle. Normal launches still require Start.
+            if ProcessInfo.processInfo.arguments.contains("--start-sharing"), canStart, !host.running {
+                startSharing()
+            }
+        }
         .onReceive(timer) { _ in
             refreshPermissions()
             if !host.running && !host.starting {
@@ -272,7 +278,7 @@ struct ContentView: View {
         activeAddress = address
         host.start(config: HostConfig(target: first, clientWindowSelection: true,
             display: display, host: address, controlPort: UInt16(clamping: controlPort),
-            videoPort: UInt16(clamping: videoPort), gutter: gutter, tile: true,
+            videoPort: UInt16(clamping: videoPort), gutter: 0, tile: false,
             video: videoEnabled, bitrateMbps: bitrateMbps, fps: fps,
             videoFormat: HEVCEncoder.Format(rawValue: chroma) ?? .hevc420_8bit,
             namesakeModifiers: namesakeModifiers, logInput: logInput))
