@@ -13,6 +13,7 @@ public final class CursorMonitor: @unchecked Sendable {
     private let registry: WindowRegistry
     private let display: DisplayInfo
     private let emit: @Sendable (ControlMessage) -> Void
+    private var lastTrace = ""
 
     public init(registry: WindowRegistry, display: DisplayInfo, emit: @escaping @Sendable (ControlMessage) -> Void) {
         self.registry = registry; self.display = display; self.emit = emit
@@ -50,6 +51,7 @@ public final class CursorMonitor: @unchecked Sendable {
         let point = CGPoint(x: origin.minX + CGFloat(hover.x) / display.scale,
                             y: origin.minY + CGFloat(hover.y) / display.scale)
         var hit: AXUIElement?
+        var roles: [String] = []
         var text = false
         var region = WireRect(x: hover.x, y: hover.y, w: 1, h: 1)
         if AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit) == .success {
@@ -58,6 +60,7 @@ public final class CursorMonitor: @unchecked Sendable {
                 guard let element = hit else { break }
                 AXUIElementSetMessagingTimeout(element, 0.04)
                 let ax = AXWindow(element: element, index: -1)
+                roles.append(ax.role)
                 if Self.isTextRole(ax.role), let frame = ax.frame(), frame.contains(point) {
                     let clipped = frame.intersection(origin)
                     if !clipped.isNull {
@@ -77,6 +80,11 @@ public final class CursorMonitor: @unchecked Sendable {
             }
         }
         guard lock.withLock({ latest?.id == hover.id }) else { return }
+        let trace = "window=\(hover.id) text=\(text) roles=\(roles.joined(separator: ","))"
+        if trace != lastTrace {
+            lastTrace = trace
+            Log.general.notice("cursor: \(trace, privacy: .public)")
+        }
         emit(.cursorShape(id: hover.id, text: text, rect: region, ts: hover.ts))
     }
 }

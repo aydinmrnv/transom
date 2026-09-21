@@ -82,7 +82,7 @@ public actor WindowBrowser {
                 guard win.role == kAXWindowRole as String,
                     let frame = win.frame(), frame.width > 1, frame.height > 1 else { continue }
                 let match = Self.matchIndex(title: win.title, frame: frame, choices: scWindows.map { ($0.title ?? "", $0.frame) })
-                guard match != nil || [kAXStandardWindowSubrole as String, kAXDialogSubrole as String].contains(win.subrole) else { continue }
+                guard match != nil || (win.isMinimized && [kAXStandardWindowSubrole as String, kAXDialogSubrole as String].contains(win.subrole)) else { continue }
                 let id = registry.id(for: win.element).id
                 let title = win.title.isEmpty || win.title == app.name ? app.name : "\(app.name) — \(win.title)"
                 next[id] = Candidate(element: win.element, capture: match.map { scWindows[$0] },
