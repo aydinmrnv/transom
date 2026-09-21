@@ -793,8 +793,22 @@ chrome reaches the window edge. Six-DIP edges and larger corner targets resize;
 the clear strip above toolbar controls drags locally, as does Alt+drag anywhere.
 App toolbar controls remain remote input. A final resize request carries a token;
 only its matching actual-geometry acknowledgement settles the local viewport.
-Older live updates cannot pull it backwards after release. Maximized windows
-stay maximized when the Mac clamps geometry, with native pixels letterboxed.
+Older live updates cannot pull it backwards after release. The host also sends
+conservative resize bounds so native drags stop before hitting a neighboring
+tile. Maximized windows retain their restore placement while fitting an actual
+Mac clamp; no intermediate SW_RESTORE or resize feedback loop is needed.
 
 This supersedes the 0.4.0 caption choice and captured-cursor design above.
-Runtime verification for this revision is recorded after the target-machine test.
+Verified on the M1 Max host and RTX 5090 PC at 200% Windows scaling: the installed
+0.4.6 pair showed one local cursor and no Windows caption. Dragging changed the
+local origin from (40,40) to (180,162) without changing the source or sending a
+resize. Final requests 1586x1686 and 1456x1756 both received exact actual-size
+acknowledgements. Maximizing requested 1586x2064; macOS returned 1586x1958, and
+the viewport settled to that size without the previous blank strip. Restore
+returned to the previous local position. Clicks, typing and Ctrl+W worked.
+The moving scene held approximately 55 fps with 0.3–0.5 ms decode means.
+83 Windows tests (including hardware tests) and 88 Swift tests passed.
+The optional synthetic benchmark was not rerun. Exact client/swapchain equality
+at 100%, 150% and 200%, and cross-monitor dragging, were not instrumented in this
+pass; geometry helper tests cover 96/144/192 DPI. Cursor-shape transmission and
+the fixed shared-display capacity remain limitations.

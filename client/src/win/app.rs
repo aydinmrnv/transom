@@ -749,11 +749,9 @@ impl App {
             let outer =
                 super::frame::outer_size(source.w, source.h, super::dpi::dpi_for_window(hwnd));
             unsafe {
-                // A maximized viewport stays maximized even if the Mac clamps
-                // the size. Native pixels are letterboxed, never stretched.
-                if IsZoomed(hwnd).as_bool() {
-                    return;
-                }
+                // Keep the maximized state and restore placement, but fit the
+                // actual Mac size if its app/Dock imposes a tighter limit. Do
+                // not SW_RESTORE here: that causes an intermediate resize echo.
                 let _ = SetWindowPos(
                     hwnd,
                     None,
