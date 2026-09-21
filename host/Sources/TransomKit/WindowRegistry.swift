@@ -32,6 +32,7 @@ public final class WindowRegistry: @unchecked Sendable {
     private var idByElement: [ElementKey: UInt64] = [:]
     private var elementByID: [UInt64: AXUIElement] = [:]
     private var entries: [UInt64: Entry] = [:]
+    private var captureIDs: [UInt64: CGWindowID] = [:]
 
     public init() {}
 
@@ -70,7 +71,15 @@ public final class WindowRegistry: @unchecked Sendable {
     }
 
     public func unshare(id: UInt64) {
-        lock.withLock { entries[id] = nil }
+        lock.withLock { entries[id] = nil; captureIDs[id] = nil }
+    }
+
+    public func setCaptureID(_ captureID: CGWindowID, for id: UInt64) {
+        lock.withLock { captureIDs[id] = captureID }
+    }
+
+    public func captureID(for id: UInt64) -> CGWindowID? {
+        lock.withLock { captureIDs[id] }
     }
 
     public func updateRect(id: UInt64, rect: WireRect) {
@@ -89,6 +98,7 @@ public final class WindowRegistry: @unchecked Sendable {
             idByElement[key] = nil
             elementByID[id] = nil
             entries[id] = nil
+            captureIDs[id] = nil
             return id
         }
     }

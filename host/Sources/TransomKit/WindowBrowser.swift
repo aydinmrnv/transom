@@ -184,6 +184,7 @@ public actor WindowBrowser {
             }
         }
         let old = registry.entry(for: id)
+        if let capture = candidate.capture { registry.setCaptureID(capture.windowID, for: id) }
         registry.record(id: id, rect: rect, title: candidate.info.title)
         if old == nil { await server.broadcast(.created(id: id, rect: rect, title: candidate.info.title)) }
         else {

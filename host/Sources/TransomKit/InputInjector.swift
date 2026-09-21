@@ -56,13 +56,17 @@ public final class InputInjector: @unchecked Sendable {
     /// Drop all modifier state. Called when a client disconnects so a ⌘ left held
     /// by a dropped session cannot wedge into the next one.
     public func resetModifiers() {
-        lock.withLock { modifiers.reset() }
+        lock.withLock { modifiers.reset(); mouseButtonsDown.removeAll() }
     }
 
     // MARK: - Injection
 
     public func inject(id: UInt64, event: InputEvent, ts: UInt64) {
         lock.withLock {
+            guard registry.entry(for: id) != nil else {
+                trace("input id=\(id): window is not shared, dropped")
+                return
+            }
             switch event {
             case .mouseDown(let x, let y, let button):
                 postMouse(id: id, x: x, y: y, button: button, down: true, ts: ts)
@@ -73,9 +77,9 @@ public final class InputInjector: @unchecked Sendable {
             case .scroll(let x, let y, let dx, let dy):
                 postScroll(id: id, x: x, y: y, dx: dx, dy: dy, ts: ts)
             case .keyDown(let vk):
-                postKey(vk: vk, down: true, ts: ts)
+                postKey(id: id, vk: vk, down: true, ts: ts)
             case .keyUp(let vk):
-                postKey(vk: vk, down: false, ts: ts)
+                postKey(id: id, vk: vk, down: false, ts: ts)
             }
         }
     }
@@ -155,7 +159,7 @@ public final class InputInjector: @unchecked Sendable {
             return
         }
         event.flags = flags
-        event.post(tap: .cghidEventTap)
+        post(event, to: id, pointer: true)
         traceChain(
             id: id, label: down ? "mouseDown" : "mouseUp",
             x: x, y: y, point: point,
@@ -186,7 +190,7 @@ public final class InputInjector: @unchecked Sendable {
                 mouseButton: cgButton)
         else { return }
         event.flags = flags
-        event.post(tap: .cghidEventTap)
+        post(event, to: id, pointer: true)
         traceChain(
             id: id, label: dragButton == nil ? "mouseMove" : "mouseDrag",
             x: x, y: y, point: point, extra: "flags=\(describe(flags))", ts: ts)
@@ -203,7 +207,7 @@ public final class InputInjector: @unchecked Sendable {
         else { return }
         event.location = point
         event.flags = modifiers.flags(using: modifierMap)
-        event.post(tap: .cghidEventTap)
+        post(event, to: id, pointer: true)
         traceChain(
             id: id, label: "scroll", x: x, y: y, point: point, extra: "dx=\(dx) dy=\(dy)", ts: ts)
     }
@@ -221,12 +225,12 @@ public final class InputInjector: @unchecked Sendable {
     // MARK: - Keyboard
 
     /// Assumes `lock` is held.
-    private func postKey(vk: UInt32, down: Bool, ts: UInt64) {
+    private func postKey(id: UInt64, vk: UInt32, down: Bool, ts: UInt64) {
         // Modifiers are tracked, not posted: their state is stamped onto the
         // events that follow (issue #7). `apply` returns true iff `vk` is one.
         if modifiers.apply(vk: vk, down: down) {
             traceChain(
-                id: 0, label: down ? "modDown" : "modUp", x: 0, y: 0, point: nil,
+                id: id, label: down ? "modDown" : "modUp", x: 0, y: 0, point: nil,
                 extra: "vk=0x\(hex(vk)) held=\(describeHeld())", ts: ts)
             return
         }
@@ -246,9 +250,9 @@ public final class InputInjector: @unchecked Sendable {
             return
         }
         event.flags = flags
-        event.post(tap: .cghidEventTap)
+        post(event, to: id, pointer: false)
         traceChain(
-            id: 0, label: down ? "keyDown" : "keyUp", x: 0, y: 0, point: nil,
+            id: id, label: down ? "keyDown" : "keyUp", x: 0, y: 0, point: nil,
             extra: "vk=0x\(hex(vk)) -> mac=0x\(hex(UInt32(keyCode))) flags=\(describe(flags))",
             ts: ts)
     }
@@ -271,20 +275,43 @@ public final class InputInjector: @unchecked Sendable {
 
     // MARK: - Focus / raise
 
+    /// A focus request is asynchronous and may be refused. Never route input
+    /// through the desktop's current z-order: independent captures can overlap.
+    private func post(_ event: CGEvent, to id: UInt64, pointer: Bool) {
+        guard let element = registry.element(for: id) else { return }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return }
+        Self.address(event, pid: pid, windowID: pointer ? registry.captureID(for: id) : nil)
+        event.postToPid(pid)
+    }
+
+    static func address(_ event: CGEvent, pid: pid_t, windowID: CGWindowID?) {
+        event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid))
+        if let windowID {
+            event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
+            event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
+        }
+    }
+
     /// Raise the window within its app, and bring the app frontmost if it is not
     /// already. AX raise is cheap and idempotent; app activation only fires when
     /// the frontmost app actually differs, so a click inside the already-front
     /// app does not thrash focus.
     private func raise(_ element: AXUIElement) -> (raised: Bool, activatedApp: Bool) {
-        let raiseErr = AXUIElementPerformAction(element, kAXRaiseAction as CFString)
         var pid: pid_t = 0
         var activated = false
         if AXUIElementGetPid(element, &pid) == .success {
             if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
-                NSRunningApplication(processIdentifier: pid)?.activate()
-                activated = true
+                let app = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(app, 0.08)
+                activated = AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
+                if !activated { activated = NSRunningApplication(processIdentifier: pid)?.activate() ?? false }
             }
         }
+        AXUIElementSetMessagingTimeout(element, 0.08)
+        AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        let raiseErr = AXUIElementPerformAction(element, kAXRaiseAction as CFString)
         return (raiseErr == .success, activated)
     }
 

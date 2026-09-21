@@ -250,11 +250,14 @@ The host does **not** synthesize repeats. Pick one, not both — this is the one
 ⌘). This is a **host-side policy**: the wire always carries raw Windows VK codes,
 so the client is unaffected by the choice and needs no changes if it flips.
 
-**Focus/raise.** `RequestFocus` raises the target Mac window (AX raise + activate
-its app). A `mouseDown` on a window that is not frontmost also raises it first, so
-the click lands in the right place. Raising changes the Mac's one frontmost app
-and key window; a client-"focused" window may still render unfocused until the
-raise happens (accepted, see issue #7 / invariants I-4).
+**Focus/raise.** `RequestFocus` and `mouseDown` request AX application activation,
+make the selected window main/focused, and raise it. Activation is not an input
+routing guarantee: windows can overlap and macOS may defer or refuse activation.
+Every mouse, scroll, and keyboard event is delivered directly to the process
+owning `id`, using `CGEvent.postToPid`. Independent-window pointer events also
+carry the selected capture window ID in both public window-under-pointer fields.
+Never fall back to global desktop hit testing when targeting fails. Input for a
+released or unknown window is discarded. The wire format does not change.
 
 ### Types
 

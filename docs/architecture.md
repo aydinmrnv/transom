@@ -868,3 +868,18 @@ dialogs remain selectable. The host no longer exposes unused tiling/preview
 settings. Installers can explicitly launch the host with `--start-sharing` to
 resume using saved settings and existing grants; ordinary launches still wait
 for Start sharing.
+
+### 0.4.9: input follows the independently captured window
+
+Independent capture exposed an old input assumption: AXRaise plus an app
+activation request was followed immediately by a global HID event. When Xcode
+was covered by Conductor, the latter could still win desktop hit testing and
+receive Xcode's click. Keyboard events also discarded their window ID.
+
+The host now posts directly to the selected process and stamps pointer/scroll
+events with the ScreenCaptureKit window ID retained in the registry. Focus uses
+AXFrontmost, AXMain, AXFocused and AXRaise, but event routing no longer depends
+on those requests completing before a click. Unsharing removes the capture ID,
+and all input requires an active registry entry. This uses the public
+[CGEvent.postToPid API](https://developer.apple.com/documentation/coregraphics/cgevent/posttopid(_:))
+and leaves the client protocol unchanged.
