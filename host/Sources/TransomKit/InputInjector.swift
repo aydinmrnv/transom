@@ -7,7 +7,7 @@ import Foundation
 /// #7, Phase 5). This is the impure half of input: the coordinate math
 /// (`Coordinates.axGlobalPoint`), the keycode table (`Keymap`) and the modifier
 /// tracking (`ModifierState`) are all pure and tested elsewhere — this type wires
-/// them to `CGEventPost` and `AXRaise`, which can only be exercised on the Mac
+/// them to `CGEvent.postToPid` and `AXRaise`, which can only be exercised on the Mac
 /// (I-7).
 ///
 /// **Threading.** `ControlServer` calls `handle` from its per-connection receive
@@ -35,8 +35,8 @@ public final class InputInjector: @unchecked Sendable {
         self.display = display
         self.registry = registry
         self.modifierMap = modifierMap
-        // A dedicated HID-level source. The host is headless with no local user
-        // (issue #7), so there is no real cursor or keyboard state to fight with.
+        // Use a dedicated event source; modifier flags are supplied explicitly
+        // from the client and delivery is addressed to the selected process.
         self.source = CGEventSource(stateID: .hidSystemState)
     }
 
@@ -136,8 +136,8 @@ public final class InputInjector: @unchecked Sendable {
             return
         }
 
-        // A click on a window that is not frontmost must raise it *before* the
-        // event lands, or the click goes to the wrong place (issue #7).
+        // Ask the app to focus this window so its key/main-window state follows
+        // the client. Delivery below is explicit even if activation is delayed.
         var raiseNote = ""
         if down, let element = registry.element(for: id) {
             let outcome = raise(element)

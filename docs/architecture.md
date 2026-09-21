@@ -885,3 +885,8 @@ on those requests completing before a click. Unsharing removes the capture ID,
 and all input requires an active registry entry. This uses the public
 [CGEvent.postToPid API](https://developer.apple.com/documentation/coregraphics/cgevent/posttopid(_:))
 and leaves the client protocol unchanged.
+
+The signed 0.4.9 host was installed on the Mac Studio. All 98 Swift tests passed,
+including selected-process/window metadata and routing-identity cleanup. These
+tests do not prove delivery through the macOS window server. The live overlap
+retest was stopped at the user's request before completion and remains pending.
