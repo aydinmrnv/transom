@@ -64,6 +64,34 @@ struct VideoServerTests {
         }
     }
 
+    @Test("two window streams retain independent configs and dependency chains")
+    func independentStreams() async throws {
+        let transport = RecordingVideoTransport()
+        let a = VideoServer(hvccProvider: { Data([11]) })
+        let b = VideoServer(hvccProvider: { Data([22]) })
+        let size = WireSize(w: 2600, h: 1800)
+        await a.attachShared(WindowPacketTransport(base: transport, id: 1, generation: 1, size: size))
+        await b.attachShared(WindowPacketTransport(base: transport, id: 2, generation: 2, size: size))
+        await a.send(frame(keyframe: true))
+        await b.send(frame(keyframe: true))
+        await a.attachShared(nil)
+        await a.send(frame(keyframe: false))
+        await b.send(frame(keyframe: false))
+        let packets = await transport.messages.compactMap(VideoWire.decode)
+        #expect(packets.count == 5)
+        #expect(packets[0] == .window(id: 1, generation: 1, size: size, message: .config(hvcc: Data([11]))))
+        #expect(packets[2] == .window(id: 2, generation: 2, size: size, message: .config(hvcc: Data([22]))))
+        if case .window(2, 2, _, .frame(_, _, false, _)) = packets[4] {} else {
+            Issue.record("Removing one window interrupted the other stream")
+        }
+        // A reconnect resets both configs independently.
+        await b.attachShared(WindowPacketTransport(base: transport, id: 2, generation: 2, size: size))
+        await b.send(frame(keyframe: false))
+        #expect(await transport.messages.count == 5)
+        await b.send(frame(keyframe: true))
+        #expect(await transport.messages.count == 7)
+    }
+
     @Test("frames cannot precede missing configuration")
     func waitsForConfig() async throws {
         let server = VideoServer(hvccProvider: { nil })

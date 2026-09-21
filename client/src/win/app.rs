@@ -600,6 +600,7 @@ impl App {
                 if replace {
                     match SourceTexture::new(&self.gpu, size.w, size.h) {
                         Ok(texture) => {
+                            eprintln!("window video: {id} texture {}x{}", size.w, size.h);
                             self.window_sources.insert(id, texture);
                         }
                         Err(error) => {

@@ -476,7 +476,7 @@ public final class HostSession: @unchecked Sendable {
                 self?.recordEncodedFrame(frame, formatSummary: summary)
             })
             windowVideo = hub
-            windowPreviews = await hub.previews
+            windowPreviews = hub.previews
             let listener = try SocketVideoListener(host: config.host, port: config.videoPort)
             videoListener = listener
             listener.start()

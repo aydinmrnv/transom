@@ -124,7 +124,7 @@ impl Proxy {
     }
 
     fn report_pixel_size(&self) {
-        if !self.checkerboard {
+        if !self.checkerboard && std::env::var_os("TRANSOM_GEOMETRY_TRACE").is_none() {
             return;
         }
         use windows::Win32::Foundation::RECT;

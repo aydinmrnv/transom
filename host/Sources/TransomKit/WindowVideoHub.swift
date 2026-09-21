@@ -86,6 +86,7 @@ public actor WindowVideoHub {
         do { try await cap.start() } catch { enc.finish(); sink.finish(); throw error }
         guard !stopped else { await cap.stop(); enc.finish(); sink.finish(); return }
         await remove(id: id)
+        guard !stopped else { await cap.stop(); enc.finish(); sink.finish(); return }
         nextGeneration += 1
         let stream = Stream(size: size, generation: nextGeneration, capture: cap, encoder: enc,
                             server: server, sink: sink, task: Task { for await frame in frames { await server.send(frame) } })
@@ -119,7 +120,7 @@ public actor WindowVideoHub {
     }
 }
 
-private struct WindowPacketTransport: PacketTransport {
+struct WindowPacketTransport: PacketTransport {
     let base: any PacketTransport
     let id: UInt64
     let generation: UInt64
@@ -128,8 +129,9 @@ private struct WindowPacketTransport: PacketTransport {
         try await base.send(VideoWire.encodeWindow(id: id, generation: generation, size: size, payload: payload))
     }
     func receiveFrame() async throws -> Data? { nil }
-    // Ending one window must not close other windows' transport.
-    func close() async {}
+    // VideoServer invokes close only on a failed socket write in shared mode.
+    // Normal window removal detaches its server without closing this transport.
+    func close() async { await base.close() }
 }
 
 public final class WindowPreviewCache: @unchecked Sendable {
