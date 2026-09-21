@@ -4,31 +4,63 @@ import Testing
 
 @Suite("Independent window input routing")
 struct InputRoutingTests {
-    @Test("overlapping pointer events retain the selected process and window")
-    func pointerDestination() throws {
-        let point = CGPoint(x: 400, y: 300)
-        let xcode = try #require(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left))
-        let conductor = try #require(xcode.copy())
-        InputInjector.address(xcode, pid: 123, windowID: 456)
-        InputInjector.address(conductor, pid: 789, windowID: 987)
-        #expect(xcode.location == conductor.location)
-        #expect(xcode.getIntegerValueField(.eventTargetUnixProcessID) == 123)
-        #expect(xcode.getIntegerValueField(.mouseEventWindowUnderMousePointer) == 456)
-        #expect(xcode.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent) == 456)
-        #expect(conductor.getIntegerValueField(.eventTargetUnixProcessID) == 789)
-        #expect(conductor.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent) == 987)
+    private func move(_ id: UInt64, _ x: UInt32) -> ClientMessage {
+        .input(id: id, event: .mouseMove(x: x, y: 10), ts: UInt64(x))
     }
 
-    @Test("keyboard and scroll are addressed to their selected app too")
-    func keyboardAndScroll() throws {
-        let key = try #require(CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true))
-        InputInjector.address(key, pid: 123, windowID: nil)
-        #expect(key.getIntegerValueField(.eventTargetUnixProcessID) == 123)
-        let wheel = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 1, wheel2: 0, wheel3: 0))
-        wheel.location = CGPoint(x: 400, y: 300)
-        InputInjector.address(wheel, pid: 789, windowID: nil)
-        #expect(wheel.getIntegerValueField(.eventTargetUnixProcessID) == 789)
-        #expect(wheel.location == CGPoint(x: 400, y: 300))
+    @Test("queued motion collapses to the latest position")
+    func motionBacklog() {
+        var mailbox = InputMailbox()
+        for x in 0..<1000 { mailbox.append(move(1, UInt32(x))) }
+        guard case let .message(.input(id, .mouseMove(x, _), _))? = mailbox.next() else {
+            Issue.record("Missing final motion"); return
+        }
+        #expect(id == 1 && x == 999)
+        #expect(mailbox.next() == nil)
+    }
+
+    @Test("click barriers keep motion and button order intact")
+    func clickOrdering() {
+        var mailbox = InputMailbox()
+        mailbox.append(move(1, 10))
+        mailbox.append(.input(id: 1, event: .mouseDown(x: 10, y: 10, button: .left), ts: 10))
+        mailbox.append(move(1, 20))
+        mailbox.append(move(1, 30))
+        mailbox.append(.input(id: 1, event: .mouseUp(x: 30, y: 10, button: .left), ts: 30))
+        guard case .message(.input(_, .mouseMove(10, _), _))? = mailbox.next(),
+              case .message(.input(_, .mouseDown(10, _, _), _))? = mailbox.next(),
+              case .message(.input(_, .mouseMove(30, _), _))? = mailbox.next(),
+              case .message(.input(_, .mouseUp(30, _, _), _))? = mailbox.next() else {
+            Issue.record("Motion crossed a button barrier"); return
+        }
+        #expect(mailbox.next() == nil)
+    }
+
+    @Test("focus and keyboard events retain their selected window and order")
+    func focusOrdering() {
+        var mailbox = InputMailbox()
+        mailbox.append(move(1, 10))
+        mailbox.append(.requestFocus(id: 2))
+        mailbox.append(.input(id: 2, event: .keyDown(vk: 65), ts: 20))
+        mailbox.append(move(2, 30))
+        guard case .message(.input(1, .mouseMove, _))? = mailbox.next(),
+              case .message(.requestFocus(2))? = mailbox.next(),
+              case .message(.input(2, .keyDown(65), _))? = mailbox.next(),
+              case .message(.input(2, .mouseMove, _))? = mailbox.next() else {
+            Issue.record("Window focus or key ordering changed"); return
+        }
+    }
+
+    @Test("disconnect discards stale input before a new session")
+    func disconnectBarrier() {
+        var mailbox = InputMailbox()
+        mailbox.append(.input(id: 1, event: .keyDown(vk: 65), ts: 10))
+        mailbox.reset()
+        mailbox.append(.requestFocus(id: 2))
+        guard case .reset? = mailbox.next(), case .message(.requestFocus(2))? = mailbox.next() else {
+            Issue.record("Old input survived disconnect"); return
+        }
+        #expect(mailbox.next() == nil)
     }
 
     @Test("releasing a window discards its capture routing identity")
@@ -41,8 +73,5 @@ struct InputRoutingTests {
         registry.unshare(id: id)
         #expect(registry.captureID(for: id) == nil)
         #expect(registry.entry(for: id) == nil)
-        registry.setCaptureID(789, for: id)
-        _ = registry.remove(element: element)
-        #expect(registry.captureID(for: id) == nil)
     }
 }

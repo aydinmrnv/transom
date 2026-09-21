@@ -179,5 +179,5 @@ fi
 
 if [[ "$TARGET" == "host" || "$TARGET" == "all" ]]; then
   build_bundle "one.nullstack.transom.host" "Transom Host" "TransomHostApp" \
-    "0.4.9" "15" "public.app-category.developer-tools"
+    "0.4.10" "16" "public.app-category.developer-tools"
 fi

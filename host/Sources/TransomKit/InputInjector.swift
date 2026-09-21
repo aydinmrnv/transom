@@ -7,13 +7,13 @@ import Foundation
 /// #7, Phase 5). This is the impure half of input: the coordinate math
 /// (`Coordinates.axGlobalPoint`), the keycode table (`Keymap`) and the modifier
 /// tracking (`ModifierState`) are all pure and tested elsewhere — this type wires
-/// them to `CGEvent.postToPid` and `AXRaise`, which can only be exercised on the Mac
+/// them to HID events and verified AX focus, which can only be exercised on the Mac
 /// (I-7).
 ///
 /// **Threading.** `ControlServer` calls `handle` from its per-connection receive
-/// loop, in message order. A lock serialises the mutable state (modifier + mouse
-/// button tracking) and the posting so events land in the order the client sent
-/// them; `@unchecked Sendable` is on that confinement, not to hide a race.
+/// loop, in message order. A serial worker keeps AX calls off the receive actor.
+/// Adjacent motion coalesces while clicks/keys retain order. Locks confine the
+/// mailbox and injection state, including the synchronous diagnostic CLI API.
 public final class InputInjector: @unchecked Sendable {
 
     private let display: DisplayInfo
@@ -21,10 +21,15 @@ public final class InputInjector: @unchecked Sendable {
     private let modifierMap: ModifierMap
     private let source: CGEventSource?
     private let lock = NSLock()
+    private let mailboxLock = NSLock()
+    private let deliveryQueue = DispatchQueue(label: "one.transom.input", qos: .userInteractive)
+    private var mailbox = InputMailbox()
+    private var draining = false
 
     // Mutable state, all under `lock`.
     private var modifiers = ModifierState()
     private var mouseButtonsDown: Set<MouseButton> = []
+    private var focusedID: UInt64?
 
     /// Optional human-readable trace of the full translation chain, one line per
     /// event. `serve --log-input` and the `inject` command wire this to `print`;
@@ -36,13 +41,39 @@ public final class InputInjector: @unchecked Sendable {
         self.registry = registry
         self.modifierMap = modifierMap
         // Use a dedicated event source; modifier flags are supplied explicitly
-        // from the client and delivery is addressed to the selected process.
+        // from the client. HID delivery follows verified target focus.
         self.source = CGEventSource(stateID: .hidSystemState)
     }
 
     /// Entry point from the control channel. Ignores messages that are not input
     /// (those are handled elsewhere — e.g. `requestResize`).
     public func handle(_ message: ClientMessage) {
+        enqueue(message)
+    }
+
+    private func enqueue(_ message: ClientMessage) {
+        let start = mailboxLock.withLock {
+            mailbox.append(message)
+            guard !draining else { return false }
+            draining = true
+            return true
+        }
+        if start { deliveryQueue.async { [self] in drain() } }
+    }
+
+    private func drain() {
+        while let work = mailboxLock.withLock({ () -> InputMailbox.Work? in
+            guard let work = mailbox.next() else { draining = false; return nil }
+            return work
+        }) {
+            switch work {
+            case .message(let message): deliver(message)
+            case .reset: lock.withLock { modifiers.reset(); mouseButtonsDown.removeAll(); focusedID = nil }
+            }
+        }
+    }
+
+    private func deliver(_ message: ClientMessage) {
         switch message {
         case .input(let id, let event, let ts):
             inject(id: id, event: event, ts: ts)
@@ -56,7 +87,13 @@ public final class InputInjector: @unchecked Sendable {
     /// Drop all modifier state. Called when a client disconnects so a ⌘ left held
     /// by a dropped session cannot wedge into the next one.
     public func resetModifiers() {
-        lock.withLock { modifiers.reset(); mouseButtonsDown.removeAll() }
+        let start = mailboxLock.withLock {
+            mailbox.reset()
+            guard !draining else { return false }
+            draining = true
+            return true
+        }
+        if start { deliveryQueue.async { [self] in drain() } }
     }
 
     // MARK: - Injection
@@ -88,14 +125,7 @@ public final class InputInjector: @unchecked Sendable {
     /// protocol.md §4 `RequestFocus`.
     public func requestFocus(id: UInt64) {
         lock.withLock {
-            guard let element = registry.element(for: id) else {
-                trace("requestFocus id=\(id): unknown window id")
-                return
-            }
-            let outcome = raise(element)
-            trace(
-                "requestFocus id=\(id): raised=\(outcome.raised) activatedApp=\(outcome.activatedApp)"
-            )
+            _ = prepareTarget(id: id)
         }
     }
 
@@ -136,15 +166,9 @@ public final class InputInjector: @unchecked Sendable {
             return
         }
 
-        // Ask the app to focus this window so its key/main-window state follows
-        // the client. Delivery below is explicit even if activation is delayed.
-        var raiseNote = ""
-        if down, let element = registry.element(for: id) {
-            let outcome = raise(element)
-            if outcome.activatedApp || outcome.raised {
-                raiseNote = " raised=\(outcome.raised) activatedApp=\(outcome.activatedApp)"
-            }
-        }
+        // Focus must be observed, not merely requested, before desktop hit testing.
+        if down && !prepareTarget(id: id) { return }
+        if !down && !mouseButtonsDown.contains(button) { return }
 
         if down { mouseButtonsDown.insert(button) } else { mouseButtonsDown.remove(button) }
 
@@ -159,16 +183,19 @@ public final class InputInjector: @unchecked Sendable {
             return
         }
         event.flags = flags
-        post(event, to: id, pointer: true)
+        event.post(tap: .cghidEventTap)
         traceChain(
             id: id, label: down ? "mouseDown" : "mouseUp",
             x: x, y: y, point: point,
-            extra: "button=\(button.rawValue) flags=\(describe(flags))\(raiseNote)",
+            extra: "button=\(button.rawValue) flags=\(describe(flags))",
             ts: ts)
     }
 
     /// Assumes `lock` is held.
     private func postMouseMove(id: UInt64, x: UInt32, y: UInt32, ts: UInt64) {
+        // Hovering an inactive PC view must not send motion to the app covering
+        // it on the Mac. Local cursor movement and AX cursor hints still work.
+        guard focusedID == id else { return }
         guard let point = axPoint(id: id, x: x, y: y, label: "mouseMove") else { return }
         // If a button is held this is a drag, which apps treat very differently
         // from a hover (text selection, window drags).
@@ -190,7 +217,7 @@ public final class InputInjector: @unchecked Sendable {
                 mouseButton: cgButton)
         else { return }
         event.flags = flags
-        post(event, to: id, pointer: true)
+        event.post(tap: .cghidEventTap)
         traceChain(
             id: id, label: dragButton == nil ? "mouseMove" : "mouseDrag",
             x: x, y: y, point: point, extra: "flags=\(describe(flags))", ts: ts)
@@ -198,6 +225,7 @@ public final class InputInjector: @unchecked Sendable {
 
     /// Assumes `lock` is held.
     private func postScroll(id: UInt64, x: UInt32, y: UInt32, dx: Int32, dy: Int32, ts: UInt64) {
+        guard prepareTarget(id: id) else { return }
         guard let point = axPoint(id: id, x: x, y: y, label: "scroll") else { return }
         // wheel1 = vertical, wheel2 = horizontal (CoreGraphics ordering).
         guard
@@ -207,10 +235,7 @@ public final class InputInjector: @unchecked Sendable {
         else { return }
         event.location = point
         event.flags = modifiers.flags(using: modifierMap)
-        // CoreGraphics ignores mouse-window fields on scroll-wheel events.
-        // Process-directed delivery keeps another overlapping app out of this
-        // path; the app resolves the supplied location within its own windows.
-        post(event, to: id, pointer: false)
+        event.post(tap: .cghidEventTap)
         traceChain(
             id: id, label: "scroll", x: x, y: y, point: point, extra: "dx=\(dx) dy=\(dy)", ts: ts)
     }
@@ -237,6 +262,7 @@ public final class InputInjector: @unchecked Sendable {
                 extra: "vk=0x\(hex(vk)) held=\(describeHeld())", ts: ts)
             return
         }
+        guard prepareTarget(id: id) else { return }
 
         guard let keyCode = Keymap.macKeyCode(forVK: vk) else {
             // Report unmapped keys rather than silently dropping them (issue #7).
@@ -253,7 +279,7 @@ public final class InputInjector: @unchecked Sendable {
             return
         }
         event.flags = flags
-        post(event, to: id, pointer: false)
+        event.post(tap: .cghidEventTap)
         traceChain(
             id: id, label: down ? "keyDown" : "keyUp", x: 0, y: 0, point: nil,
             extra: "vk=0x\(hex(vk)) -> mac=0x\(hex(UInt32(keyCode))) flags=\(describe(flags))",
@@ -278,44 +304,40 @@ public final class InputInjector: @unchecked Sendable {
 
     // MARK: - Focus / raise
 
-    /// A focus request is asynchronous and may be refused. Never route input
-    /// through the desktop's current z-order: independent captures can overlap.
-    private func post(_ event: CGEvent, to id: UInt64, pointer: Bool) {
-        guard let element = registry.element(for: id) else { return }
+    /// CGEvent.postToPid accepts event metadata without ensuring AppKit/Electron
+    /// deliver the event. Use the normal HID path only after focus readback.
+    private func prepareTarget(id: UInt64) -> Bool {
+        guard registry.entry(for: id) != nil, let element = registry.element(for: id) else { return false }
         var pid: pid_t = 0
-        guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return }
-        Self.address(event, pid: pid, windowID: pointer ? registry.captureID(for: id) : nil)
-        event.postToPid(pid)
-    }
-
-    static func address(_ event: CGEvent, pid: pid_t, windowID: CGWindowID?) {
-        event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid))
-        if let windowID {
-            event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
-            event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
+        guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return false }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.04)
+        AXUIElementSetMessagingTimeout(element, 0.04)
+        func ready() -> Bool {
+            var frontmost: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(app, kAXFrontmostAttribute as CFString, &frontmost) == .success,
+                  let frontmost, CFEqual(frontmost, kCFBooleanTrue) else { return false }
+            var focused: CFTypeRef?
+            return AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &focused) == .success
+                && focused.map { CFEqual($0, element) } == true
         }
-    }
-
-    /// Raise the window within its app, and bring the app frontmost if it is not
-    /// already. AX raise is cheap and idempotent; app activation only fires when
-    /// the frontmost app actually differs, so a click inside the already-front
-    /// app does not thrash focus.
-    private func raise(_ element: AXUIElement) -> (raised: Bool, activatedApp: Bool) {
-        var pid: pid_t = 0
-        var activated = false
-        if AXUIElementGetPid(element, &pid) == .success {
-            if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
-                let app = AXUIElementCreateApplication(pid)
-                AXUIElementSetMessagingTimeout(app, 0.08)
-                activated = AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
-                if !activated { activated = NSRunningApplication(processIdentifier: pid)?.activate() ?? false }
-            }
-        }
-        AXUIElementSetMessagingTimeout(element, 0.08)
+        if ready() { focusedID = id; return true }
+        let start = ProcessInfo.processInfo.systemUptime
+        let activated = AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        if activated != .success { _ = NSRunningApplication(processIdentifier: pid)?.activate() }
         AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
-        AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        let raiseErr = AXUIElementPerformAction(element, kAXRaiseAction as CFString)
-        return (raiseErr == .success, activated)
+        let raised = AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+        repeat {
+            if ready() {
+                focusedID = id
+                trace("focus id=\(id) verified=true elapsedMs=\(Int((ProcessInfo.processInfo.systemUptime - start) * 1000))")
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.005)
+        } while ProcessInfo.processInfo.systemUptime - start < 0.15
+        trace("focus id=\(id) verified=false activate=\(activated.rawValue) raise=\(raised.rawValue); input dropped")
+        focusedID = nil
+        return false
     }
 
     // MARK: - Tracing

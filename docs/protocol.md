@@ -250,16 +250,16 @@ The host does **not** synthesize repeats. Pick one, not both — this is the one
 ⌘). This is a **host-side policy**: the wire always carries raw Windows VK codes,
 so the client is unaffected by the choice and needs no changes if it flips.
 
-**Focus/raise.** `RequestFocus` and `mouseDown` request AX application activation,
-make the selected window main/focused, and raise it. Activation is not an input
-routing guarantee: windows can overlap and macOS may defer or refuse activation.
-Every mouse, scroll, and keyboard event is delivered directly to the process
-owning `id`, using `CGEvent.postToPid`. Independent-window mouse events also
-carry the selected capture window ID in both public window-under-pointer fields.
-Scroll-wheel events use the target process and location; CoreGraphics ignores
-the mouse-specific window fields on that event type.
-Never fall back to global desktop hit testing when targeting fails. Input for a
-released or unknown window is discarded. The wire format does not change.
+**Focus/raise.** Before a click, scroll, or non-modifier key, the host reads back
+the selected app's `AXFrontmost` and `AXFocusedWindow`. If needed it activates
+the app, makes the window main and raises it, then waits briefly for readback.
+Only verified focus permits normal HID event delivery. A refused focus request
+drops the action instead of clicking an overlapping app. `CGEvent.postToPid`
+is not used: it accepted metadata but failed real Xcode clicks on the target Mac.
+Input runs on a serial worker independent of network receive; adjacent motion
+coalesces without crossing click/key/focus barriers. Inactive-window motion and
+input for released or unknown windows are discarded. Disconnect clears queued
+input before the next session. The wire format does not change.
 
 ### Types
 
