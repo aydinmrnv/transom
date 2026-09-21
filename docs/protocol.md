@@ -340,8 +340,12 @@ The client waits for a keyframe on connect and after a compressed-queue overrun.
 Encoded deltas retain their order in a bounded queue; replacing arbitrary
 compressed frames breaks reference dependencies. Sequence numbers are assigned
 before the host's sending queue, so a gap causes it to suppress dependent deltas
-and request a new keyframe. The client's three-frame queue also requests recovery
+and request a new keyframe. The client's 8-frame/50-ms queue also requests recovery
 when it discards a dependency chain. Decoded frames may be dropped freely.
+The network reader feeds the decoder directly, independently of the Windows UI
+pump. When a fresh burst fills the queue, the reader briefly waits for the
+decoder to consume frames. This wait never holds the UI state lock. A backlog
+older than 50 ms triggers keyframe recovery instead of accumulating delay.
 Older Mac hosts can delay the next keyframe on an idle display; update
 the host to receive the connection-triggered refresh behavior.
 
@@ -350,6 +354,9 @@ D3D11 device through an `IMFDXGIDeviceManager`. NV12 decode surfaces are copied
 on the GPU and converted with a native-resolution BT.709 shader. An NV12 CPU
 fallback is retained for other decoders; full-frame CPU conversion is avoided.
 The host requests 420v/BT.709 directly from ScreenCaptureKit in this mode.
+Its RGB capture color space is sRGB to match the Windows presentation surface.
+The Mac video listener uses standard kernel TCP; control/discovery retain
+Network.framework. This changes no port, framing or video message fields.
 
 Rect metadata lives on the **control** channel, not in the frame header; the
 client correlates by timestamp.

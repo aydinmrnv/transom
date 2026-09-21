@@ -166,7 +166,7 @@ public final class HostSession: @unchecked Sendable {
     private var watchers: [WindowWatcher] = []
     private var watcherRunLoop: CFRunLoop?
     private var controlListener: TCPListener?
-    private var videoListener: TCPListener?
+    private var videoListener: SocketVideoListener?
     private var controlServer: ControlServer?
     private var videoServer: VideoServer?
     private var capture: DisplayCapture?
@@ -444,7 +444,7 @@ public final class HostSession: @unchecked Sendable {
                 cap?.requestRefresh()
             }
         }
-        let listener = try TCPListener(host: config.host, port: config.videoPort, label: "video")
+        let listener = try SocketVideoListener(host: config.host, port: config.videoPort)
         self.videoListener = listener
 
         let (frames, frameSink) = AsyncStream.makeStream(
@@ -465,7 +465,7 @@ public final class HostSession: @unchecked Sendable {
         }
         try await cap.start()
 
-        try await listener.start()
+        listener.start()
         tasks.append(Task { await videoServer.serve(listener: listener) })
         tasks.append(Task { for await f in frames { await videoServer.send(f) } })
         tasks.append(Task {

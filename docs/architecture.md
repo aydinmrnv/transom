@@ -708,6 +708,30 @@ suppresses deltas until a fresh keyframe. Client overflow/error recovery also
 requests a keyframe and an idle refresh. The Mac captures NV12/BT.709 directly
 and reduces only its selector preview before CPU readback.
 
+Live testing on the M1 Max and RTX 5090 exposed a second bottleneck. The
+Network.framework video connection degraded to 6.45 fps: all 420 received frames
+over 65 seconds were keyframes, with repeated TCP retransmissions visible in a
+header-only packet trace. A standard socket relay of the same stream sustained
+55.1 fps over 40 seconds with zero sequence gaps (20 periodic keyframes in 2,205
+frames). The video listener now uses kernel TCP with the same length-prefixed
+wire format. Dedicated read/write queues keep socket waits off capture and actor
+executors; shutdown interrupts both directions before descriptor destruction.
+Control and Bonjour continue to use Network.framework.
+
+The installed 0.4.5 pair sustained about 55 fps at 3840×2160 on a moving browser
+test scene. Five-second decode means ranged from 0.4–2.5 ms, and host sends averaged about
+0.22 ms. This is delivered/decoded frame rate, not measured input-to-photon
+latency. The optional VideoToolbox low-latency rate-control specification was
+tested and rejected: it reduced capture/encode throughput to about 34 fps on
+this Mac. Hardware encoding retains RealTime and disabled frame reordering.
+
+Video packets now reach the decoder directly from its network reader. A short
+burst waits for room in the eight-frame compressed queue, outside the UI state
+lock; a queue older than 50 ms still recovers at a keyframe. Native window
+movement, remote key input and disconnect were exercised on the installed PC
+build. These checks do not establish all-monitor 100%/150%/200% DPI behavior or
+Parsec latency parity; those remain separate measurements.
+
 | Decision | Rationale |
 |---|---|
 | Virtual display as sprite sheet, one stream | One encoder, no occlusion, popups free, no cold start (3) |

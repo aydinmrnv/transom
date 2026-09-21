@@ -1,6 +1,8 @@
 //! HEVC decoding on an MTA worker. Convert the wire's hvcC/length-prefixed
 //! samples to Annex B here, without changing the network protocol.
 use crate::hevc::HevcConfig;
+use crate::session::VideoEvent;
+use crate::wire::Size;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -15,8 +17,82 @@ use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
 };
 
-const MAX_PENDING_FRAMES: usize = 3;
+// TCP can deliver a short burst even when decoding is fast.
+// Bound latency by age as well as count, without discarding every such burst.
+const MAX_PENDING_FRAMES: usize = 8;
 const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
+
+/// The network reader submits directly; the UI only polls completed surfaces.
+/// Holding this lock never performs decoding, rendering or a network write.
+#[derive(Clone, Default)]
+pub struct VideoDecoder {
+    state: Arc<Mutex<VideoDecoderState>>,
+}
+#[derive(Default)]
+struct VideoDecoderState {
+    worker: Option<Arc<DecoderWorker>>,
+    error: Option<String>,
+    received: u64,
+}
+pub struct VideoUpdate {
+    pub frame: Option<DecodedFrame>,
+    pub error: Option<String>,
+    pub request_keyframe: bool,
+    pub received: u64,
+}
+impl VideoDecoder {
+    pub fn receive(&self, size: Size, event: VideoEvent, device: &ID3D11Device) {
+        match event {
+            VideoEvent::Config { hvcc } => {
+                let worker = DecoderWorker::start(hvcc, size.w, size.h, Some(device.clone()));
+                // Drop/join a superseded worker outside the shared-state lock.
+                let previous = {
+                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let previous = state.worker.take();
+                    match worker {
+                        Ok(worker) => state.worker = Some(Arc::new(worker)),
+                        Err(error) => {
+                            state.error = Some(format!("Cannot start video decoder: {error}"))
+                        }
+                    }
+                    previous
+                };
+                drop(previous);
+            }
+            VideoEvent::Frame {
+                data,
+                keyframe,
+                pts_micros,
+                ..
+            } => {
+                let worker = {
+                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state.received += 1;
+                    state.worker.clone()
+                };
+                if let Some(worker) = worker {
+                    worker.submit(data, keyframe, pts_micros);
+                }
+            }
+        }
+    }
+
+    pub fn poll(&self) -> VideoUpdate {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut update = VideoUpdate {
+            frame: None,
+            error: state.error.take(),
+            request_keyframe: false,
+            received: state.received,
+        };
+        if let Some(worker) = &state.worker {
+            update.frame = worker.take_frame();
+            update.error = update.error.or_else(|| worker.take_error());
+            update.request_keyframe = worker.take_keyframe_request();
+        }
+        update
+    }
+}
 
 pub enum DecodedFrame {
     CpuNv12 {
@@ -53,7 +129,20 @@ impl PendingInput {
         let mut request_keyframe = false;
         if self.frames.len() >= MAX_PENDING_FRAMES
             || self.bytes + frame.data.len() > MAX_PENDING_BYTES
+            || self
+                .frames
+                .front()
+                .map(|f| f.queued.elapsed().as_millis() > 50)
+                .unwrap_or(false)
         {
+            eprintln!(
+                "video backlog: {} frames, {:.1} ms old",
+                self.frames.len(),
+                self.frames
+                    .front()
+                    .map(|f| f.queued.elapsed().as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0)
+            );
             self.frames.clear();
             self.bytes = 0;
             self.awaiting_keyframe = true;
@@ -140,7 +229,9 @@ impl DecoderWorker {
                             if pending.stopped {
                                 break;
                             }
-                            pending.pop().expect("queue checked above")
+                            let frame = pending.pop().expect("queue checked above");
+                            ready.notify_all();
+                            frame
                         };
                         if recover && !encoded.keyframe {
                             continue;
@@ -200,6 +291,7 @@ impl DecoderWorker {
                 pending.stopped = true;
                 pending.frames.clear();
                 pending.bytes = 0;
+                worker_input.1.notify_all();
             })?;
         Ok(Self {
             input,
@@ -210,17 +302,33 @@ impl DecoderWorker {
         })
     }
     pub fn submit(&self, data: Vec<u8>, keyframe: bool, pts_micros: u64) {
+        let queued = Instant::now();
         let (lock, ready) = &*self.input;
-        let dropped_chain = lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(EncodedFrame {
-                data,
-                keyframe,
-                pts_micros,
-                reset: false,
-                queued: Instant::now(),
-            });
+        let mut pending = lock.lock().unwrap_or_else(|e| e.into_inner());
+        // TCP may coalesce many tiny delta frames into one read. Give the
+        // decoder time to consume that burst instead of destroying a healthy
+        // reference chain in a single network-thread scheduling quantum.
+        // This wait runs only on the dedicated video reader, never the UI.
+        while !pending.stopped
+            && pending.frames.len() >= MAX_PENDING_FRAMES
+            && pending
+                .frames
+                .front()
+                .is_some_and(|f| f.queued.elapsed().as_millis() <= 50)
+        {
+            pending = ready
+                .wait_timeout(pending, std::time::Duration::from_millis(1))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        let dropped_chain = pending.push(EncodedFrame {
+            data,
+            keyframe,
+            pts_micros,
+            reset: false,
+            queued,
+        });
+        drop(pending);
         if dropped_chain {
             self.keyframe_request.store(true, Ordering::Release);
         }
@@ -243,7 +351,7 @@ impl Drop for DecoderWorker {
             let mut pending = lock.lock().unwrap_or_else(|e| e.into_inner());
             pending.stopped = true;
             pending.frames.clear();
-            ready.notify_one();
+            ready.notify_all();
         }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -887,6 +995,23 @@ mod tests {
         queue.push(encoded(10, false));
         assert!(queue.pop().is_none());
         queue.push(encoded(11, true));
+        assert!(queue.pop().unwrap().reset);
+    }
+    #[test]
+    fn short_network_bursts_preserve_dependencies_but_stale_backlogs_recover() {
+        let mut queue = PendingInput::default();
+        for n in 0..MAX_PENDING_FRAMES {
+            assert!(!queue.push(encoded(n as u64, n == 0)));
+        }
+        for n in 0..MAX_PENDING_FRAMES {
+            assert_eq!(queue.pop().unwrap().pts_micros, n as u64);
+        }
+        let mut stale = encoded(20, false);
+        stale.queued = Instant::now() - std::time::Duration::from_millis(60);
+        queue.push(stale);
+        assert!(queue.push(encoded(21, false)));
+        assert!(queue.pop().is_none());
+        queue.push(encoded(22, true));
         assert!(queue.pop().unwrap().reset);
     }
     #[test]

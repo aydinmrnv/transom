@@ -10,12 +10,17 @@ import Foundation
 /// because an `hvc1` stream is undecodable without them.
 public actor VideoServer {
     private var active: (id: UUID, transport: any PacketTransport)?
+    private var streamingActivity: NSObjectProtocol?
     private var stopped = false
     var hasClient: Bool { active != nil }
     private var sentConfig = false
     private var waitingForKeyframe = true
     private var seq: UInt64 = 0
     private var lastEncodedSequence: UInt64?
+    private var reportStart = DispatchTime.now().uptimeNanoseconds
+    private var reportFrames = 0
+    private var reportSendNanos: UInt64 = 0
+    private var reportMaxSendNanos: UInt64 = 0
     private let hvccProvider: @Sendable () -> Data?
     private let requestKeyframe: @Sendable () -> Void
 
@@ -35,7 +40,7 @@ public actor VideoServer {
         self.onConnectionChange = handler
     }
 
-    public func serve(listener: TCPListener) async {
+    public func serve(listener: SocketVideoListener) async {
         for await transport in listener.connections {
             await serveConnection(transport)
         }
@@ -48,9 +53,17 @@ public actor VideoServer {
         }
         let connectionID = UUID()
         active = (connectionID, transport)
+        endStreamingActivity()
+        streamingActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+            reason: "Streaming Mac windows to Transom")
         sentConfig = false
         waitingForKeyframe = true
         lastEncodedSequence = nil
+        reportStart = DispatchTime.now().uptimeNanoseconds
+        reportFrames = 0
+        reportSendNanos = 0
+        reportMaxSendNanos = 0
         Log.encode.notice("video: client connected")
         onConnectionChange?(true)
         // The client sends nothing on this channel; the receive loop just detects
@@ -63,6 +76,7 @@ public actor VideoServer {
         Log.encode.notice("video: client disconnected")
         if active?.id == connectionID {
             active = nil
+            endStreamingActivity()
             onConnectionChange?(false)
         }
         await transport.close()
@@ -73,6 +87,7 @@ public actor VideoServer {
         stopped = true
         guard let active else { return }
         self.active = nil
+        endStreamingActivity()
         onConnectionChange?(false)
         await active.transport.close()
     }
@@ -91,6 +106,7 @@ public actor VideoServer {
             lastEncodedSequence = sequence
         }
         guard !waitingForKeyframe || frame.isKeyframe else { return }
+        let sendStart = DispatchTime.now().uptimeNanoseconds
         do {
             if !sentConfig {
                 guard let hvcc = hvccProvider() else { return }
@@ -105,12 +121,35 @@ public actor VideoServer {
                 VideoWire.encodeFrame(
                     seq: frame.sequence ?? seq, ptsMicros: ptsMicros, keyframe: frame.isKeyframe, data: frame.data))
             seq += 1
+            let now = DispatchTime.now().uptimeNanoseconds
+            let elapsed = now - sendStart
+            reportFrames += 1
+            reportSendNanos += elapsed
+            reportMaxSendNanos = max(reportMaxSendNanos, elapsed)
+            if now - reportStart >= 5_000_000_000 {
+                let fps = Double(reportFrames) * 1_000_000_000 / Double(now - reportStart)
+                let mean = Double(reportSendNanos) / Double(reportFrames) / 1_000_000
+                let maximum = Double(reportMaxSendNanos) / 1_000_000
+                Log.encode.notice("video performance: \(fps) sent fps, send mean \(mean) ms, max \(maximum) ms")
+                reportStart = now
+                reportFrames = 0
+                reportSendNanos = 0
+                reportMaxSendNanos = 0
+            }
         } catch {
             if self.active?.id == active.id {
                 self.active = nil
+                endStreamingActivity()
                 onConnectionChange?(false)
             }
             await active.transport.close()
+        }
+    }
+
+    private func endStreamingActivity() {
+        if let streamingActivity {
+            ProcessInfo.processInfo.endActivity(streamingActivity)
+            self.streamingActivity = nil
         }
     }
 }

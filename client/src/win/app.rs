@@ -35,7 +35,7 @@ use super::connect::{Action, Dashboard};
 use super::gpu::{Gpu, SourceTexture};
 use crate::connections::Connection;
 use std::sync::mpsc::{self, Receiver};
-type ConnectResult = Result<(Connection, Session, Receiver<SessionEvent>), String>;
+type ConnectResult = Result<(Connection, Session, Receiver<SessionEvent>, VideoDecoder), String>;
 use super::input;
 use super::proxy::Proxy;
 use crate::model::{ModelEvent, Window};
@@ -47,7 +47,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 #[cfg(windows)]
-use super::decode::DecoderWorker;
+use super::decode::VideoDecoder;
 
 struct NativeEvent {
     hwnd: HWND,
@@ -88,7 +88,7 @@ pub struct App {
     windows: HashMap<u64, Window>,
     hwnd_to_id: HashMap<isize, u64>,
     source: Option<SourceTexture>,
-    decoder: Option<DecoderWorker>,
+    decoder: Option<VideoDecoder>,
     vds: Option<Size>,
     cascade: u32,
     /// Latest unsent hover move per proxy. High-polling-rate mice can emit far
@@ -170,6 +170,7 @@ impl App {
             .set_status(&format!("Connecting to {}…", connection.name), true);
         let (tx, rx) = mpsc::channel();
         self.connecting = Some(rx);
+        let device = self.gpu.device.clone();
         std::thread::spawn(move || {
             let result = (|| {
                 // Rediscover saved Bonjour identities before using an endpoint:
@@ -183,13 +184,18 @@ impl App {
                             "Mac is offline or not sharing. Open Transom Host and press Start.",
                         )?;
                 }
-                let (session, events) = Session::connect(
+                let decoder = VideoDecoder::default();
+                let input = decoder.clone();
+                let (session, events) = Session::connect_with_video(
                     &connection.host,
                     connection.control_port,
                     connection.video_port,
+                    Some(Box::new(move |size, event| {
+                        input.receive(size, event, &device)
+                    })),
                 )
                 .map_err(|e| e.to_string())?;
-                Ok((connection, session, events))
+                Ok((connection, session, events, decoder))
             })();
             // If the user cancelled, dropping the failed delivery closes sockets.
             let _ = tx.send(result);
@@ -247,11 +253,12 @@ impl App {
         if let Some(result) = result {
             self.connecting = None;
             match result {
-                Ok((c, session, rx)) => {
+                Ok((c, session, rx, decoder)) => {
                     self.cfg.host = c.host.clone();
                     self.cfg.control_port = c.control_port;
                     self.cfg.video_port = c.video_port;
                     self.selected = Some(c.clone());
+                    self.decoder = Some(decoder);
                     self.session = Some(session);
                     self.rx = Some(rx);
                     self.reconnect_at = None;
@@ -462,73 +469,37 @@ impl App {
         );
     }
 
-    fn apply_video(&mut self, v: VideoEvent) {
-        match v {
-            VideoEvent::Config { hvcc } => {
-                if let Some(vds) = self.vds {
-                    match DecoderWorker::start(hvcc, vds.w, vds.h, Some(self.gpu.device.clone())) {
-                        Ok(d) => self.decoder = Some(d),
-                        Err(e) => {
-                            self.video_notice = Some(format!("Cannot start video decoder: {e}"));
-                            self.update_status();
-                        }
-                    }
-                }
-            }
-            VideoEvent::Frame {
-                data,
-                keyframe,
-                pts_micros,
-                ..
-            } => {
-                self.video_in += 1;
-                if self.video_in <= 3 {
-                    eprintln!(
-                        "video: access unit {} ({} bytes, keyframe={keyframe})",
-                        self.video_in,
-                        data.len()
-                    );
-                }
-                if let Some(decoder) = self.decoder.as_ref() {
-                    decoder.submit(data, keyframe, pts_micros);
-                }
-                // A newly connected client must wait for a complete keyframe.
-                // Preserve any more specific error reported by the worker.
-                if !self.warned_no_decode
-                    && self.notice.is_none()
-                    && self.video_notice.is_none()
-                    && self.video_decoded == 0
-                    && self.video_in >= 120
-                {
-                    self.warned_no_decode = true;
-                    self.video_notice=Some("Video is arriving but no picture has decoded yet. Waiting for a complete keyframe…".into());
-                    self.update_status();
-                    eprintln!(
-                        "video: received {} access units; waiting for a decodable keyframe",
-                        self.video_in
-                    );
-                }
-            }
+    fn apply_video(&mut self, event: VideoEvent) {
+        if let (Some(size), Some(decoder)) = (self.vds, self.decoder.as_ref()) {
+            decoder.receive(size, event, &self.gpu.device);
         }
     }
 
     /// Take the latest decoded surface. Its copy and color conversion stay on
     /// the GPU; only small gallery previews are read back when visible.
     fn poll_decoder(&mut self) {
-        if self
-            .decoder
-            .as_ref()
-            .map(DecoderWorker::take_keyframe_request)
-            .unwrap_or(false)
-        {
+        let Some(update) = self.decoder.as_ref().map(VideoDecoder::poll) else {
+            return;
+        };
+        self.video_in = update.received;
+        if update.request_keyframe {
             self.send(&ClientMessage::RequestKeyframe);
             eprintln!("video: requested a fresh keyframe after decoder backlog/error");
         }
-        if let Some(error) = self.decoder.as_ref().and_then(DecoderWorker::take_error) {
+        if let Some(error) = update.error {
             self.video_notice = Some(error);
             self.update_status();
         }
-        let frame = self.decoder.as_ref().and_then(DecoderWorker::take_frame);
+        if !self.warned_no_decode
+            && self.video_notice.is_none()
+            && self.video_decoded == 0
+            && self.video_in >= 120
+        {
+            self.warned_no_decode = true;
+            self.video_notice = Some("Video is arriving but no picture has decoded yet. Waiting for a complete keyframe...".into());
+            self.update_status();
+        }
+        let frame = update.frame;
         if let (Some(frame), Some(source)) = (frame, self.source.as_mut()) {
             if let Err(error) = source.update_frame(&self.gpu, &frame) {
                 self.video_notice = Some(format!("Cannot render video: {error}"));

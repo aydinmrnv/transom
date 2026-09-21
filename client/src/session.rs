@@ -20,7 +20,10 @@ use std::thread::{self, JoinHandle};
 
 use crate::model::{ModelEvent, WindowModel};
 use crate::net::{self, FramedReceiver};
-use crate::wire::{ClientMessage, ServerMessage, VideoMessage, PROTOCOL_VERSION};
+use crate::wire::{ClientMessage, ServerMessage, Size, VideoMessage, PROTOCOL_VERSION};
+
+/// Runs on the video reader, independently of the window/UI event pump.
+pub type VideoSink = Box<dyn FnMut(Size, VideoEvent) + Send>;
 
 /// What the consumer receives. Control-plane changes arrive as `Control`; video
 /// arrives as `Video`; the `*Closed` variants report either channel dropping so a
@@ -74,6 +77,15 @@ impl Session {
         control_port: u16,
         video_port: Option<u16>,
     ) -> std::io::Result<(Session, Receiver<SessionEvent>)> {
+        Self::connect_with_video(host, control_port, video_port, None)
+    }
+
+    pub fn connect_with_video(
+        host: &str,
+        control_port: u16,
+        video_port: Option<u16>,
+        video_sink: Option<VideoSink>,
+    ) -> std::io::Result<(Session, Receiver<SessionEvent>)> {
         let (tx, rx) = mpsc::channel();
 
         let mut control_stream = net::connect(host, control_port)?;
@@ -81,6 +93,10 @@ impl Session {
         // TCP accept from AirPlay or an old host is not a Transom handshake.
         control_stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
         let hello = read_hello(&mut control_stream)?;
+        let ServerMessage::Hello { vds, .. } = &hello else {
+            unreachable!("read_hello validates the message")
+        };
+        let video_size = *vds;
         control_stream.set_read_timeout(None)?;
         let control_read = control_stream.try_clone()?;
         let control_write = Arc::new(Mutex::new(control_stream.try_clone()?));
@@ -126,7 +142,7 @@ impl Session {
                     threads.push(
                         thread::Builder::new()
                             .name("transom-video".into())
-                            .spawn(move || video_loop(read, tx))
+                            .spawn(move || video_loop(read, tx, video_size, video_sink))
                             .expect("spawn video thread"),
                     );
                     Some(stream)
@@ -249,16 +265,30 @@ fn read_hello(stream: &mut TcpStream) -> std::io::Result<ServerMessage> {
     }
 }
 
-fn video_loop(stream: TcpStream, tx: Sender<SessionEvent>) {
+fn video_loop(
+    stream: TcpStream,
+    tx: Sender<SessionEvent>,
+    size: Size,
+    mut sink: Option<VideoSink>,
+) {
     let mut rx = FramedReceiver::new(stream);
+    let mut report = std::time::Instant::now();
+    let mut report_frames = 0;
+    let mut report_bytes = 0;
+    let mut sink_max = 0.0_f64;
+    let mut deliver = |event| {
+        if let Some(sink) = sink.as_mut() {
+            sink(size, event);
+            true
+        } else {
+            tx.send(SessionEvent::Video(event)).is_ok()
+        }
+    };
     loop {
         match rx.recv() {
             Ok(Some(payload)) => match VideoMessage::decode(&payload) {
                 Ok(VideoMessage::Config { hvcc }) => {
-                    if tx
-                        .send(SessionEvent::Video(VideoEvent::Config { hvcc }))
-                        .is_err()
-                    {
+                    if !deliver(VideoEvent::Config { hvcc }) {
                         return;
                     }
                 }
@@ -268,16 +298,31 @@ fn video_loop(stream: TcpStream, tx: Sender<SessionEvent>) {
                     keyframe,
                     data,
                 }) => {
-                    if tx
-                        .send(SessionEvent::Video(VideoEvent::Frame {
-                            seq,
-                            pts_micros,
-                            keyframe,
-                            data,
-                        }))
-                        .is_err()
-                    {
+                    let start = std::time::Instant::now();
+                    report_frames += 1;
+                    report_bytes += data.len();
+                    if !deliver(VideoEvent::Frame {
+                        seq,
+                        pts_micros,
+                        keyframe,
+                        data,
+                    }) {
                         return;
+                    }
+                    sink_max = sink_max.max(start.elapsed().as_secs_f64() * 1000.0);
+                    if report.elapsed().as_secs() >= 5 {
+                        eprintln!(
+                            "video receive: {:.1} fps, {:.2} Mbps, max submit {:.2} ms",
+                            report_frames as f64 / report.elapsed().as_secs_f64(),
+                            report_bytes as f64 * 8.0
+                                / report.elapsed().as_secs_f64()
+                                / 1_000_000.0,
+                            sink_max
+                        );
+                        report = std::time::Instant::now();
+                        report_frames = 0;
+                        report_bytes = 0;
+                        sink_max = 0.0;
                     }
                 }
                 Err(e) => eprintln!("video: skipping undecodable frame: {e}"),
@@ -300,6 +345,58 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::Duration;
+
+    #[test]
+    fn video_sink_receives_frames_without_pumping_ui_events() {
+        let control = TcpListener::bind("127.0.0.1:0").unwrap();
+        let video = TcpListener::bind("127.0.0.1:0").unwrap();
+        let control_port = control.local_addr().unwrap().port();
+        let video_port = video.local_addr().unwrap().port();
+        let control_thread = thread::spawn(move || {
+            let (mut socket, _) = control.accept().unwrap();
+            socket
+                .write_all(&crate::wire::frame::frame(
+                    br#"{"type":"hello","protocol":1,"vdsSize":{"w":800,"h":600}}"#,
+                ))
+                .unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+        });
+        let video_thread = thread::spawn(move || {
+            let (mut socket, _) = video.accept().unwrap();
+            socket
+                .write_all(&crate::wire::frame::frame(&[1, 2, 3]))
+                .unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+        });
+        let (delivered, received) = mpsc::channel();
+        let (session, events) = Session::connect_with_video(
+            "127.0.0.1",
+            control_port,
+            Some(video_port),
+            Some(Box::new(move |size, event| {
+                delivered.send((size, event)).unwrap();
+            })),
+        )
+        .unwrap();
+        // No UI/session event has been consumed yet.
+        let (size, event) = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(size, Size { w: 800, h: 600 });
+        assert!(matches!(event, VideoEvent::Config { hvcc } if hvcc == [2, 3]));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            SessionEvent::Control(ModelEvent::Connected { .. })
+        ));
+        assert!(events.try_recv().is_err());
+        drop(session);
+        control_thread.join().unwrap();
+        video_thread.join().unwrap();
+    }
 
     #[test]
     fn display_geometry_precedes_immediate_video_config() {

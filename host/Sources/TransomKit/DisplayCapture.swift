@@ -99,10 +99,13 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         config.height = display.pixelHeight
         config.pixelFormat = pixelFormat
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-        config.queueDepth = 3
+        // The direct NV12 encoder and the idle-frame cache retain surfaces.
+        // Leave enough capture surfaces available while those GPU jobs finish;
+        // this is a surface pool, not an encoded-frame playback queue.
+        config.queueDepth = 5
         if pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
             config.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
-            config.colorSpaceName = CGColorSpace.itur_709
+            config.colorSpaceName = CGColorSpace.sRGB
         }
         config.showsCursor = true
         config.scalesToFit = false
