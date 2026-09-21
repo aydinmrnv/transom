@@ -92,6 +92,8 @@ public enum ClientMessage: Sendable, Equatable {
     case requestResize(id: UInt64, size: WireSize, phase: ResizePhase)
     case requestFocus(id: UInt64)
     case requestClose(id: UInt64)
+    /// The client dropped stale compressed frames and needs a new intra frame.
+    case requestKeyframe
     /// A click/type/scroll targeted at window `id` (issue #7). `event` carries
     /// window-local physical pixels / Windows VK codes (see `InputEvent`); `ts` is
     /// the client's monotonic timestamp in milliseconds, opaque to the host in v1.
@@ -205,6 +207,8 @@ extension ClientMessage: Codable {
         case .requestClose(let id):
             try c.encode("requestClose", forKey: .type)
             try c.encode(id, forKey: .id)
+        case .requestKeyframe:
+            try c.encode("requestKeyframe", forKey: .type)
         case .input(let id, let event, let ts):
             try c.encode("input", forKey: .type)
             try c.encode(id, forKey: .id)
@@ -226,6 +230,8 @@ extension ClientMessage: Codable {
             self = .requestFocus(id: try c.decode(UInt64.self, forKey: .id))
         case "requestClose":
             self = .requestClose(id: try c.decode(UInt64.self, forKey: .id))
+        case "requestKeyframe":
+            self = .requestKeyframe
         case "input":
             self = .input(
                 id: try c.decode(UInt64.self, forKey: .id),

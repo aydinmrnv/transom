@@ -20,7 +20,8 @@ import os
 ///   decode 4:4:4, so it needs a 4:4:4-capable client decoder before it shows
 ///   anything.
 ///
-/// SCK hands us `BGRA`, so this type owns two VideoToolbox sessions:
+/// SCK can hand us the encoder's native 420v surface in the normal mode; the
+/// 4:4:4 path starts from `BGRA`. This type owns two VideoToolbox sessions:
 ///
 /// 1. a `VTPixelTransferSession` that converts each captured `BGRA` IOSurface into
 ///    the format's source IOSurface (a color-space conversion on the media
@@ -49,6 +50,8 @@ public final class HEVCEncoder: @unchecked Sendable {
         public let pts: CMTime
         public let isKeyframe: Bool
         public let data: Data
+        // Assigned before the bounded sending queue, so gaps remain detectable.
+        public var sequence: UInt64? = nil
     }
 
     /// The chroma / bit-depth the stream is encoded at. The default is the mode
@@ -67,6 +70,17 @@ public final class HEVCEncoder: @unchecked Sendable {
             switch self {
             case .hevc420_8bit: return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             case .hevc444_10bit: return kCVPixelFormatType_444YpCbCr10
+            }
+        }
+
+        /// The most efficient ScreenCaptureKit output for this encoder. The
+        /// normal Windows-compatible mode can stay in NV12/420v from capture
+        /// through compression; the crisp 4:4:4 mode still starts as BGRA and
+        /// uses the media-engine transfer below.
+        public var capturePixelFormat: OSType {
+            switch self {
+            case .hevc420_8bit: return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            case .hevc444_10bit: return kCVPixelFormatType_32BGRA
             }
         }
 
@@ -189,6 +203,7 @@ public final class HEVCEncoder: @unchecked Sendable {
     private let v410Pool: CVPixelBufferPool
     private let keyframeLock = NSLock()
     private var forceNextKeyframe = false
+    private var outputSequence: UInt64 = 0
 
     /// A newly connected decoder has no reference frames. Safe to call from
     /// the video server actor; the capture/encode queue consumes the request.
@@ -317,33 +332,41 @@ public final class HEVCEncoder: @unchecked Sendable {
         return status == noErr && (value as? Bool ?? false)
     }
 
-    /// Convert one captured `BGRA` buffer to `v410` and encode it. Synchronous
-    /// intake (must be called on the capture serial queue); the compressed output
-    /// arrives later via `onEncodedFrame`.
+    /// Encode one captured buffer. In the normal 4:2:0 mode ScreenCaptureKit
+    /// already supplies the encoder's native NV12 format, so this path skips a
+    /// full-frame BGRA→NV12 transfer. The 4:4:4 mode keeps the media-engine
+    /// conversion path.
     public func encode(_ source: CVPixelBuffer, pts: CMTime, duration: CMTime) throws {
         let state = Log.signposter.beginInterval("encode")
         defer { Log.signposter.endInterval("encode", state) }
 
-        // BGRA → v410 into a pooled IOSurface buffer.
-        var dest: CVPixelBuffer?
-        let allocStatus = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, v410Pool, &dest)
-        guard allocStatus == kCVReturnSuccess, let dest else {
-            throw EncoderError.v410AllocationFailed(allocStatus)
-        }
-        // Tag the destination so the encoder writes correct color signalling.
-        CVBufferSetAttachment(
-            dest, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-            .shouldPropagate)
-        CVBufferSetAttachment(
-            dest, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2,
-            .shouldPropagate)
-        CVBufferSetAttachment(
-            dest, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2,
-            .shouldPropagate)
+        let imageBuffer: CVPixelBuffer
+        if CVPixelBufferGetPixelFormatType(source) == config.format.sourcePixelFormat {
+            imageBuffer = source
+        } else {
+            // BGRA → the configured source format into a pooled IOSurface buffer.
+            var dest: CVPixelBuffer?
+            let allocStatus = CVPixelBufferPoolCreatePixelBuffer(
+                kCFAllocatorDefault, v410Pool, &dest)
+            guard allocStatus == kCVReturnSuccess, let dest else {
+                throw EncoderError.v410AllocationFailed(allocStatus)
+            }
+            CVBufferSetAttachment(
+                dest, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                .shouldPropagate)
+            CVBufferSetAttachment(
+                dest, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2,
+                .shouldPropagate)
+            CVBufferSetAttachment(
+                dest, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2,
+                .shouldPropagate)
 
-        let transferStatus = VTPixelTransferSessionTransferImage(transfer, from: source, to: dest)
-        guard transferStatus == noErr else {
-            throw EncoderError.transferFailed(transferStatus)
+            let transferStatus = VTPixelTransferSessionTransferImage(
+                transfer, from: source, to: dest)
+            guard transferStatus == noErr else {
+                throw EncoderError.transferFailed(transferStatus)
+            }
+            imageBuffer = dest
         }
 
         let handler: VTCompressionOutputHandler = { [weak self] status, _, sampleBuffer in
@@ -359,7 +382,7 @@ public final class HEVCEncoder: @unchecked Sendable {
             ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
         let encodeStatus = VTCompressionSessionEncodeFrame(
             compression,
-            imageBuffer: dest,
+            imageBuffer: imageBuffer,
             presentationTimeStamp: pts,
             duration: duration,
             frameProperties: frameProperties,
@@ -395,8 +418,12 @@ public final class HEVCEncoder: @unchecked Sendable {
         }
 
         let data = extractFrameData ? Self.copyBytes(from: sampleBuffer) : Data()
+        let sequence = keyframeLock.withLock {
+            defer { outputSequence &+= 1 }
+            return outputSequence
+        }
         onEncodedFrame?(
-            EncodedFrame(byteCount: byteCount, pts: pts, isKeyframe: isKeyframe, data: data))
+            EncodedFrame(byteCount: byteCount, pts: pts, isKeyframe: isKeyframe, data: data, sequence: sequence))
     }
 
     /// Copy the contiguous encoded bytes out of a sample buffer for the wire.

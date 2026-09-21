@@ -169,12 +169,18 @@ is authoritative here; this line was corrected to match it — AGENTS.md.)
 requestResize  { id: u64, size: Size, phase: ResizePhase }
 requestFocus   { id: u64 }
 requestClose   { id: u64 }
+requestKeyframe {}
 input          { id: u64, event: InputEvent, ts: u64 }
 ```
 
 `ResizePhase` is `Begin | Live | End`, mapping to `WM_ENTERSIZEMOVE` /
 `WM_SIZING` / `WM_EXITSIZEMOVE`. The host throttles `Live` to ~10Hz and treats
 `End` as the authoritative 1:1 snap (architecture.md 2.1).
+
+`requestKeyframe` (0.4.5) asks the encoder for a fresh intra frame after a
+compressed queue overflow or decode error. The host refreshes even an idle
+capture so recovery does not require moving the mouse. Older v1 hosts ignore
+this optional message; recovery then waits for their periodic keyframe.
 
 ### Input events (`Input`) — issue #7
 
@@ -332,9 +338,18 @@ and [sequence header format](https://learn.microsoft.com/en-us/windows/win32/med
 
 The client waits for a keyframe on connect and after a compressed-queue overrun.
 Encoded deltas retain their order in a bounded queue; replacing arbitrary
-compressed frames breaks reference dependencies. Decoded frames may be dropped
-freely. Older Mac hosts can delay the next keyframe on an idle display; update
+compressed frames breaks reference dependencies. Sequence numbers are assigned
+before the host's sending queue, so a gap causes it to suppress dependent deltas
+and request a new keyframe. The client's three-frame queue also requests recovery
+when it discards a dependency chain. Decoded frames may be dropped freely.
+Older Mac hosts can delay the next keyframe on an idle display; update
 the host to receive the connection-triggered refresh behavior.
+
+On compatible Windows GPUs, the client gives the HEVC transform the renderer's
+D3D11 device through an `IMFDXGIDeviceManager`. NV12 decode surfaces are copied
+on the GPU and converted with a native-resolution BT.709 shader. An NV12 CPU
+fallback is retained for other decoders; full-frame CPU conversion is avoided.
+The host requests 420v/BT.709 directly from ScreenCaptureKit in this mode.
 
 Rect metadata lives on the **control** channel, not in the frame header; the
 client correlates by timestamp.

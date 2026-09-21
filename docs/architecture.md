@@ -686,6 +686,28 @@ not resample an interactive frame.
 
 ## 9. Decision log
 
+### Windows hardware decode and queue recovery (0.4.5)
+
+A 240-frame synthetic 3840×2160/60 HEVC Main stream measured 36.19 ms mean,
+39.41 ms p95 per decode/conversion on ALIENWARE_A51 with the previous CPU BGRA
+path (27.6 frames/s throughput). Giving Media Foundation the RTX 5090 D3D11
+device and retaining GPU surfaces reduced CPU submission time including native
+color conversion to 1.95 ms mean, 2.96 ms p95. This is a component benchmark,
+not a capture-to-display latency measurement or proof of Parsec parity.
+
+MF decoder samples cannot be marshalled by AgileReference on this installation
+(IMFSample returned REGDB_E_IIDNOTREG). Samples therefore stay on the MTA worker;
+a reusable pool of owned GPU textures crosses to the UI. D3D11 multithread
+protection is enabled. Native 1px luma/color readback and hardware-versus-software
+HEVC color comparisons pass on this PC. Gallery readback is limited to a small
+atlas at 4 Hz when visible; interactive rendering never uses that atlas.
+
+The host's newest-four encoded queue could previously discard a reference frame
+silently. Encoder sequence numbers now survive queue eviction, and the server
+suppresses deltas until a fresh keyframe. Client overflow/error recovery also
+requests a keyframe and an idle refresh. The Mac captures NV12/BT.709 directly
+and reduces only its selector preview before CPU readback.
+
 | Decision | Rationale |
 |---|---|
 | Virtual display as sprite sheet, one stream | One encoder, no occlusion, popups free, no cold start (3) |

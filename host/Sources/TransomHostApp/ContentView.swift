@@ -210,7 +210,9 @@ struct ContentView: View {
                         ZStack {
                             Color(nsColor: .windowBackgroundColor)
                             if let cg = host.previewImage?.cgImage(forProposedRect: nil, context: nil, hints: nil),
-                                let crop = cg.cropping(to: window.rect) {
+                                let crop = cg.cropping(to: window.rect.applying(CGAffineTransform(
+                                    scaleX: CGFloat(cg.width) / max(host.displayPixelSize.width, 1),
+                                    y: CGFloat(cg.height) / max(host.displayPixelSize.height, 1)))) {
                                 Image(decorative: crop, scale: 1).resizable().scaledToFit()
                             } else {
                                 Label(videoEnabled ? "Waiting for video" : "Video is off", systemImage: "macwindow")

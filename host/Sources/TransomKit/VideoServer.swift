@@ -15,7 +15,9 @@ public actor VideoServer {
     private var sentConfig = false
     private var waitingForKeyframe = true
     private var seq: UInt64 = 0
+    private var lastEncodedSequence: UInt64?
     private let hvccProvider: @Sendable () -> Data?
+    private let requestKeyframe: @Sendable () -> Void
 
     /// Called with `true` when a client connects and `false` when it disconnects
     /// or is dropped, so a status UI can show whether the video client is attached.
@@ -24,8 +26,9 @@ public actor VideoServer {
 
     /// - Parameter hvccProvider: returns the encoder's `hvcC` parameter sets once
     ///   the first frame has been encoded (nil before then).
-    public init(hvccProvider: @escaping @Sendable () -> Data?) {
+    public init(hvccProvider: @escaping @Sendable () -> Data?, requestKeyframe: @escaping @Sendable () -> Void = {}) {
         self.hvccProvider = hvccProvider
+        self.requestKeyframe = requestKeyframe
     }
 
     public func setOnConnectionChange(_ handler: @escaping @Sendable (Bool) -> Void) {
@@ -47,6 +50,7 @@ public actor VideoServer {
         active = (connectionID, transport)
         sentConfig = false
         waitingForKeyframe = true
+        lastEncodedSequence = nil
         Log.encode.notice("video: client connected")
         onConnectionChange?(true)
         // The client sends nothing on this channel; the receive loop just detects
@@ -77,11 +81,21 @@ public actor VideoServer {
     /// lazily before the first frame of a connection.
     public func send(_ frame: HEVCEncoder.EncodedFrame) async {
         guard let active else { return }
+        if let sequence = frame.sequence {
+            if let previous = lastEncodedSequence, sequence != previous &+ 1,
+                !frame.isKeyframe, !waitingForKeyframe {
+                waitingForKeyframe = true
+                requestKeyframe()
+                Log.encode.notice("video: encoded queue overrun; waiting for a fresh keyframe")
+            }
+            lastEncodedSequence = sequence
+        }
         guard !waitingForKeyframe || frame.isKeyframe else { return }
         do {
             if !sentConfig {
                 guard let hvcc = hvccProvider() else { return }
                 try await active.transport.send(VideoWire.encodeConfig(hvcc: hvcc))
+                guard self.active?.id == active.id else { return }
                 sentConfig = true
             }
             waitingForKeyframe = false
@@ -89,7 +103,7 @@ public actor VideoServer {
                 frame.pts.seconds.isFinite ? UInt64(max(0, frame.pts.seconds * 1_000_000)) : 0
             try await active.transport.send(
                 VideoWire.encodeFrame(
-                    seq: seq, ptsMicros: ptsMicros, keyframe: frame.isKeyframe, data: frame.data))
+                    seq: frame.sequence ?? seq, ptsMicros: ptsMicros, keyframe: frame.isKeyframe, data: frame.data))
             seq += 1
         } catch {
             if self.active?.id == active.id {

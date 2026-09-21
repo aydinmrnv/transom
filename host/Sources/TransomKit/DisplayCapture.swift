@@ -30,6 +30,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     private let display: DisplayInfo
     private let fps: Int
     private let applicationPIDs: Set<pid_t>?
+    private let pixelFormat: OSType
     private let queue = DispatchQueue(label: "one.transom.host.capture")
     // Accessed only on the capture queue, including explicit refreshes.
     private var lastPixelPTS = CMTime.invalid
@@ -54,10 +55,14 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     /// underneath you.
     public var onPixelBuffer: (@Sendable (CVPixelBuffer, CMTime) -> Void)?
 
-    public init(display: DisplayInfo, fps: Int = 60, applicationPIDs: Set<pid_t>? = nil) {
+    public init(
+        display: DisplayInfo, fps: Int = 60, applicationPIDs: Set<pid_t>? = nil,
+        pixelFormat: OSType = kCVPixelFormatType_32BGRA
+    ) {
         self.display = display
         self.fps = fps
         self.applicationPIDs = applicationPIDs
+        self.pixelFormat = pixelFormat
         super.init()
     }
 
@@ -92,14 +97,26 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         // The load-bearing lines for I-1: exact native pixels, no scaling.
         config.width = display.pixelWidth
         config.height = display.pixelHeight
-        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.pixelFormat = pixelFormat
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-        config.queueDepth = 5
+        config.queueDepth = 3
+        if pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
+            config.colorMatrix = kCGDisplayStreamYCbCrMatrix_ITU_R_709_2
+            config.colorSpaceName = CGColorSpace.itur_709
+        }
         config.showsCursor = true
         config.scalesToFit = false
-        config.backgroundColor = CGColor(gray: 0, alpha: 1)
+        // ScreenCaptureKit declares backgroundColor as unowned(unsafe). Keep the
+        // CGColor alive through SCStream's configuration copy; releasing the
+        // temporary immediately after assignment leaves a dangling pointer and
+        // crashes in CGColorCreateCopy when the app starts capture in the
+        // background.
+        let backgroundColor = CGColor(gray: 0, alpha: 1)
+        config.backgroundColor = backgroundColor
 
-        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        let stream = withExtendedLifetime(backgroundColor) {
+            SCStream(filter: filter, configuration: config, delegate: nil)
+        }
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await stream.startCapture()
         lock.withLock { self.stream = stream }
@@ -160,26 +177,28 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         Log.signposter.endInterval("capture", signpostState)
     }
 
-    /// Latest frame as a CGImage at **native pixels**, converted on demand. Nil
-    /// until the first complete frame arrives. Never resamples (I-1): callers that
-    /// only need a small preview let the display layer scale it down for drawing.
+    /// Latest frame converted on demand. The default keeps native pixels;
+    /// maxPixelWidth is only for selector thumbnails, never interactive video.
+    /// Nil until the first complete frame arrives.
     ///
     /// The IOSurface-backed buffer is grabbed under the lock and the (potentially
     /// expensive) `createCGImage` runs **outside** it — holding a strong ref keeps
     /// the buffer alive against pool recycling, exactly as the capture callback's
     /// own `onFrame` render does — so a 60fps capture callback is never blocked
     /// waiting on a preview conversion.
-    public func latestImage() -> CGImage? {
+    public func latestImage(maxPixelWidth: Int? = nil) -> CGImage? {
         let (buffer, ctx): (CVPixelBuffer?, CIContext) = lock.withLock {
             (latestPixelBuffer, ciContext)
         }
         guard let buffer else { return nil }
-        return ctx.createCGImage(
-            CIImage(cvPixelBuffer: buffer),
-            from: CGRect(
-                x: 0, y: 0,
-                width: CVPixelBufferGetWidth(buffer),
-                height: CVPixelBufferGetHeight(buffer)))
+        var image = CIImage(cvPixelBuffer: buffer)
+        // This optional reduction is exclusively for the host's selector UI.
+        // The capture→encoder path above always retains native pixels.
+        if let maxPixelWidth, maxPixelWidth > 0, image.extent.width > CGFloat(maxPixelWidth) {
+            let scale = CGFloat(maxPixelWidth) / image.extent.width
+            image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
+        return ctx.createCGImage(image, from: image.extent.integral)
     }
 
     // MARK: - SCStreamOutput

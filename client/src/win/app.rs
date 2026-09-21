@@ -515,6 +515,15 @@ impl App {
     /// Take the latest decoded surface. Its copy and color conversion stay on
     /// the GPU; only small gallery previews are read back when visible.
     fn poll_decoder(&mut self) {
+        if self
+            .decoder
+            .as_ref()
+            .map(DecoderWorker::take_keyframe_request)
+            .unwrap_or(false)
+        {
+            self.send(&ClientMessage::RequestKeyframe);
+            eprintln!("video: requested a fresh keyframe after decoder backlog/error");
+        }
         if let Some(error) = self.decoder.as_ref().and_then(DecoderWorker::take_error) {
             self.video_notice = Some(error);
             self.update_status();

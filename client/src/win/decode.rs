@@ -2,6 +2,7 @@
 //! samples to Annex B here, without changing the network protocol.
 use crate::hevc::HevcConfig;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -14,11 +15,14 @@ use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
 };
 
-const MAX_PENDING_FRAMES: usize = 8;
-const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PENDING_FRAMES: usize = 3;
+const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
 
 pub enum DecodedFrame {
-    Bgra(Vec<u8>),
+    CpuNv12 {
+        pixels: Vec<u8>,
+        stride: usize,
+    },
     /// A pooled, owned GPU copy. MF samples remain on their MTA thread; no
     /// apartment-bound interface or decoder-owned array crosses into the UI.
     Nv12 {
@@ -42,29 +46,33 @@ struct EncodedFrame {
     queued: Instant,
 }
 impl PendingInput {
-    fn push(&mut self, mut frame: EncodedFrame) {
+    fn push(&mut self, mut frame: EncodedFrame) -> bool {
         if self.stopped {
-            return;
+            return false;
         }
+        let mut request_keyframe = false;
         if self.frames.len() >= MAX_PENDING_FRAMES
             || self.bytes + frame.data.len() > MAX_PENDING_BYTES
         {
             self.frames.clear();
             self.bytes = 0;
             self.awaiting_keyframe = true;
+            request_keyframe = true;
         }
         if frame.data.len() > MAX_PENDING_BYTES {
-            return;
+            self.awaiting_keyframe = true;
+            return true;
         }
         if self.awaiting_keyframe {
             if !frame.keyframe {
-                return;
+                return request_keyframe;
             }
             frame.reset = true;
             self.awaiting_keyframe = false;
         }
         self.bytes += frame.data.len();
         self.frames.push_back(frame);
+        request_keyframe
     }
     fn pop(&mut self) -> Option<EncodedFrame> {
         let frame = self.frames.pop_front()?;
@@ -79,6 +87,7 @@ pub struct DecoderWorker {
     input: Arc<(Mutex<PendingInput>, Condvar)>,
     output: Arc<Mutex<Option<DecodedFrame>>>,
     error: Arc<Mutex<Option<String>>>,
+    keyframe_request: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 impl DecoderWorker {
@@ -100,6 +109,8 @@ impl DecoderWorker {
         let worker_input = Arc::clone(&input);
         let worker_output = Arc::clone(&output);
         let worker_error = Arc::clone(&error);
+        let keyframe_request = Arc::new(AtomicBool::new(false));
+        let worker_keyframe_request = Arc::clone(&keyframe_request);
         let thread = thread::Builder::new()
             .name("transom-decode".into())
             .spawn(move || {
@@ -163,7 +174,7 @@ impl DecoderWorker {
                                         "video: first decoded frame ({})",
                                         match &frame {
                                             DecodedFrame::Nv12 { .. } => "D3D11 NV12 texture",
-                                            DecodedFrame::Bgra(_) => "CPU BGRA fallback",
+                                            DecodedFrame::CpuNv12 { .. } => "CPU NV12 fallback",
                                         }
                                     );
                                 }
@@ -173,6 +184,7 @@ impl DecoderWorker {
                             Ok(None) => {}
                             Err(e) => {
                                 eprintln!("video: {e}");
+                                worker_keyframe_request.store(true, Ordering::Release);
                                 *worker_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
                                 recover = true;
                             }
@@ -193,12 +205,14 @@ impl DecoderWorker {
             input,
             output,
             error,
+            keyframe_request,
             thread: Some(thread),
         })
     }
     pub fn submit(&self, data: Vec<u8>, keyframe: bool, pts_micros: u64) {
         let (lock, ready) = &*self.input;
-        lock.lock()
+        let dropped_chain = lock
+            .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(EncodedFrame {
                 data,
@@ -207,6 +221,9 @@ impl DecoderWorker {
                 reset: false,
                 queued: Instant::now(),
             });
+        if dropped_chain {
+            self.keyframe_request.store(true, Ordering::Release);
+        }
         ready.notify_one();
     }
     pub fn take_frame(&self) -> Option<DecodedFrame> {
@@ -214,6 +231,9 @@ impl DecoderWorker {
     }
     pub fn take_error(&self) -> Option<String> {
         self.error.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+    pub fn take_keyframe_request(&self) -> bool {
+        self.keyframe_request.swap(false, Ordering::AcqRel)
     }
 }
 impl Drop for DecoderWorker {
@@ -532,7 +552,7 @@ impl Decoder {
                 subresource: 0,
             })
         } else {
-            self.sample_to_bgra(&sample).map(DecodedFrame::Bgra)
+            self.sample_to_nv12(&sample)
         }
     }
     unsafe fn reset_output_type(&mut self) -> windows::core::Result<()> {
@@ -564,7 +584,7 @@ impl Decoder {
             return Ok(());
         }
     }
-    unsafe fn sample_to_bgra(&self, sample: &IMFSample) -> Result<Vec<u8>, String> {
+    unsafe fn sample_to_nv12(&self, sample: &IMFSample) -> Result<DecodedFrame, String> {
         let buffer = sample
             .ConvertToContiguousBuffer()
             .map_err(|e| e.to_string())?;
@@ -574,23 +594,17 @@ impl Decoder {
             two_d
                 .ContiguousCopyTo(&mut packed)
                 .map_err(|e| e.to_string())?;
-            return nv12_to_bgra(&packed, self.width, self.height, self.width as usize)
-                .ok_or_else(|| "Invalid packed NV12 output size".into());
+            return validate_nv12(packed, self.width, self.height, self.width as usize);
         }
         let mut ptr = std::ptr::null_mut();
         let mut len = 0;
         buffer
             .Lock(&mut ptr, None, Some(&mut len))
             .map_err(|e| e.to_string())?;
-        let bgra = nv12_to_bgra(
-            std::slice::from_raw_parts(ptr, len as usize),
-            self.width,
-            self.height,
-            self.stride,
-        );
+        let pixels = std::slice::from_raw_parts(ptr, len as usize).to_vec();
         let unlock = buffer.Unlock();
         unlock.map_err(|e| e.to_string())?;
-        bgra.ok_or_else(|| "Invalid NV12 output size/stride".into())
+        validate_nv12(pixels, self.width, self.height, self.stride)
     }
 }
 impl Drop for Decoder {
@@ -651,7 +665,29 @@ fn pack_size(width: u32, height: u32) -> u64 {
     ((width as u64) << 32) | height as u64
 }
 
+fn validate_nv12(
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    stride: usize,
+) -> Result<DecodedFrame, String> {
+    let needed = stride
+        .checked_mul(height as usize)
+        .and_then(|y| y.checked_add(stride.checked_mul(height as usize / 2)?));
+    if width == 0
+        || height == 0
+        || width % 2 != 0
+        || height % 2 != 0
+        || stride < width as usize
+        || needed.map(|n| pixels.len() < n).unwrap_or(true)
+    {
+        return Err("Invalid NV12 output size/stride".into());
+    }
+    Ok(DecodedFrame::CpuNv12 { pixels, stride })
+}
+
 /// BT.709 limited-range NV12, respecting padded rows without resizing.
+#[cfg(test)]
 pub(super) fn nv12_to_bgra(nv12: &[u8], width: u32, height: u32, stride: usize) -> Option<Vec<u8>> {
     let w = width as usize;
     let h = height as usize;
@@ -776,10 +812,10 @@ mod tests {
                 source.update_frame(&gpu, &frame).unwrap();
                 graphics.push(source.preview(&gpu).unwrap().0);
             }
-            if let Some(DecodedFrame::Bgra(pixels)) =
+            if let Some(DecodedFrame::CpuNv12 { pixels, stride }) =
                 software.decode(&data, keyframe, pts_micros).unwrap()
             {
-                cpu.push(pixels);
+                cpu.push(nv12_to_bgra(&pixels, 128, 96, stride).unwrap());
             }
         }
         assert!(cpu.len() >= 8 && graphics.len() >= 8);
@@ -878,9 +914,10 @@ mod tests {
             else {
                 panic!("frame expected")
             };
-            if let Some(DecodedFrame::Bgra(bgra)) =
+            if let Some(DecodedFrame::CpuNv12 { pixels, stride }) =
                 decoder.decode(&data, keyframe, pts_micros).unwrap()
             {
+                let bgra = nv12_to_bgra(&pixels, 128, 96, stride).unwrap();
                 assert_eq!(bgra.len(), 128 * 96 * 4);
                 assert!(
                     bgra.chunks_exact(4).any(|p| p[0].abs_diff(p[2]) > 100),

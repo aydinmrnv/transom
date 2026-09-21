@@ -332,7 +332,6 @@ impl Gpu {
 pub struct SourceTexture {
     pub width: u32,
     pub height: u32,
-    texture: ID3D11Texture2D,
     pub srv: ID3D11ShaderResourceView,
     rtv: ID3D11RenderTargetView,
     nv12: Option<PlanarTexture>,
@@ -398,7 +397,6 @@ impl SourceTexture {
         Ok(SourceTexture {
             width,
             height,
-            texture,
             srv: srv.expect("CreateShaderResourceView returned no view"),
             rtv: rtv.unwrap(),
             nv12: None,
@@ -409,8 +407,31 @@ impl SourceTexture {
     /// Copy the decoder's array slice on the GPU before returning its sample to
     /// the pool, then convert to the shared BGRA atlas without CPU readback.
     pub fn update_frame(&mut self, gpu: &Gpu, frame: &DecodedFrame) -> windows::core::Result<()> {
+        if self.nv12.is_none() {
+            self.nv12 = Some(PlanarTexture::new(gpu, self.width, self.height)?);
+        }
+        let nv12 = self.nv12.as_ref().unwrap();
         match frame {
-            DecodedFrame::Bgra(pixels) => self.update_bgra(gpu, pixels),
+            DecodedFrame::CpuNv12 { pixels, stride } => unsafe {
+                let needed = stride.checked_mul(self.height as usize * 3 / 2);
+                if *stride < self.width as usize
+                    || *stride > u32::MAX as usize
+                    || needed.map(|n| pixels.len() < n).unwrap_or(true)
+                {
+                    return Err(windows::core::Error::new(
+                        windows::Win32::Foundation::E_INVALIDARG,
+                        "Invalid NV12 buffer geometry",
+                    ));
+                }
+                gpu.context.UpdateSubresource(
+                    &nv12.texture,
+                    0,
+                    None,
+                    pixels.as_ptr().cast(),
+                    *stride as u32,
+                    0,
+                );
+            },
             DecodedFrame::Nv12 {
                 texture,
                 subresource,
@@ -428,10 +449,6 @@ impl SourceTexture {
                         "Invalid decoder texture geometry",
                     ));
                 }
-                if self.nv12.is_none() {
-                    self.nv12 = Some(PlanarTexture::new(gpu, self.width, self.height)?);
-                }
-                let nv12 = self.nv12.as_ref().unwrap();
                 let region = D3D11_BOX {
                     left: 0,
                     top: 0,
@@ -450,17 +467,19 @@ impl SourceTexture {
                     *subresource,
                     Some(&region),
                 );
-                gpu.context
-                    .PSSetShaderResources(1, Some(&[Some(nv12.uv.clone())]));
-                gpu.draw(
-                    &self.rtv,
-                    self.width,
-                    self.height,
-                    RenderMode::Nv12,
-                    Some(&nv12.y),
-                );
             },
         }
+        unsafe {
+            gpu.context
+                .PSSetShaderResources(1, Some(&[Some(nv12.uv.clone())]));
+        }
+        gpu.draw(
+            &self.rtv,
+            self.width,
+            self.height,
+            RenderMode::Nv12,
+            Some(&nv12.y),
+        );
         Ok(())
     }
 
@@ -488,25 +507,6 @@ impl SourceTexture {
             Some(&self.srv),
         );
         Ok((preview.read(gpu)?, preview.size))
-    }
-
-    /// Replace the whole texture's pixels with a freshly decoded BGRA frame.
-    /// `bgra` must be `width * height * 4` bytes. Used by the decoder path.
-    pub fn update_bgra(&self, gpu: &Gpu, bgra: &[u8]) {
-        let expected = (self.width as usize) * (self.height as usize) * 4;
-        if bgra.len() != expected {
-            return; // wrong-sized frame: skip rather than corrupt memory
-        }
-        unsafe {
-            gpu.context.UpdateSubresource(
-                &self.texture,
-                0,
-                None,
-                bgra.as_ptr() as *const _,
-                self.width * 4,
-                0,
-            );
-        }
     }
 
     /// The UV sub-rect (origin + size in [0,1]) for a window's source rect.
