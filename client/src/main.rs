@@ -29,6 +29,8 @@
 
 mod connections;
 mod discovery;
+#[cfg(any(windows, test))]
+mod hevc;
 mod model;
 mod net;
 mod runner;

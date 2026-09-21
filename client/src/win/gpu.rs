@@ -32,19 +32,21 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT,
     D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
     IDXGIDevice, IDXGIFactory2, IDXGISwapChain1, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 
 /// Per-draw shader parameters. `#[repr(C)]` and 16-byte aligned to match the HLSL
-/// `cbuffer` layout exactly (`float4` + `float2` + two `uint` = 32 bytes).
+/// cbuffer layout exactly (32 bytes).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Params {
-    uv_rect: [f32; 4],   // xy = uv origin, zw = uv size, into the source texture
-    view_size: [f32; 2], // physical pixel size of this window (for checkerboard)
+    uv_rect: [f32; 4], // xy = uv origin, zw = uv size, into the source texture
+    source_size: [u32; 2],
     mode: u32,
     _pad: u32,
 }
@@ -64,11 +66,11 @@ pub enum RenderMode {
 const SHADER_HLSL: &str = r#"
 cbuffer Params : register(b0) {
     float4 uvRect;
-    float2 viewSize;
+    uint2 sourceSize;
     uint mode;
     uint pad;
 };
-Texture2D srcTex : register(t0);
+Texture2D<float> srcTex : register(t0);
 SamplerState pointSampler : register(s0);
 
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -93,7 +95,15 @@ float4 ps_main(VSOut i) : SV_Target {
         return float4(0.08, 0.10, 0.14, 1.0);
     }
     float2 uv = uvRect.xy + i.uv * uvRect.zw;
-    return srcTex.Sample(pointSampler, uv);
+    uint2 p = min(uint2(uv * sourceSize), sourceSize - 1u);
+    float y = srcTex.Load(int3(p, 0)).r * 255.0 - 16.0;
+    uint2 chroma = uint2(p.x & ~1u, sourceSize.y + (p.y >> 1u));
+    float u = srcTex.Load(int3(chroma, 0)).r * 255.0 - 128.0;
+    float v = srcTex.Load(int3(chroma + uint2(1u, 0u), 0)).r * 255.0 - 128.0;
+    float b = clamp((298.0 * y + 541.0 * u + 128.0) / (256.0 * 255.0), 0.0, 1.0);
+    float g = clamp((298.0 * y - 55.0 * u - 136.0 * v + 128.0) / (256.0 * 255.0), 0.0, 1.0);
+    float r = clamp((298.0 * y + 459.0 * v + 128.0) / (256.0 * 255.0), 0.0, 1.0);
+    return float4(b, g, r, 1.0);
 }
 "#;
 
@@ -217,23 +227,24 @@ impl Gpu {
         height: u32,
         mode: RenderMode,
         source: Option<&ID3D11ShaderResourceView>,
+        source_size: [u32; 2],
     ) {
         let params = match mode {
             RenderMode::Source { uv_rect } => Params {
                 uv_rect,
-                view_size: [width as f32, height as f32],
+                source_size,
                 mode: 0,
                 _pad: 0,
             },
             RenderMode::Checkerboard => Params {
                 uv_rect: [0.0, 0.0, 1.0, 1.0],
-                view_size: [width as f32, height as f32],
+                source_size: [1, 1],
                 mode: 1,
                 _pad: 0,
             },
             RenderMode::Waiting => Params {
                 uv_rect: [0.0, 0.0, 1.0, 1.0],
-                view_size: [width as f32, height as f32],
+                source_size: [1, 1],
                 mode: 2,
                 _pad: 0,
             },
@@ -289,8 +300,11 @@ impl Gpu {
     }
 }
 
-/// A shared BGRA texture holding the whole decoded VDS frame; each proxy window
-/// samples its sub-rect from it. Recreated when the VDS size changes.
+/// A shared single-channel texture holding a packed NV12 frame: the Y plane is
+/// followed by the interleaved UV plane. Each proxy window samples its sub-rect
+/// from it and the pixel shader performs BT.709 limited-range conversion. This
+/// keeps the decoder→GPU upload at 1.5 bytes/pixel instead of expanding to
+/// 4 bytes/pixel on the CPU.
 pub struct SourceTexture {
     pub width: u32,
     pub height: u32,
@@ -299,16 +313,19 @@ pub struct SourceTexture {
 }
 
 impl SourceTexture {
-    /// Create a `width × height` BGRA source texture, initialized to a checkerboard
+    /// Create a packed NV12 source texture, initialized to a neutral checkerboard
     /// so that before any video frame arrives the windows still show a sharp
     /// pattern rather than garbage.
     pub fn new(gpu: &Gpu, width: u32, height: u32) -> windows::core::Result<SourceTexture> {
+        let width = width.max(2);
+        let height = height.max(2);
+        let packed_height = height + height / 2;
         let desc = D3D11_TEXTURE2D_DESC {
-            Width: width.max(1),
-            Height: height.max(1),
+            Width: width,
+            Height: packed_height,
             MipLevels: 1,
             ArraySize: 1,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Format: DXGI_FORMAT_R8_UNORM,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
@@ -318,23 +335,19 @@ impl SourceTexture {
             ..Default::default()
         };
 
-        // Seed pixels: a coarse checkerboard so an un-fed texture is obviously a
-        // placeholder, not a decode artifact.
-        let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
+        // Seed the Y plane with a coarse checkerboard and the UV plane with neutral
+        // chroma. An unfed texture is obviously a placeholder, not a decode artifact.
+        let mut pixels = vec![128u8; (width as usize) * (packed_height as usize)];
         for y in 0..height as usize {
             for x in 0..width as usize {
                 let on = ((x / 32) + (y / 32)) % 2 == 0;
                 let v = if on { 40 } else { 24 };
-                let i = (y * width as usize + x) * 4;
-                pixels[i] = v; // B
-                pixels[i + 1] = v; // G
-                pixels[i + 2] = v; // R
-                pixels[i + 3] = 255;
+                pixels[y * width as usize + x] = v;
             }
         }
         let init = D3D11_SUBRESOURCE_DATA {
             pSysMem: pixels.as_ptr() as *const _,
-            SysMemPitch: width * 4,
+            SysMemPitch: width,
             SysMemSlicePitch: 0,
         };
 
@@ -359,11 +372,12 @@ impl SourceTexture {
         })
     }
 
-    /// Replace the whole texture's pixels with a freshly decoded BGRA frame.
-    /// `bgra` must be `width * height * 4` bytes. Used by the decoder path.
-    pub fn update_bgra(&self, gpu: &Gpu, bgra: &[u8]) {
-        let expected = (self.width as usize) * (self.height as usize) * 4;
-        if bgra.len() != expected {
+    /// Replace the packed NV12 texture with a freshly decoded frame. The decoder
+    /// may provide padded rows, so `stride` is passed separately from the image
+    /// width.
+    pub fn update_nv12(&self, gpu: &Gpu, nv12: &[u8], stride: usize) {
+        let needed = stride.saturating_mul(self.height as usize * 3 / 2);
+        if stride < self.width as usize || nv12.len() < needed {
             return; // wrong-sized frame: skip rather than corrupt memory
         }
         unsafe {
@@ -371,8 +385,8 @@ impl SourceTexture {
                 &self.texture,
                 0,
                 None,
-                bgra.as_ptr() as *const _,
-                self.width * 4,
+                nv12.as_ptr() as *const _,
+                stride as u32,
                 0,
             );
         }

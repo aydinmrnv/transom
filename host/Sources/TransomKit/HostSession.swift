@@ -7,6 +7,7 @@ import Foundation
 /// `serve` CLI takes, in one `Sendable` value the host app can also build.
 public struct HostConfig: Sendable {
     public var target: TargetApp
+    public var additionalTargets: [TargetApp]
     public var display: DisplayInfo
     public var host: String
     public var controlPort: UInt16
@@ -28,6 +29,7 @@ public struct HostConfig: Sendable {
 
     public init(
         target: TargetApp,
+        additionalTargets: [TargetApp] = [],
         display: DisplayInfo,
         host: String = "127.0.0.1",
         controlPort: UInt16 = TransomPorts.control,
@@ -42,6 +44,8 @@ public struct HostConfig: Sendable {
         logInput: Bool = false
     ) {
         self.target = target
+        var seen: Set<pid_t> = [target.pid]
+        self.additionalTargets = additionalTargets.filter { seen.insert($0.pid).inserted }
         self.display = display
         self.host = host
         self.controlPort = controlPort
@@ -159,10 +163,12 @@ public final class HostSession: @unchecked Sendable {
 
     // Lifecycle-owned; mutated only inside start()/stop().
     private var registry: WindowRegistry?
-    private var watcher: WindowWatcher?
+    private var watchers: [WindowWatcher] = []
     private var watcherRunLoop: CFRunLoop?
     private var controlListener: TCPListener?
     private var videoListener: TCPListener?
+    private var controlServer: ControlServer?
+    private var videoServer: VideoServer?
     private var capture: DisplayCapture?
     private var encoder: HEVCEncoder?
     private var eventSink: AsyncStream<WindowWatcher.WindowEvent>.Continuation?
@@ -267,24 +273,49 @@ public final class HostSession: @unchecked Sendable {
 
         // Tile once at startup so streamed windows are non-overlapping (I-5), and
         // keep the requested-vs-actual placements for the Status view (I-4/OQ-2).
+        let targets = [config.target] + config.additionalTargets
         if config.tile {
-            switch TileService.layout(pid: config.target.pid, display: disp, gutter: config.gutter)
+            switch TileService.layout(pids: targets.map(\.pid), display: disp, gutter: config.gutter, fit: true)
             {
             case .success(let placements):
                 statsLock.withLock { tilePlacements = placements }
             case .failure(let error):
                 statsLock.withLock { tileError = error.description }
-                Log.general.notice(
-                    "serve: tiling failed: \(error.description, privacy: .public)")
+                throw ProbeError("The selected windows do not fit on the sharing display. Choose fewer apps or a larger display. \(error.description)")
             }
         }
 
         // Control channel: AX events -> ordered broadcast via one AsyncStream.
         let (events, eventSink) = AsyncStream.makeStream(of: WindowWatcher.WindowEvent.self)
         self.eventSink = eventSink
-        let watcher = WindowWatcher(pid: config.target.pid, display: disp, registry: registry)
-        watcher.onEvent = { event in eventSink.yield(event) }
-        self.watcher = watcher
+        let watchers = targets.map { target in
+            let watcher = WindowWatcher(pid: target.pid, display: disp, registry: registry,
+                appName: target.name)
+            watcher.onEvent = { event in eventSink.yield(event) }
+            if config.tile {
+                let pids = targets.map(\.pid)
+                let gutter = config.gutter
+                watcher.prepareNewWindow = { [weak self] element in
+                    switch TileService.layout(pids: pids, display: disp, gutter: gutter, fit: true) {
+                    case .success(let placements):
+                        self?.statsLock.withLock { self?.tilePlacements = placements; self?.tileError = nil }
+                        return true
+                    case .failure(let error):
+                        // Keep a rejected new document from covering another
+                        // shared crop. The document remains open and can be restored.
+                        let minimized = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+                        let message = minimized == .success
+                            ? "The new window does not fit on the sharing display and was minimized. Share fewer apps, then restore it on the Mac."
+                            : "The new window does not fit and could not be minimized. Stop sharing and choose fewer apps."
+                        self?.statsLock.withLock { self?.tileError = error.description }
+                        eventSink.yield(.sharingFailed(message: message))
+                        return false
+                    }
+                }
+            }
+            return watcher
+        }
+        self.watchers = watchers
 
         // Phase 4 (issue #6): the geometry roundtrip. Client RequestResize is
         // throttled (~10Hz), written to AX, read back, and emitted as windowMoved
@@ -308,6 +339,7 @@ public final class HostSession: @unchecked Sendable {
         self.clientSink = clientSink
 
         let controlServer = ControlServer(vdsSize: vdsSize, registry: registry)
+        self.controlServer = controlServer
         await controlServer.setOnClientMessage { message in clientSink.yield(message) }
         await controlServer.setOnConnectionChange { [weak self] connected in
             self?.statsLock.withLock { self?.controlConnected = connected }
@@ -325,12 +357,15 @@ public final class HostSession: @unchecked Sendable {
             let watcherThread = Thread {
                 ctx.runLoop = CFRunLoopGetCurrent()
                 do {
-                    try watcher.start()
+                    for watcher in watchers { try watcher.start() }
                     cont.resume()
                 } catch {
+                    for watcher in watchers { watcher.stop() }
                     cont.resume(throwing: error)
+                    return
                 }
                 CFRunLoopRun()
+                for watcher in watchers { watcher.stop() }
             }
             watcherThread.stackSize = 1 << 20
             watcherThread.start()
@@ -354,6 +389,11 @@ public final class HostSession: @unchecked Sendable {
                         injector.handle(message)
                     case let .requestClose(id):
                         injector.close(id: id)
+                    case .requestKeyframe:
+                        // A client may deliberately drop stale compressed frames
+                        // to protect interaction latency. Restart its dependency
+                        // chain at the next encoded frame.
+                        encoder?.requestKeyframe()
                     }
                 }
             })
@@ -386,24 +426,32 @@ public final class HostSession: @unchecked Sendable {
         self.encoder = enc
         statsLock.withLock { usingHardware = enc.usingHardware }
 
+        let cap = DisplayCapture(display: disp, fps: config.fps,
+            applicationPIDs: Set(([config.target] + config.additionalTargets).map(\.pid)),
+            pixelFormat: config.videoFormat.capturePixelFormat)
+        self.capture = cap
+
         let videoServer = VideoServer(hvccProvider: { enc.parameterSetsHVCC })
-        await videoServer.setOnConnectionChange { [weak self] connected in
+        self.videoServer = videoServer
+        await videoServer.setOnConnectionChange { [weak self, weak enc, weak cap] connected in
             self?.statsLock.withLock { self?.videoConnected = connected }
+            if connected {
+                enc?.requestKeyframe()
+                cap?.requestRefresh()
+            }
         }
         let listener = try TCPListener(host: config.host, port: config.videoPort, label: "video")
         self.videoListener = listener
 
         let (frames, frameSink) = AsyncStream.makeStream(
             of: HEVCEncoder.EncodedFrame.self, bufferingPolicy: .bufferingNewest(4))
-        enc.onEncodedFrame = { [weak self] frame in
-            // Pass the encoder's format read-back in from here (we hold `enc`
-            // strongly) rather than reading `self.encoder` off this VT thread.
-            self?.recordEncodedFrame(frame, formatSummary: enc.outputFormatSummary)
+        enc.onEncodedFrame = { [weak self, weak enc] frame in
+            // Read the encoder directly instead of self.encoder on a VT thread;
+            // keep it weak so the callback does not retain its own encoder.
+            self?.recordEncodedFrame(frame, formatSummary: enc?.outputFormatSummary ?? "unknown")
             frameSink.yield(frame)
         }
 
-        let cap = DisplayCapture(display: disp, fps: config.fps)
-        self.capture = cap
         let frameDuration = CMTimeMake(value: 1, timescale: Int32(config.fps))
         cap.onPixelBuffer = { [weak self] pixelBuffer, pts in
             self?.markEncodeStart()
@@ -414,12 +462,21 @@ public final class HostSession: @unchecked Sendable {
         try await listener.start()
         tasks.append(Task { await videoServer.serve(listener: listener) })
         tasks.append(Task { for await f in frames { await videoServer.send(f) } })
+        tasks.append(Task {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(300)) }
+                catch { break }
+                if await videoServer.hasClient { cap.requestIdleRefresh() }
+            }
+        })
     }
 
     /// Stop everything and reset to a clean state. Safe to call more than once.
     public func stop() async {
         controlListener?.stop()
         videoListener?.stop()
+        await controlServer?.stop()
+        await videoServer?.stop()
         if let capture { await capture.stop() }
         encoder?.finish()
         eventSink?.finish()
@@ -431,10 +488,12 @@ public final class HostSession: @unchecked Sendable {
 
         tasks = []
         registry = nil
-        watcher = nil
+        watchers = []
         watcherRunLoop = nil
         controlListener = nil
         videoListener = nil
+        controlServer = nil
+        videoServer = nil
         capture = nil
         encoder = nil
         eventSink = nil

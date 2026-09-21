@@ -54,6 +54,10 @@ public final class WindowRegistry: @unchecked Sendable {
         lock.withLock { elementByID[id] }
     }
 
+    public func existingID(for element: AXUIElement) -> UInt64? {
+        lock.withLock { idByElement[ElementKey(element: element)] }
+    }
+
     /// The current recorded state for an id (its VDS rect + title), or nil if the
     /// id is unknown. Input injection reads the rect to translate a window-local
     /// click into VDS/AX space (issue #7).

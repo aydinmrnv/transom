@@ -14,7 +14,8 @@ import Foundation
 public actor ControlServer {
     private let vdsSize: WireSize
     private let registry: WindowRegistry
-    private var active: TCPTransport?
+    private var active: (id: UUID, transport: any PacketTransport)?
+    private var stopped = false
 
     /// Called for every decoded client→host message (e.g. `requestResize`,
     /// `input`). Phase 5 wires this to AX + `CGEventPost` via `InputInjector`.
@@ -39,12 +40,22 @@ public actor ControlServer {
         self.onConnectionChange = handler
     }
 
-    /// Accept connections forever (one active at a time). Each `handle` runs until
+    /// Accept connections forever (one active at a time). Each connection runs until
     /// that client disconnects, then the next connection is served.
     public func serve(listener: TCPListener) async {
         for await transport in listener.connections {
-            await handle(transport)
+            await serveConnection(transport)
         }
+    }
+
+    /// Cancelling the listener does not close its accepted connections. Close the
+    /// transport explicitly so an outstanding receive wakes up when sharing ends.
+    public func stop() async {
+        stopped = true
+        guard let active else { return }
+        self.active = nil
+        onConnectionChange?(false)
+        await active.transport.close()
     }
 
     /// Push one observed window event to the connected client, if any. On send
@@ -53,18 +64,26 @@ public actor ControlServer {
     public func broadcast(_ event: WindowWatcher.WindowEvent) async {
         guard let active else { return }
         do {
-            try await active.send(try WireCodec.encode(Self.message(for: event)))
+            try await active.transport.send(try WireCodec.encode(Self.message(for: event)))
         } catch {
             Log.general.notice(
                 "control: send failed, dropping client: \(error.localizedDescription, privacy: .public)"
             )
-            self.active = nil
-            onConnectionChange?(false)
+            if self.active?.id == active.id {
+                self.active = nil
+                onConnectionChange?(false)
+            }
+            await active.transport.close()
         }
     }
 
-    private func handle(_ transport: TCPTransport) async {
-        active = transport
+    func serveConnection(_ transport: any PacketTransport) async {
+        guard !stopped, !Task.isCancelled else {
+            await transport.close()
+            return
+        }
+        let connectionID = UUID()
+        active = (connectionID, transport)
         Log.general.notice("control: client connected")
         onConnectionChange?(true)
 
@@ -73,15 +92,18 @@ public actor ControlServer {
         } catch {
             Log.general.notice(
                 "control: resync failed: \(error.localizedDescription, privacy: .public)")
-            if active === transport { active = nil }
-            onConnectionChange?(false)
+            if active?.id == connectionID {
+                active = nil
+                onConnectionChange?(false)
+            }
             await transport.close()
             return
         }
 
         // Read client→host messages until the peer closes.
         do {
-            while let frame = try await transport.receiveFrame() {
+            while !stopped, let frame = try await transport.receiveFrame() {
+                guard !stopped, active?.id == connectionID else { break }
                 guard let message = try? WireCodec.decodeClient(frame) else {
                     Log.general.notice("control: undecodable client frame ignored")
                     continue
@@ -94,13 +116,15 @@ public actor ControlServer {
         }
 
         Log.general.notice("control: client disconnected")
-        if active === transport { active = nil }
-        onConnectionChange?(false)
+        if active?.id == connectionID {
+            active = nil
+            onConnectionChange?(false)
+        }
         await transport.close()
     }
 
     /// hello + a windowCreated per live window + the current tile layout.
-    private func sendResync(to transport: TCPTransport) async throws {
+    private func sendResync(to transport: any PacketTransport) async throws {
         try await transport.send(
             try WireCodec.encode(
                 .hello(protocolVersion: transomProtocolVersion, vdsSize: vdsSize)))
@@ -118,6 +142,8 @@ public actor ControlServer {
 
     private static func message(for event: WindowWatcher.WindowEvent) -> ControlMessage {
         switch event {
+        case .sharingFailed(let message):
+            return .error(code: 2, message: message)
         case .created(let id, let rect, let title):
             return .windowCreated(id: id, rect: rect, title: title, kind: .normal)
         case .moved(let id, let rect):

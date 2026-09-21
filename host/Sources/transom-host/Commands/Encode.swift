@@ -112,7 +112,8 @@ struct Encode: AsyncParsableCommand {
             }
         }
 
-        let capture = DisplayCapture(display: disp, fps: fps)
+        let capture = DisplayCapture(
+            display: disp, fps: fps, pixelFormat: format.capturePixelFormat)
         let frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
         capture.onPixelBuffer = { pixelBuffer, pts in
             do {

@@ -1,6 +1,6 @@
 [package]
 name = "transom-client"
-version = "0.3.0"
+version = "0.4.4"
 edition = "2021"
 rust-version = "1.74"
 license = "AGPL-3.0-or-later"
@@ -24,10 +24,14 @@ path = "src/updater.rs"
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
 features = [
+    "Foundation_Numerics",
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",
     "Win32_Storage_FileSystem",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_Direct3D11",
@@ -35,10 +39,12 @@ features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Imaging",
     "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Controls",
+    "Win32_UI_Shell",
     "Win32_System_LibraryLoader",
     "Win32_System_Com",
     "Win32_System_Threading",

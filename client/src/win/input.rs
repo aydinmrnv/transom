@@ -21,6 +21,32 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::wire::{InputEvent, MouseButton};
 
+pub const DISCONNECT_SHORTCUT: &str = "Ctrl + Alt + Shift + D";
+
+/// Reserved locally before translating/forwarding a key to the Mac. Use queue
+/// modifier state (GetKeyState), so a quick press/release still matches its D.
+pub fn disconnect_chord(vk: u32, ctrl: bool, alt: bool, shift: bool, win: bool) -> bool {
+    vk == b'D' as u32 && ctrl && alt && shift && !win
+}
+
+pub fn is_disconnect_message(message: &windows::Win32::UI::WindowsAndMessaging::MSG) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+    if ![WM_KEYDOWN, WM_SYSKEYDOWN].contains(&message.message) {
+        return false;
+    }
+    unsafe {
+        disconnect_chord(
+            message.wParam.0 as u32,
+            GetKeyState(VK_CONTROL.0 as i32) < 0,
+            GetKeyState(VK_MENU.0 as i32) < 0,
+            GetKeyState(VK_SHIFT.0 as i32) < 0,
+            GetKeyState(VK_LWIN.0 as i32) < 0 || GetKeyState(VK_RWIN.0 as i32) < 0,
+        )
+    }
+}
+
 /// The low 16 bits of an `isize`/`usize`, interpreted as a signed pixel value
 /// (mouse coordinates can be negative when the pointer is captured off-window).
 fn loword_signed(v: isize) -> i32 {
@@ -112,5 +138,39 @@ fn wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM, horizontal: bool) -> Option
             dx: 0,
             dy: steps,
         })
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn disconnect_requires_the_exact_chord() {
+        for modifiers in 0..16 {
+            assert_eq!(
+                disconnect_chord(
+                    b'D' as u32,
+                    modifiers & 1 != 0,
+                    modifiers & 2 != 0,
+                    modifiers & 4 != 0,
+                    modifiers & 8 != 0
+                ),
+                modifiers == 7
+            );
+        }
+        assert!(!disconnect_chord(b'C' as u32, true, true, true, false));
+    }
+
+    #[test]
+    fn release_and_character_messages_are_not_disconnect_commands() {
+        use windows::Win32::UI::WindowsAndMessaging::{MSG, WM_CHAR};
+        for message in [WM_KEYUP, WM_SYSKEYUP, WM_CHAR] {
+            assert!(!is_disconnect_message(&MSG {
+                message,
+                wParam: WPARAM(b'D' as usize),
+                ..Default::default()
+            }));
+        }
     }
 }

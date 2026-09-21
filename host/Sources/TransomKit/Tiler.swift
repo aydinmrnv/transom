@@ -50,6 +50,7 @@ public struct TileRect: Sendable, Equatable {
 /// I-5), not a warning to swallow.
 public enum TilerError: Error, Equatable, CustomStringConvertible {
     /// No windows were given.
+    case actualGeometryRejected
     case noWindows
     /// Gutter must be non-negative.
     case negativeGutter(Int)
@@ -64,6 +65,8 @@ public enum TilerError: Error, Equatable, CustomStringConvertible {
 
     public var description: String {
         switch self {
+        case .actualGeometryRejected:
+            return "A Mac window refused its assigned size or position. Its original layout was restored."
         case .noWindows:
             return "no windows to tile"
         case .negativeGutter(let g):
@@ -83,6 +86,32 @@ public enum TilerError: Error, Equatable, CustomStringConvertible {
 }
 
 public enum Tiler {
+
+    /// Preserve natural sizes if possible. Otherwise propose native relayout
+    /// sizes in equal cells; TileService still reads AX back before accepting.
+    public static func fittedLayout(windows: [TileSize], display: TileSize, gutter: Int)
+        -> Result<[TileRect], TilerError>
+    {
+        let natural = layout(windows: windows, display: display, gutter: gutter)
+        if case .success = natural { return natural }
+        guard !windows.isEmpty, gutter >= 0, windows.allSatisfy({ $0.width > 0 && $0.height > 0 }) else { return natural }
+        var best: [TileRect]?
+        var bestArea = 0
+        for columns in 1...windows.count {
+            let rows = (windows.count + columns - 1) / columns
+            let cellW = (display.width - (columns - 1) * gutter) / columns
+            let cellH = (display.height - (rows - 1) * gutter) / rows
+            guard cellW > 0, cellH > 0 else { continue }
+            let rects = windows.enumerated().map { i, size in
+                TileRect(x: (i % columns) * (cellW + gutter),
+                    y: (i / columns) * (cellH + gutter),
+                    width: min(size.width, cellW), height: min(size.height, cellH))
+            }
+            let area = rects.reduce(0) { $0 + $1.width * $1.height }
+            if area > bestArea { best = rects; bestArea = area }
+        }
+        return best.map { .success($0) } ?? natural
+    }
 
     /// Default gutter in VDS pixels between tiles.
     ///

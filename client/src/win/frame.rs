@@ -1,66 +1,51 @@
-//! Keep Windows in charge of moving, sizing and snapping a borderless proxy.
-//! Removing the non-client area also removes default hit testing; return native
-//! HT codes, never implement a separate drag loop. See Microsoft's DWM customframe.
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
-use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MENU};
-use windows::Win32::UI::WindowsAndMessaging::*;
-
-pub fn hit_test(hwnd: HWND, point: LPARAM) -> u32 {
+//! Native Windows chrome is outside the exact-pixel streamed client viewport.
+use crate::wire::Size;
+use windows::Win32::{
+    Foundation::RECT,
+    UI::{
+        HiDpi::AdjustWindowRectExForDpi,
+        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MENU},
+        WindowsAndMessaging::*,
+    },
+};
+pub fn hit_test(native: u32) -> u32 {
+    if native == HTCLIENT && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0 {
+        HTCAPTION
+    } else {
+        native
+    }
+}
+pub fn outer_size(w: u32, h: u32, dpi: u32) -> (i32, i32) {
+    let mut r = RECT {
+        left: 0,
+        top: 0,
+        right: w as i32,
+        bottom: h as i32,
+    };
     unsafe {
-        let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &mut rect).is_err() {
-            return HTCLIENT;
-        }
-        let dpi = GetDpiForWindow(hwnd);
-        let border = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
-            + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-        let x = (point.0 & 0xffff) as i16 as i32;
-        let y = ((point.0 >> 16) & 0xffff) as i16 as i32;
-        classify(
-            rect,
-            x,
-            y,
-            if IsZoomed(hwnd).as_bool() { 0 } else { border },
-            GetAsyncKeyState(VK_MENU.0 as i32) < 0,
-        )
+        let _ =
+            AdjustWindowRectExForDpi(&mut r, WS_OVERLAPPEDWINDOW, false, Default::default(), dpi);
+    }
+    (r.right - r.left, r.bottom - r.top)
+}
+pub fn client_size(w: u32, h: u32, dpi: u32) -> Size {
+    let inset = outer_size(0, 0, dpi);
+    Size {
+        w: (w as i32 - inset.0).max(1) as u32,
+        h: (h as i32 - inset.1).max(1) as u32,
     }
 }
-
-fn classify(r: RECT, x: i32, y: i32, border: i32, move_window: bool) -> u32 {
-    let left = x < r.left + border;
-    let right = x >= r.right - border;
-    let top = y < r.top + border;
-    let bottom = y >= r.bottom - border;
-    match (left, right, top, bottom) {
-        (true, _, true, _) => HTTOPLEFT,
-        (_, true, true, _) => HTTOPRIGHT,
-        (true, _, _, true) => HTBOTTOMLEFT,
-        (_, true, _, true) => HTBOTTOMRIGHT,
-        (true, _, _, _) => HTLEFT,
-        (_, true, _, _) => HTRIGHT,
-        (_, _, true, _) => HTTOP,
-        (_, _, _, true) => HTBOTTOM,
-        _ if move_window => HTCAPTION,
-        _ => HTCLIENT,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn negative_monitor_coordinates_and_corners() {
-        let r = RECT {
-            left: -1200,
-            top: 80,
-            right: -400,
-            bottom: 680,
-        };
-        assert_eq!(classify(r, -1199, 81, 16, false), HTTOPLEFT);
-        assert_eq!(classify(r, -401, 679, 16, false), HTBOTTOMRIGHT);
-        assert_eq!(classify(r, -800, 300, 16, false), HTCLIENT);
-        assert_eq!(classify(r, -800, 300, 16, true), HTCAPTION);
-        assert_eq!(classify(r, -1199, 81, 0, false), HTCLIENT);
+    fn chrome_is_excluded_at_every_dpi() {
+        for dpi in [96, 144, 192] {
+            let outer = outer_size(1234, 789, dpi);
+            assert_eq!(
+                client_size(outer.0 as u32, outer.1 as u32, dpi),
+                Size { w: 1234, h: 789 }
+            );
+        }
     }
 }

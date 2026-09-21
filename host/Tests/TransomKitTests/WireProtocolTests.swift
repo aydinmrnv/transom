@@ -47,6 +47,7 @@ struct WireProtocolTests {
             .requestResize(id: 1, size: WireSize(w: 2560, h: 1440), phase: .end),
             .requestFocus(id: 3),
             .requestClose(id: 3),
+            .requestKeyframe,
             .input(id: 7, event: .mouseDown(x: 12, y: 34, button: .left), ts: 1000),
             .input(id: 7, event: .mouseUp(x: 12, y: 34, button: .right), ts: 1001),
             .input(id: 7, event: .mouseMove(x: 640, y: 480), ts: 1002),

@@ -29,7 +29,12 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
     private let display: DisplayInfo
     private let fps: Int
+    private let applicationPIDs: Set<pid_t>?
+    private let pixelFormat: OSType
     private let queue = DispatchQueue(label: "one.transom.host.capture")
+    // Accessed only on the capture queue, including explicit refreshes.
+    private var lastPixelPTS = CMTime.invalid
+    private var lastEmission = DispatchTime.now().uptimeNanoseconds
 
     private let lock = NSLock()
     private var stream: SCStream?
@@ -50,9 +55,14 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     /// underneath you.
     public var onPixelBuffer: (@Sendable (CVPixelBuffer, CMTime) -> Void)?
 
-    public init(display: DisplayInfo, fps: Int = 60) {
+    public init(
+        display: DisplayInfo, fps: Int = 60, applicationPIDs: Set<pid_t>? = nil,
+        pixelFormat: OSType = kCVPixelFormatType_32BGRA
+    ) {
         self.display = display
         self.fps = fps
+        self.applicationPIDs = applicationPIDs
+        self.pixelFormat = pixelFormat
         super.init()
     }
 
@@ -71,19 +81,38 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             throw CaptureError.displayNotFound(display.id)
         }
 
-        let filter = SCContentFilter(display: scDisplay, excludingWindows: [])
+        let filter: SCContentFilter
+        if let applicationPIDs {
+            // Inclusion, not exclusion: other apps, the desktop and this host's
+            // own panel must never appear inside a selected window's crop.
+            let applications = content.applications.filter { applicationPIDs.contains($0.processID) }
+            guard !applications.isEmpty else { throw CaptureError.noSelectedApplications }
+            filter = SCContentFilter(display: scDisplay, including: applications, exceptingWindows: [])
+        } else {
+            // Whole-display capture is reserved for the diagnostic CLI/probe.
+            filter = SCContentFilter(display: scDisplay, excludingWindows: [])
+        }
 
         let config = SCStreamConfiguration()
         // The load-bearing lines for I-1: exact native pixels, no scaling.
         config.width = display.pixelWidth
         config.height = display.pixelHeight
-        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.pixelFormat = pixelFormat
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         config.queueDepth = 5
         config.showsCursor = true
         config.scalesToFit = false
+        // ScreenCaptureKit declares backgroundColor as unowned(unsafe). Keep the
+        // CGColor alive through SCStream's configuration copy; releasing the
+        // temporary immediately after assignment leaves a dangling pointer and
+        // crashes in CGColorCreateCopy when the app starts capture in the
+        // background.
+        let backgroundColor = CGColor(gray: 0, alpha: 1)
+        config.backgroundColor = backgroundColor
 
-        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        let stream = withExtendedLifetime(backgroundColor) {
+            SCStream(filter: filter, configuration: config, delegate: nil)
+        }
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await stream.startCapture()
         lock.withLock { self.stream = stream }
@@ -96,6 +125,52 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             return current
         }
         if let s { try? await s.stopCapture() }
+        // Drain an in-flight explicit refresh before the caller finishes the
+        // encoder. Refreshes queued after this observe stream == nil.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { continuation.resume() }
+        }
+    }
+
+    /// SCK emits no complete frames while a display is idle. Feed its retained
+    /// native-size image through the encoder on connect, then once more to
+    /// release a decoder's one-frame pipeline delay. This changes no Mac UI.
+    public func requestRefresh() {
+        queue.async { [weak self] in self?.refreshOnCaptureQueue() }
+        queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.refreshOnCaptureQueue()
+        }
+    }
+
+    /// SCK stops producing complete samples when the screen settles. A decoder
+    /// can still hold the final frame, or be waiting for a recovery keyframe.
+    /// Keep idle sessions advancing without increasing an active stream's FPS.
+    public func requestIdleRefresh() {
+        queue.async { [weak self] in
+            guard let self,
+                DispatchTime.now().uptimeNanoseconds - self.lastEmission >= 250_000_000
+            else { return }
+            self.refreshOnCaptureQueue()
+        }
+    }
+
+    private func refreshOnCaptureQueue() {
+        let buffer = lock.withLock { stream == nil ? nil : latestPixelBuffer }
+        guard let buffer else { return }
+        emitPixelBuffer(buffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+    }
+
+    private func emitPixelBuffer(_ buffer: CVPixelBuffer, pts: CMTime) {
+        guard let pixelHook = onPixelBuffer else { return }
+        // A captured sample can have been queued before an explicit refresh.
+        // Keep encoder timestamps monotonic without altering any pixels.
+        let timestamp = lastPixelPTS.isValid && CMTimeCompare(pts, lastPixelPTS) <= 0
+            ? CMTimeAdd(lastPixelPTS, CMTime(value: 1, timescale: 1_000_000)) : pts
+        lastPixelPTS = timestamp
+        lastEmission = DispatchTime.now().uptimeNanoseconds
+        let signpostState = Log.signposter.beginInterval("capture")
+        pixelHook(buffer, timestamp)
+        Log.signposter.endInterval("capture", signpostState)
     }
 
     /// Latest frame as a CGImage at **native pixels**, converted on demand. Nil
@@ -149,24 +224,19 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             pixelFormat: fmt,
             matchesNativePixels: dw == display.pixelWidth && dh == display.pixelHeight)
 
-        let (ctx, frameHook, pixelHook):
+        let (ctx, frameHook):
             (
-                CIContext, (@Sendable (CGImage) -> Void)?,
-                (@Sendable (CVPixelBuffer, CMTime) -> Void)?
+                CIContext, (@Sendable (CGImage) -> Void)?
             ) = lock.withLock {
                 latestPixelBuffer = pixelBuffer
                 _stats = stats
-                return (ciContext, onFrame, onPixelBuffer)
+                return (ciContext, onFrame)
             }
 
         // Zero-copy tap first: hand the raw IOSurface buffer straight to the
         // encoder before spending anything on the CGImage path (I-1). Signposted
         // so the capture→handoff interval is measurable in Instruments.
-        if let pixelHook {
-            let signpostState = Log.signposter.beginInterval("capture")
-            pixelHook(pixelBuffer, sampleBuffer.presentationTimeStamp)
-            Log.signposter.endInterval("capture", signpostState)
-        }
+        emitPixelBuffer(pixelBuffer, pts: sampleBuffer.presentationTimeStamp)
 
         if let frameHook {
             let image = ctx.createCGImage(
@@ -179,11 +249,14 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
 public enum CaptureError: Error, CustomStringConvertible {
     case displayNotFound(CGDirectDisplayID)
+    case noSelectedApplications
 
     public var description: String {
         switch self {
         case .displayNotFound(let id):
             return "ScreenCaptureKit does not see display id \(id)."
+        case .noSelectedApplications:
+            return "ScreenCaptureKit cannot find the selected apps. Open an app window and try again."
         }
     }
 }

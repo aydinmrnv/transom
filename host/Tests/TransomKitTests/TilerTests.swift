@@ -7,6 +7,23 @@ import Testing
 @Suite("Tiler")
 struct TilerTests {
 
+    @Test func severalRetinaWindowsFitWithoutOverlap() throws {
+        let sizes = Array(repeating: TileSize(width: 3000, height: 1900), count: 3)
+        let result = try Tiler.fittedLayout(windows: sizes,
+            display: TileSize(width: 3840, height: 2160), gutter: 200).get()
+        #expect(result.count == 3)
+        for (i, rect) in result.enumerated() {
+            #expect(rect.maxX <= 3840 && rect.maxY <= 2160)
+            #expect(rect.width > 0 && rect.height > 0)
+            for other in result.prefix(i) { #expect(!rect.intersects(other)) }
+        }
+    }
+    @Test func fittedLayoutPreservesNaturalSizesWhenTheyFit() throws {
+        let sizes = [TileSize(width: 800, height: 600), TileSize(width: 500, height: 600)]
+        #expect(try Tiler.fittedLayout(windows: sizes, display: TileSize(width: 1920, height: 1080), gutter: 100).get()
+            == Tiler.layout(windows: sizes, display: TileSize(width: 1920, height: 1080), gutter: 100).get())
+    }
+
     // MARK: helpers
 
     /// Unwrap a success or fail the test with the error.

@@ -331,6 +331,49 @@ to learn whether the quality ceiling is available at all.
 
 ## 8. Open questions
 
+### HEVC blank-window diagnosis (2026-09-20, real Windows PC and Mac host)
+
+Control and resize worked, but the installed 0.3.0 client rendered a placeholder.
+The live wire probe received a 3840×2160 display, hvcC configuration, and encoded
+frames. The decoder then failed with `Class not registered (0x80040154)` despite
+HEVC Video Extensions 2.5.33.0 being installed. Its hard-coded CLSID was wrong.
+Separately, it passed VideoToolbox's length-prefixed NALs and raw hvcC directly
+to a decoder that requires Annex B. Both defects prevented video independently.
+
+The client now enumerates installed HEVC transforms, converts parameter sets and
+access units at the decode boundary, preserves compressed-frame dependencies,
+and returns concrete worker errors to the dashboard. It handles output format
+changes, row stride, rejected input retry, and COM output ownership. Display
+geometry is published before either socket reader can publish video, preventing
+the one-shot configuration from racing initialization.
+
+Actual output from the repaired client against the user's running Mac:
+
+```text
+video: HEVC decoder ready, 3840x2160, Main 4:2:0 8-bit, Annex B
+video: resuming decode at keyframe (720189 bytes)
+video: first decoded BGRA frame (33177600 bytes)
+video: first decoded frame uploaded to the display texture
+```
+
+The native proxy visibly rendered the Mac's Conductor window. An independent
+synthetic fixture decoded 11 of 12 frames at 128×96 through the real Windows
+Media Foundation decoder; the final frame remains buffered without a drain.
+This proves functional decode/presentation, not sustained 60 fps or end-to-end
+checkerboard fidelity. 100%/150% DPI and mixed-scale dragging remain unverified.
+
+An additional startup limitation was reproduced on the existing host: it emits keyframes every 120
+captured frames. ScreenCaptureKit suppresses idle frames, so a new connection
+to a static desktop can wait for more activity before a usable keyframe arrives.
+The decoder correctly waits instead of feeding an incomplete reference chain.
+The host now requests a forced keyframe at video connect and feeds its retained
+native-size capture through the encoder twice (50 ms apart). This requires no
+UI motion, scaling, or restart. The server sends config plus a keyframe before
+any deltas, including on reconnect. A queue barrier makes shutdown wait for an
+in-flight refresh before finishing the encoder. This Mac change is compiled
+and unit-tested in macOS CI; its idle-display capture behavior still requires
+verification after installing the updated host on the real Mac.
+
 ### Windows runtime findings (2026-09-19, RTX 5090, 200% DPI)
 
 The persistent dashboard and DNS-SD client were exercised on Windows against a
@@ -607,6 +650,40 @@ one? Unknown.
 
 ---
 
+### Stop Sharing must close accepted sockets
+
+Code inspection during the 0.4.3 disconnect-shortcut work found that stopping
+the `NWListener` and cancelling the server tasks did not explicitly close their
+accepted `NWConnection`s. A task suspended in the callback-backed receive can
+remain alive after cancellation. `HostSession.stop()` now closes both servers'
+active transports before releasing capture and input state. Each server rejects
+connections already queued when it stopped and emits one disconnect callback.
+Regression tests exercise shutdown with a receive in progress. This is a code
+finding; real Mac capture and permission behavior require separate validation.
+
+### Selected apps must be filtered before display capture (0.4.4)
+
+On the real Mac Studio, a Conductor proxy showed wallpaper and the Transom Host
+panel over its crop. The sharing path used an unfiltered whole-display stream.
+HostSession now uses ScreenCaptureKit's display inclusion filter for the selected
+app PIDs; the full-display path remains available to the diagnostic probe.
+This retains the native display-sized pixel atlas and app popup capture without
+including unrelated apps or desktop content. See Apple's
+[ScreenCaptureKit filter walkthrough](https://developer.apple.com/videos/play/wwdc2022/10155/).
+
+The same live session advertised a Brave entry with a zero-size rect. App-wide
+AX focus notifications were treated as window elements, with missing geometry
+replaced by a zero-origin rect. Focus now resolves the app's actual focused
+window; admission requires a real AXWindow with a positive, in-display frame.
+An observer-run-loop reconciliation checks window inventory and actual geometry
+every 500 ms, including writes that settle after their immediate AX readback.
+
+While a video client is attached, idle capture refreshes keep timestamps and
+keyframes advancing. SCK can stop emitting complete samples on a static desktop;
+without refresh, a decoder's delayed final picture or keyframe recovery can stay
+stale until the next screen change. These refreshes reuse native pixels and do
+not resample an interactive frame.
+
 ## 9. Decision log
 
 | Decision | Rationale |
@@ -625,3 +702,32 @@ one? Unknown.
 | `Live` throttled ~10Hz, `End` authoritative | AX cannot keep up with `WM_SIZING`; the last live is coalesced and flushed, never dropped; `End` is the 1:1 snap (2.1, ResizeThrottle) |
 | Accept the DWM frame | Many-windows requirement forecloses exclusive fullscreen (5) |
 | Encoder pool deferred | Solves a problem we do not have at 2-3 windows (3.4) |
+
+## Window gallery and native chrome (0.4.0)
+
+The Windows dashboard catalogs shared windows and shows decoded preview cards.
+Opening a proxy is explicit; closing its local Windows caption hides the view
+without requesting that the Mac close its document. Thumbnails are downsampled
+UI previews, separate from the unscaled interactive rendering path.
+
+Native Windows captions replace the earlier borderless frame. Captured Mac title
+bar dragging previously moved the sprite-sheet source instead of the PC view.
+`AdjustWindowRectExForDpi` now accounts for the local frame; `GetClientRect` still
+sets the exact swapchain size. A thread timer continues bounded session, decode
+and presentation work inside native modal loops. Wndprocs queue owned events,
+including copies of temporary RECTs, so SetWindowPos cannot reenter mutable App
+state. Move-only gestures produce no resize requests. Outside an active resize,
+a pending geometry response crops/letterboxes rather than resampling.
+
+The Mac app can select several apps. One global tiling pass fits them together,
+reads AX geometry back, rejects overlaps/out-of-display placements, and attempts
+to restore original geometry on failure. Each app watcher shares the same ID
+registry, stream and resize clamp. Window titles include their app name without
+changing the v1 wire schema. The virtual-display pixel budget still applies.
+
+Verification: 71 Windows unit tests passed locally, including thumbnail crop
+bounds and native chrome size calculations at 96/144/192 DPI. macOS CI compiled
+and tested the initial redesign. These are not real drag, physical-pixel or Mac
+multi-app runtime measurements. This PC was locked during the attempted visual
+check; those checks remain pending until it is unlocked. Previous 0.3.1 live
+video results do not verify the new native frame.

@@ -19,11 +19,18 @@ does not otherwise exist.
 ## Quick connect
 
 Start sharing in Transom Host on the Mac, then open Transom on Windows and
-select the Mac by name under **Nearby & saved Macs**. No IP address is needed.
+select the Mac by name under **Macs**. No IP address is needed.
+Select a preview card to open a Mac window on the PC. The Mac host supports
+sharing several selected apps; local Windows title bars move and resize each view.
 Successful connections are remembered, including custom ports; discovered Macs
 are found again when their IP changes. On an existing host installation, enable
 **Settings → Connection → Choose a LAN address automatically**. Both computers
 must share a trusted local network. See [the Windows guide](client/README.md).
+
+On Windows, **Ctrl+Alt+Shift+D** disconnects from the dashboard or a focused remote
+window and leaves the Mac documents open. In Transom Host on macOS,
+**Sharing → Stop Sharing** (**⌘⌥⇧D**) stops the host session; this command is also
+available while the host's Settings window is focused.
 
 ## The problem
 

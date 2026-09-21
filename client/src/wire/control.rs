@@ -131,6 +131,9 @@ pub enum ClientMessage {
     RequestClose {
         id: u64,
     },
+    /// Ask the host to emit a fresh intra frame after the decoder dropped stale
+    /// compressed frames to stay within the latency budget.
+    RequestKeyframe,
     Input {
         id: u64,
         event: InputEvent,
@@ -293,6 +296,9 @@ impl ClientMessage {
                 ("type", Value::str("requestClose")),
                 ("id", Value::uint(*id)),
             ]),
+            ClientMessage::RequestKeyframe => {
+                Value::object(vec![("type", Value::str("requestKeyframe"))])
+            }
             ClientMessage::Input { id, event, ts } => Value::object(vec![
                 ("type", Value::str("input")),
                 ("id", Value::uint(*id)),
@@ -456,6 +462,10 @@ mod tests {
         assert_eq!(
             ClientMessage::RequestClose { id: 9 }.to_value().to_json(),
             r#"{"type":"requestClose","id":9}"#
+        );
+        assert_eq!(
+            ClientMessage::RequestKeyframe.to_value().to_json(),
+            r#"{"type":"requestKeyframe"}"#
         );
     }
 }

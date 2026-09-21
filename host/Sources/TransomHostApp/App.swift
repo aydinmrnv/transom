@@ -12,13 +12,22 @@ import TransomKit
 @main
 struct TransomHostApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @StateObject private var host = HostAppModel()
 
     var body: some Scene {
         Window("Transom Host", id: "main") {
-            ContentView()
-                .frame(minWidth: 760, minHeight: 640)
+            ContentView(host: host)
+                .frame(minWidth: 960, minHeight: 680)
         }
         .windowResizability(.contentMinSize)
+        .defaultSize(width: 1100, height: 760)
+        .commands {
+            CommandMenu("Sharing") {
+                Button("Stop Sharing") { host.stop() }
+                    .keyboardShortcut("d", modifiers: [.command, .option, .shift])
+                    .disabled(!host.running)
+            }
+        }
 
         // Standard macOS Settings window (Cmd-,). Its knobs persist in UserDefaults
         // via @AppStorage and are read back by ContentView when starting a session.

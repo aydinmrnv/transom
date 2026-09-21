@@ -13,6 +13,12 @@ pub struct Connection {
 }
 
 impl Connection {
+    pub fn same_destination(&self, other: &Self) -> bool {
+        self.id == other.id
+            || (self.host.eq_ignore_ascii_case(&other.host)
+                && self.control_port == other.control_port
+                && self.video_port == other.video_port)
+    }
     pub fn manual(host: &str, control: &str, video: &str) -> Result<Self, String> {
         let host = host.trim().trim_end_matches('.');
         if host.is_empty()
@@ -104,9 +110,20 @@ fn port(s: &str) -> Option<u16> {
 }
 
 pub fn remember(saved: &mut Vec<Connection>, connection: Connection) {
-    saved.retain(|c| c.id != connection.id);
+    saved.retain(|c| !c.same_destination(&connection));
     saved.insert(0, connection);
     saved.truncate(12);
+}
+
+/// Discovery supplies the current name/address; saved endpoints fill the gaps.
+pub fn available(nearby: &[Connection], saved: &[Connection]) -> Vec<Connection> {
+    let mut rows: Vec<Connection> = Vec::new();
+    for c in nearby.iter().chain(saved) {
+        if !rows.iter().any(|row| row.same_destination(c)) {
+            rows.push(c.clone());
+        }
+    }
+    rows
 }
 
 pub fn load(path: &Path) -> io::Result<Vec<Connection>> {
@@ -182,6 +199,21 @@ pub fn save(path: &Path, saved: &[Connection]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discovery_merges_manual_copy_but_preserves_distinct_services() {
+        let manual = Connection::manual("192.168.0.37", "7002", "7001").unwrap();
+        let mut discovered = manual.clone();
+        discovered.id = "mac-studio".into();
+        discovered.name = "Mac Studio".into();
+        let other = Connection::manual("192.168.0.37", "7102", "7101").unwrap();
+        assert_eq!(
+            available(&[discovered.clone()], &[manual.clone(), other.clone()]),
+            vec![discovered.clone(), other]
+        );
+        let mut saved = vec![manual];
+        remember(&mut saved, discovered.clone());
+        assert_eq!(saved, vec![discovered]);
+    }
     #[test]
     fn manual_custom_ports_and_hostnames() {
         let c = Connection::manual(" Mac-Studio.local ", "48000", "48001").unwrap();

@@ -6,7 +6,7 @@ move, resize, snap, and fullscreen. Think RDS RemoteApp with a Mac host — whic
 does not otherwise exist.
 
 > **Early access.** The client is a real window manager, not a scaffold: it
-> speaks the wire protocol, opens a native borderless proxy window per Mac window,
+> speaks the wire protocol, opens a native proxy window for each selected Mac window,
 > holds the 1:1 D3D11 pixel pipeline, and round-trips resize/focus/input. What is
 > **proven** vs **pending hardware bring-up** is spelled out under
 > [Verification status](#verification-status) — read it before trusting anything.
@@ -53,33 +53,50 @@ added as needed; no new crates — invariants I-8).
 
 ## Quick connect
 
-1. Open Transom Host on the Mac, choose a display and app, and press **Start**.
-   Enable **Settings → Connection → Choose a LAN address automatically**
-   (default on new installations). Allow Local Network access if macOS asks.
-2. Open Transom on Windows. Choose your Mac under **Nearby & saved Macs** and
-   press **Connect to Mac**, or double-click its name. Custom ports are automatic.
-3. Keep the dashboard open for connection, window count, video errors, and retry
-   status. **Disconnect** closes the local proxy windows, leaving Mac apps open.
-   Closing the dashboard exits the client.
+1. Open Transom Host on the Mac, choose the virtual sharing display and select
+   one or more app cards. Press **Start sharing**. The chosen windows must fit
+   on that display; Transom reads their actual geometry back before sharing.
+2. Open Transom on Windows. In **Macs**, select a nearby or saved Mac and
+   press **Connect**. Discovered connections include the correct ports.
+3. **Windows** shows actual previews of shared windows. Select a card to open
+   it on this PC. Search filters titles; grid/list, sorting and pagination help
+   browse larger collections. A card's options menu opens or hides its local view.
+   Enter in search opens the sole matching window; it never disconnects.
+4. Move a window with its local Windows title bar; use the edges to resize.
+   Closing the local view returns it to the gallery and leaves the Mac document
+   open. The Mac app's own close control still closes its remote document.
+5. **Disconnect** closes the local views. Closing the dashboard exits Transom.
+
+**Ctrl+Alt+Shift+D** disconnects from the dashboard or any focused remote window,
+including a maximized view, and returns to the dashboard. It also cancels a pending
+connection/retry. The shortcut is handled locally; it leaves Mac documents open
+and does not reserve a system-wide hotkey while other apps have focus.
 
 Successful connections are stored in `%LocalAppData%\Transom\connections.json`.
 Discovered Macs are resolved by stable identity when their IP changes. Saved
-devices remain visible while offline; **Forget saved Mac** removes a saved entry.
-Scans refresh about every ten seconds, or immediately with **Refresh**.
+and discovered entries for the same endpoint are combined. In **Macs**, use
+**Forget saved Mac** to remove an offline entry or **Refresh Macs** to scan now.
+Discovery also refreshes automatically. Disconnect before selecting another Mac.
 
 If no Mac appears, check that the host is sharing, Local Network permission is
 allowed, and the host is not bound to loopback. Both computers must share a local
-network that permits mDNS. **Connect manually** accepts a hostname such as
-`Mac-Studio.local` or an IP, with independent control/video ports. Leave video
-blank for control-only diagnostics. Connections remain unencrypted and
-unauthenticated, for trusted LAN use only.
+network that permits mDNS. **Settings** has manual hostname/IP and control/video
+port fields, plus the updater. Leave video blank for control-only diagnostics.
+Connections remain unencrypted and unauthenticated, for trusted LAN use only.
 
-The native dashboard supports keyboard navigation and per-monitor DPI sizing.
+The native dashboard uses Windows acrylic with translucent navy panels,
+Direct2D previews, and DirectWrite text. Windows versions without acrylic use
+an opaque navy fallback. Its three destinations are Windows, Macs, and Settings;
+there are no placeholder Desktop/Files tabs or remote app-launch controls.
+The Mac Studio artwork is rendered from Apple's original model; see
+[`assets/README.md`](assets/README.md) for provenance and reproduction.
+The dashboard supports keyboard navigation and per-monitor DPI sizing.
 Discovery and connection attempts run in background workers; Disconnect also
 cancels a pending attempt. CLI connections open the same persistent dashboard.
-Resize Mac windows by dragging their edges; hold **Alt** while dragging inside
-one to move or snap it using Windows' native move loop. Ordinary clicks in the
-interior continue to go to the Mac app.
+The local title bar supports native move, resize, minimize and maximize.
+**Alt-drag** inside the view remains an optional move shortcut. Ordinary clicks
+in the streamed content go to the Mac app. Video continues during native drags;
+a move does not reposition or resize the source window on the Mac.
 
 ## Commands
 
@@ -164,19 +181,34 @@ explicit about which is which:
   **full geometry round-trip** — the Rust client requested a resize, the Swift
   host applied it via AX, read back the actual rect, and reported `windowMoved`
   with the actual geometry, which the client consumed correctly.
-- 53 unit tests over framing, JSON, control/video message shapes, input encoding,
+- Unit tests over framing, JSON, control/video message shapes, input encoding,
   the window model, and initial proxy fitting.
 - The whole client compiles and **links to a real Windows executable**, so the
   `windows-rs` API usage (D3D11, DXGI, Win32, Media Foundation) is correct.
 
-**Pending bring-up on a real Windows box (cannot be verified from a Mac):**
+**Verified on the Windows PC (2026-09-20):**
+
+- A real 3840×2160 HEVC Main 4:2:0 8-bit stream from the Mac decoded and rendered
+  as the Conductor proxy window. Version 0.3.1 fixes decoder discovery, Annex B
+  conversion, compressed-frame queueing, and startup event ordering. Decoder
+  failures now show their actual cause in the dashboard.
+- A synthetic 128×96 HEVC regression stream decoded through the installed
+  Media Foundation decoder (`cargo test decodes_hevc_fixture_on_windows --
+  --ignored --nocapture`). This test is intentionally separate from hosted CI.
+- The earlier native resize check measured matching physical client and
+  swapchain dimensions at 200% DPI; see `docs/architecture.md` for exact output.
+
+Windows needs **HEVC Video Extensions** installed. Use **4:2:0 8-bit** in the
+Mac host's Video settings. Update the Mac host too: it now produces a keyframe
+on connection even if the desktop is idle. Older hosts can delay that frame
+until more Mac activity. Reconnect if the dashboard reports a decoder error.
+
+**Still unverified:**
 
 - The 1:1 pixel guarantee at 100 / 150 / 200% scaling (the checkerboard test).
 - `ResizeBuffers`-to-exact-physical-rect and `WM_DPICHANGED` across monitors.
-- **HEVC decode**: the Media Foundation path is coded to the documented contract
-  and links, but whether the in-box decoder ingests the host's 4:4:4 10-bit stream
-  is a hardware question. Any decode failure degrades to the placeholder texture,
-  so the window manager still runs.
+- End-to-end checkerboard fidelity and sustained frame-rate/latency under load.
+  The current decode path does not support 10-bit/4:4:4 output.
 
 ## `doctor`
 

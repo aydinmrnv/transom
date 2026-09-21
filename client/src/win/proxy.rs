@@ -39,6 +39,7 @@ pub struct Proxy {
     pub source: Rect,
     /// True between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`.
     pub in_size_move: bool,
+    pub resizing: bool,
     last_live_send: Option<Instant>,
     /// M0 diagnostic: draw a 1px checkerboard instead of sampling the stream.
     pub checkerboard: bool,
@@ -60,6 +61,7 @@ impl Proxy {
             height: source.h,
             source,
             in_size_move: false,
+            resizing: false,
             last_live_send: None,
             checkerboard,
         };
@@ -152,11 +154,32 @@ impl Proxy {
             return;
         };
 
+        // While waiting for a resize acknowledgement, crop/letterbox at native
+        // scale. Only an actual interactive resize may stretch the pixels.
+        let stretch = self.in_size_move && self.resizing;
+        let draw_w = if stretch || self.checkerboard {
+            self.width
+        } else {
+            self.width.min(self.source.w).max(1)
+        };
+        let draw_h = if stretch || self.checkerboard {
+            self.height
+        } else {
+            self.height.min(self.source.h).max(1)
+        };
+        let crop_w = if stretch { self.source.w } else { draw_w };
+        let crop_h = if stretch { self.source.h } else { draw_h };
+        if draw_w != self.width || draw_h != self.height {
+            unsafe {
+                gpu.context
+                    .ClearRenderTargetView(rtv, &[0.08, 0.10, 0.14, 1.0]);
+            }
+        }
         let mode = if self.checkerboard {
             RenderMode::Checkerboard
         } else if let Some(tex) = source_tex {
             RenderMode::Source {
-                uv_rect: tex.uv_rect(self.source.x, self.source.y, self.source.w, self.source.h),
+                uv_rect: tex.uv_rect(self.source.x, self.source.y, crop_w, crop_h),
             }
         } else {
             RenderMode::Waiting
@@ -164,10 +187,11 @@ impl Proxy {
 
         gpu.draw(
             rtv,
-            self.width,
-            self.height,
+            draw_w,
+            draw_h,
             mode,
             source_tex.map(|t| &t.srv),
+            source_tex.map(|t| [t.width, t.height]).unwrap_or([1, 1]),
         );
 
         unsafe {
@@ -201,11 +225,13 @@ impl Proxy {
 
     pub fn begin_size_move(&mut self) {
         self.in_size_move = true;
+        self.resizing = false;
         self.last_live_send = None;
     }
 
     pub fn end_size_move(&mut self) {
         self.in_size_move = false;
+        self.resizing = false;
         self.last_live_send = None;
     }
 }
