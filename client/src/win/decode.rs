@@ -400,6 +400,8 @@ struct Decoder {
     width: u32,
     height: u32,
     stride: usize,
+    coded_width: u32,
+    coded_height: u32,
     provides_samples: bool,
     out_size: u32,
     out_alignment: u32,
@@ -494,6 +496,8 @@ impl Decoder {
                         width,
                         height,
                         stride: width as usize,
+                        coded_width: width,
+                        coded_height: height,
                         provides_samples: false,
                         out_size: 0,
                         out_alignment: 0,
@@ -675,17 +679,32 @@ impl Decoder {
             let size = output
                 .GetUINT64(&MF_MT_FRAME_SIZE)
                 .unwrap_or(pack_size(self.width, self.height));
-            if size != pack_size(self.width, self.height) {
-                return Err(windows::core::Error::new(
-                    MF_E_INVALIDMEDIATYPE,
-                    "Decoded size differs from host display; refusing to scale",
-                ));
+            let coded_width = (size >> 32) as u32;
+            let coded_height = size as u32;
+            let mut aperture = [0_u8; 16];
+            let visible = if output
+                .GetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, &mut aperture, None)
+                .is_ok()
+                && aperture[..8] == [0; 8]
+            {
+                Some((
+                    u32::from_le_bytes(aperture[8..12].try_into().unwrap()),
+                    u32::from_le_bytes(aperture[12..16].try_into().unwrap()),
+                ))
+            } else {
+                None
+            };
+            if !valid_output_geometry(self.width, self.height, coded_width, coded_height, visible) {
+                return Err(windows::core::Error::new(MF_E_INVALIDMEDIATYPE,
+                    format!("Decoded geometry {coded_width}x{coded_height}, aperture {visible:?}, expected {}x{}; refusing to scale", self.width, self.height)));
             }
+            self.coded_width = coded_width;
+            self.coded_height = coded_height;
             output.SetUINT64(&MF_MT_FRAME_SIZE, size)?;
             self.transform.SetOutputType(0, &output, 0)?;
             self.stride = output
                 .GetUINT32(&MF_MT_DEFAULT_STRIDE)
-                .unwrap_or(self.width) as usize;
+                .unwrap_or(coded_width) as usize;
             let info = self.transform.GetOutputStreamInfo(0)?;
             self.provides_samples = info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
             self.out_size = info.cbSize;
@@ -703,7 +722,13 @@ impl Decoder {
             two_d
                 .ContiguousCopyTo(&mut packed)
                 .map_err(|e| e.to_string())?;
-            return validate_nv12(packed, self.width, self.height, self.width as usize);
+            return crop_nv12(
+                packed,
+                self.width,
+                self.height,
+                self.coded_width as usize,
+                self.coded_height,
+            );
         }
         let mut ptr = std::ptr::null_mut();
         let mut len = 0;
@@ -713,7 +738,13 @@ impl Decoder {
         let pixels = std::slice::from_raw_parts(ptr, len as usize).to_vec();
         let unlock = buffer.Unlock();
         unlock.map_err(|e| e.to_string())?;
-        validate_nv12(pixels, self.width, self.height, self.stride)
+        crop_nv12(
+            pixels,
+            self.width,
+            self.height,
+            self.stride,
+            self.coded_height,
+        )
     }
 }
 impl Drop for Decoder {
@@ -772,6 +803,61 @@ unsafe fn make_input_sample(
 }
 fn pack_size(width: u32, height: u32) -> u64 {
     ((width as u64) << 32) | height as u64
+}
+
+fn valid_output_geometry(
+    width: u32,
+    height: u32,
+    coded_width: u32,
+    coded_height: u32,
+    visible: Option<(u32, u32)>,
+) -> bool {
+    coded_width >= width
+        && coded_height >= height
+        && coded_width <= 8192
+        && coded_height <= 8192
+        && coded_width % 2 == 0
+        && coded_height % 2 == 0
+        && ((coded_width == width && coded_height == height) || visible == Some((width, height)))
+}
+
+/// Remove codec surface padding without resampling. Chroma starts after the
+/// coded height, which can be larger than the visible window height.
+fn crop_nv12(
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    stride: usize,
+    coded_height: u32,
+) -> Result<DecodedFrame, String> {
+    if coded_height == height {
+        return validate_nv12(pixels, width, height, stride);
+    }
+    let needed = stride
+        .checked_mul(coded_height as usize)
+        .and_then(|y| y.checked_add(stride.checked_mul(coded_height as usize / 2)?));
+    if width == 0
+        || width % 2 != 0
+        || coded_height % 2 != 0
+        || stride < width as usize
+        || needed.map_or(true, |n| pixels.len() < n)
+    {
+        return Err("Invalid padded NV12 buffer".into());
+    }
+    if height > coded_height || height % 2 != 0 {
+        return Err("Invalid NV12 aperture".into());
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let mut cropped = Vec::with_capacity(w * h * 3 / 2);
+    for row in 0..h {
+        cropped.extend_from_slice(&pixels[row * stride..row * stride + w]);
+    }
+    let uv = stride * coded_height as usize;
+    for row in 0..h / 2 {
+        cropped.extend_from_slice(&pixels[uv + row * stride..uv + row * stride + w]);
+    }
+    validate_nv12(cropped, width, height, w)
 }
 
 fn validate_nv12(
@@ -938,6 +1024,41 @@ mod tests {
             assert!(max_error <= 3, "frame {index} max color error {max_error}");
         }
         assert!(hardware.surfaces.len() <= 3, "GPU surfaces must be reused");
+    }
+
+    #[test]
+    fn padded_decoder_surfaces_require_an_exact_visible_aperture() {
+        assert!(valid_output_geometry(
+            2390,
+            1000,
+            2400,
+            1008,
+            Some((2390, 1000))
+        ));
+        assert!(!valid_output_geometry(2390, 1000, 2400, 1008, None));
+        assert!(!valid_output_geometry(
+            2390,
+            1000,
+            2400,
+            1008,
+            Some((2400, 1008))
+        ));
+        assert!(!valid_output_geometry(
+            2390,
+            1000,
+            2384,
+            1008,
+            Some((2390, 1000))
+        ));
+        let mut bytes = vec![0_u8; 6 * 6 * 3 / 2];
+        bytes[0..4].copy_from_slice(&[10, 11, 12, 13]);
+        bytes[6..10].copy_from_slice(&[20, 21, 22, 23]);
+        bytes[36..40].copy_from_slice(&[101, 102, 103, 104]);
+        let DecodedFrame::CpuNv12 { pixels, stride } = crop_nv12(bytes, 4, 2, 6, 6).unwrap() else {
+            panic!()
+        };
+        assert_eq!(stride, 4);
+        assert_eq!(pixels, [10, 11, 12, 13, 20, 21, 22, 23, 101, 102, 103, 104]);
     }
 
     #[test]

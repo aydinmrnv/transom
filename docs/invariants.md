@@ -138,9 +138,9 @@ The Windows PC is the real window manager. The Mac only draws.
 - The client decides where windows are, how big they are, and which is focused.
 - The host's job is to make the Mac match, via AX, and report what actually
   happened.
-- The host **never** repositions a window on its own initiative except when
-  re-tiling to satisfy the non-overlap guarantee, and when it does, it must
-  report the new rects.
+- The host may reposition the requested window on the sharing display so its
+  requested size fits, and must report the actual rect. It never moves or
+  shrinks other selected windows. Only the legacy CLI tiles an atlas.
 
 **Corollary:** AX writes can be refused, clamped, or rounded (OQ-2). The host
 must always read back after writing and report the **actual** geometry, not the

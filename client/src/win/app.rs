@@ -851,18 +851,24 @@ impl App {
             let outer =
                 super::frame::outer_size(source.w, source.h, super::dpi::dpi_for_window(hwnd));
             unsafe {
-                // Keep the maximized state and restore placement, but fit the
-                // actual Mac size if its app/Dock imposes a tighter limit. Do
-                // not SW_RESTORE here: that causes an intermediate resize echo.
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    0,
-                    0,
-                    outer.0,
-                    outer.1,
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
+                // Windows can keep a maximized outer frame at (-13,-13).
+                // Reposition it into the work area before applying Mac readback,
+                // otherwise NCCALCSIZE clips another border on every roundtrip.
+                let (x, y, flags) = if IsZoomed(hwnd).as_bool() {
+                    let mut rect = RECT::default();
+                    let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
+                    let work = super::dpi::work_area_at(
+                        (rect.left + rect.right) / 2,
+                        (rect.top + rect.bottom) / 2,
+                    );
+                    (work.left, work.top, SWP_NOZORDER | SWP_NOACTIVATE)
+                } else {
+                    (0, 0, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
+                };
+                proxy.host_resize_pending = true;
+                if SetWindowPos(hwnd, None, x, y, outer.0, outer.1, flags).is_err() {
+                    proxy.host_resize_pending = false;
+                }
             }
             // The resulting WM_SIZE resizes the swapchain to the exact rect.
         }
@@ -924,7 +930,9 @@ impl App {
                 let mut request = false;
                 if let Some(proxy) = self.proxies.get_mut(&id) {
                     proxy.resize_swapchain(&self.gpu, w, h);
-                    request = w > 0
+                    let from_host = std::mem::take(&mut proxy.host_resize_pending);
+                    request = !from_host
+                        && w > 0
                         && h > 0
                         && !proxy.in_size_move
                         && (w != proxy.source.w || h != proxy.source.h);
@@ -943,6 +951,7 @@ impl App {
             WM_ENTERSIZEMOVE => {
                 self.pending_mouse_moves.remove(&id);
                 if let Some(proxy) = self.proxies.get_mut(&id) {
+                    proxy.host_resize_pending = false;
                     proxy.begin_size_move();
                 }
 

@@ -40,6 +40,7 @@ pub struct Proxy {
     /// True between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`.
     pub in_size_move: bool,
     pub resizing: bool,
+    pub host_resize_pending: bool,
     pub resize_sync: crate::resize_sync::ResizeSync,
     pub dirty: bool,
     last_live_send: Option<Instant>,
@@ -64,6 +65,7 @@ impl Proxy {
             source,
             in_size_move: false,
             resizing: false,
+            host_resize_pending: false,
             resize_sync: Default::default(),
             dirty: true,
             last_live_send: None,

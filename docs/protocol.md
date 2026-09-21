@@ -488,3 +488,5 @@ up to even, with at most one padding row/column; `rect.w/h` remains the actual
 window size. Capture and rendering never rescale settled pixels. During a resize
 the old surface may temporarily crop/letterbox until the new generation arrives.
 Opening or resizing a selected window never tiles or shrinks another window.
+The desktop host admits up to 16 active windows per session. Opening a further
+window returns error code 3 without changing any current stream.

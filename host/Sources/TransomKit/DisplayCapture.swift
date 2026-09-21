@@ -249,6 +249,13 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             status == .complete
         else { return }
 
+        // SCK can shrink a growing window into the old fixed-size surface even
+        // with scalesToFit disabled. Keep the last native frame until the new
+        // encoder generation has the settled dimensions; never forward those
+        // intermediate resampled pixels to a second client-side resize.
+        if window != nil, let scale = attachments.first?[.contentScale] as? Double,
+           abs(scale - 1) > 0.001 { return }
+
         guard let pixelBuffer = sampleBuffer.imageBuffer else { return }
 
         let dw = CVPixelBufferGetWidth(pixelBuffer)

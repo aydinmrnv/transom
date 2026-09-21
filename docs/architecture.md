@@ -830,4 +830,33 @@ retain their size and reference chain. The host UI uses independent previews too
 The legacy CLI capture/tiler remains available for diagnostics. Neither path
 creates a virtual display. Independent capture removes the combined area budget;
 it does not remove an individual Mac app’s minimum/maximum or display-size limit.
-Live verification and cursor results are recorded separately after installation.
+On the M1 Max Mac Studio and RTX 5090 PC, Xcode and Conductor were both captured
+at 3840x1950 simultaneously, with independent content despite overlapping on the
+Mac. Maximize requested 3840x2064 and received the actual 3840x1950 allowance.
+Restore returned Conductor to 2390x1000; a corner drag requested 2126x888 and
+correctly settled to the app's minimum 2126x1000 without resizing Xcode.
+The 200% DPI trace reported equal physical client/swapchain sizes throughout.
+100%, 150%, and cross-monitor dragging were not retested in this pass.
+
+Two target-machine findings mattered:
+
+- Media Foundation returns a 2400x1008 coded surface for a 2390x1000 window.
+  Accept codec padding only when the minimum display aperture exactly matches
+  the expected native dimensions at origin zero. GPU copies and CPU NV12
+  extraction crop that padding without scaling; CPU chroma begins after the
+  coded height, not the visible height.
+- A maximized borderless HWND can have its outer origin at (-13,-13). Applying
+  Mac readback with SWP_NOMOVE repeatedly clipped another border in NCCALCSIZE,
+  causing a resize feedback loop. Place the maximized frame at the work-area
+  origin and suppress the host-originated WM_SIZE echo. Keep its restore state.
+
+ScreenCaptureKit may shrink a growing window into its old fixed output size,
+regardless of scalesToFit. Reject frames with non-unit contentScale and retain
+the last native frame until the resized generation arrives, avoiding a second
+resampling step during the transition. See Apple's
+[single-window capture explanation](https://developer.apple.com/videos/play/wwdc2022/10155/).
+
+The client-side window browser lists running apps without requiring host-side
+app selection. Electron's AXManualAccessibility opt-in exposes Conductor's text
+area; the native Windows I-beam handle was verified inside that field. Cursor
+motion remains local and the video excludes the remote pointer.
