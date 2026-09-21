@@ -30,6 +30,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     private let display: DisplayInfo
     private let fps: Int
     private let applicationPIDs: Set<pid_t>?
+    private let pixelFormat: OSType
     private let queue = DispatchQueue(label: "one.transom.host.capture")
     // Accessed only on the capture queue, including explicit refreshes.
     private var lastPixelPTS = CMTime.invalid
@@ -54,10 +55,14 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     /// underneath you.
     public var onPixelBuffer: (@Sendable (CVPixelBuffer, CMTime) -> Void)?
 
-    public init(display: DisplayInfo, fps: Int = 60, applicationPIDs: Set<pid_t>? = nil) {
+    public init(
+        display: DisplayInfo, fps: Int = 60, applicationPIDs: Set<pid_t>? = nil,
+        pixelFormat: OSType = kCVPixelFormatType_32BGRA
+    ) {
         self.display = display
         self.fps = fps
         self.applicationPIDs = applicationPIDs
+        self.pixelFormat = pixelFormat
         super.init()
     }
 
@@ -92,7 +97,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         // The load-bearing lines for I-1: exact native pixels, no scaling.
         config.width = display.pixelWidth
         config.height = display.pixelHeight
-        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.pixelFormat = pixelFormat
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         config.queueDepth = 5
         config.showsCursor = true

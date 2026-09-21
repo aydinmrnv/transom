@@ -512,19 +512,31 @@ impl App {
         }
     }
 
-    /// Upload at most the newest completed decode. The expensive hardware-decode
-    /// drain and NV12→BGRA conversion happen on `transom-decode`; this UI-thread
-    /// step is only the final D3D texture update.
+    /// Upload at most the newest completed decode. The decoder keeps NV12 intact;
+    /// the D3D pixel shader performs the color conversion while each proxy window
+    /// samples its own crop.
     fn poll_decoder(&mut self) {
+        let needs_keyframe = self
+            .decoder
+            .as_ref()
+            .map(DecoderWorker::take_keyframe_request)
+            .unwrap_or(false);
+        if needs_keyframe {
+            self.send(&ClientMessage::RequestKeyframe);
+            self.video_notice = Some("Video fell behind; recovering…".into());
+            self.update_status();
+            eprintln!("video: dropped stale frames; requested a fresh keyframe");
+        }
         if let Some(error) = self.decoder.as_ref().and_then(DecoderWorker::take_error) {
             self.video_notice = Some(error);
             self.update_status();
         }
         let frame = self.decoder.as_ref().and_then(DecoderWorker::take_frame);
-        if let (Some(bgra), Some(source)) = (frame, self.source.as_ref()) {
-            source.update_bgra(&self.gpu, &bgra);
+        if let (Some(frame), Some(source)) = (frame, self.source.as_ref()) {
+            source.update_nv12(&self.gpu, &frame.nv12, frame.stride);
             if let Some(vds) = self.vds {
-                self.dashboard.update_previews(&bgra, vds);
+                self.dashboard
+                    .update_previews_nv12(&frame.nv12, frame.stride, vds);
             }
             self.video_decoded += 1;
             let recovered = self.video_notice.take().is_some();

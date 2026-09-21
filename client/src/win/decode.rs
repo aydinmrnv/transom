@@ -2,6 +2,7 @@
 //! samples to Annex B here, without changing the network protocol.
 use crate::hevc::HevcConfig;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use windows::core::Interface;
@@ -10,8 +11,20 @@ use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
 };
 
-const MAX_PENDING_FRAMES: usize = 8;
-const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
+// Three access units is enough to absorb a short decoder hiccup without turning
+// the queue into visible remote-desktop latency. If we overflow, we discard the
+// dependency chain and ask the host for a fresh keyframe.
+const MAX_PENDING_FRAMES: usize = 3;
+const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
+
+/// A decoded frame in the format produced by the Windows HEVC decoder.
+/// Keeping NV12 intact lets D3D11 do the YUV→RGB conversion in the pixel
+/// shader instead of expanding every 4K frame to a CPU-owned BGRA buffer.
+#[derive(Debug)]
+pub struct DecodedFrame {
+    pub nv12: Vec<u8>,
+    pub stride: usize,
+}
 
 #[derive(Default)]
 struct PendingInput {
@@ -27,29 +40,35 @@ struct EncodedFrame {
     reset: bool,
 }
 impl PendingInput {
-    fn push(&mut self, mut frame: EncodedFrame) {
+    /// Queue one compressed access unit. Returns true when the dependency chain
+    /// was discarded and the caller should request a new keyframe.
+    fn push(&mut self, mut frame: EncodedFrame) -> bool {
         if self.stopped {
-            return;
+            return false;
         }
+        let mut request_keyframe = false;
         if self.frames.len() >= MAX_PENDING_FRAMES
             || self.bytes + frame.data.len() > MAX_PENDING_BYTES
         {
             self.frames.clear();
             self.bytes = 0;
             self.awaiting_keyframe = true;
+            request_keyframe = true;
         }
         if frame.data.len() > MAX_PENDING_BYTES {
-            return;
+            self.awaiting_keyframe = true;
+            return request_keyframe;
         }
         if self.awaiting_keyframe {
             if !frame.keyframe {
-                return;
+                return request_keyframe;
             }
             frame.reset = true;
             self.awaiting_keyframe = false;
         }
         self.bytes += frame.data.len();
         self.frames.push_back(frame);
+        request_keyframe
     }
     fn pop(&mut self) -> Option<EncodedFrame> {
         let frame = self.frames.pop_front()?;
@@ -62,8 +81,9 @@ impl PendingInput {
 /// may safely use a latest-frame mailbox.
 pub struct DecoderWorker {
     input: Arc<(Mutex<PendingInput>, Condvar)>,
-    output: Arc<Mutex<Option<Vec<u8>>>>,
+    output: Arc<Mutex<Option<DecodedFrame>>>,
     error: Arc<Mutex<Option<String>>>,
+    keyframe_request: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 impl DecoderWorker {
@@ -80,6 +100,8 @@ impl DecoderWorker {
         let worker_input = Arc::clone(&input);
         let worker_output = Arc::clone(&output);
         let worker_error = Arc::clone(&error);
+        let keyframe_request = Arc::new(AtomicBool::new(false));
+        let worker_keyframe_request = Arc::clone(&keyframe_request);
         let thread = thread::Builder::new()
             .name("transom-decode".into())
             .spawn(move || {
@@ -118,8 +140,8 @@ impl DecoderWorker {
                                 decoded += 1;
                                 if decoded == 1 {
                                     eprintln!(
-                                        "video: first decoded BGRA frame ({} bytes)",
-                                        frame.len()
+                                        "video: first decoded NV12 frame ({} bytes)",
+                                        frame.nv12.len()
                                     );
                                 }
                                 *worker_output.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -128,6 +150,7 @@ impl DecoderWorker {
                             Ok(None) => {}
                             Err(e) => {
                                 eprintln!("video: {e}");
+                                worker_keyframe_request.store(true, Ordering::Release);
                                 *worker_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
                                 recover = true;
                             }
@@ -148,12 +171,14 @@ impl DecoderWorker {
             input,
             output,
             error,
+            keyframe_request,
             thread: Some(thread),
         })
     }
     pub fn submit(&self, data: Vec<u8>, keyframe: bool, pts_micros: u64) {
         let (lock, ready) = &*self.input;
-        lock.lock()
+        let dropped_chain = lock
+            .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(EncodedFrame {
                 data,
@@ -161,13 +186,19 @@ impl DecoderWorker {
                 pts_micros,
                 reset: false,
             });
+        if dropped_chain {
+            self.keyframe_request.store(true, Ordering::Release);
+        }
         ready.notify_one();
     }
-    pub fn take_frame(&self) -> Option<Vec<u8>> {
+    pub fn take_frame(&self) -> Option<DecodedFrame> {
         self.output.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
     pub fn take_error(&self) -> Option<String> {
         self.error.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+    pub fn take_keyframe_request(&self) -> bool {
+        self.keyframe_request.swap(false, Ordering::AcqRel)
     }
 }
 impl Drop for DecoderWorker {
@@ -318,7 +349,7 @@ impl Decoder {
         au: &[u8],
         keyframe: bool,
         pts_micros: u64,
-    ) -> Result<Option<Vec<u8>>, String> {
+    ) -> Result<Option<DecodedFrame>, String> {
         let bytes = self.config.annex_b(au, keyframe)?;
         unsafe {
             let sample = make_input_sample(&bytes, keyframe, pts_micros)
@@ -348,7 +379,7 @@ impl Decoder {
         }
         Ok(())
     }
-    unsafe fn drain(&mut self) -> Result<Option<Vec<u8>>, String> {
+    unsafe fn drain(&mut self) -> Result<Option<DecodedFrame>, String> {
         let mut latest = None;
         // Bound repeated STREAM_CHANGE responses without progress.
         for _ in 0..64 {
@@ -375,7 +406,7 @@ impl Decoder {
             match result {
                 Ok(()) => {
                     if let Some(sample) = sample {
-                        latest = Some(self.sample_to_bgra(&sample)?);
+                        latest = Some(self.sample_to_nv12(&sample)?);
                     }
                 }
                 Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(latest),
@@ -417,7 +448,7 @@ impl Decoder {
             return Ok(());
         }
     }
-    unsafe fn sample_to_bgra(&self, sample: &IMFSample) -> Result<Vec<u8>, String> {
+    unsafe fn sample_to_nv12(&self, sample: &IMFSample) -> Result<DecodedFrame, String> {
         let buffer = sample
             .ConvertToContiguousBuffer()
             .map_err(|e| e.to_string())?;
@@ -427,23 +458,17 @@ impl Decoder {
             two_d
                 .ContiguousCopyTo(&mut packed)
                 .map_err(|e| e.to_string())?;
-            return nv12_to_bgra(&packed, self.width, self.height, self.width as usize)
-                .ok_or_else(|| "Invalid packed NV12 output size".into());
+            return validate_nv12(packed, self.width, self.height, self.stride);
         }
         let mut ptr = std::ptr::null_mut();
         let mut len = 0;
         buffer
             .Lock(&mut ptr, None, Some(&mut len))
             .map_err(|e| e.to_string())?;
-        let bgra = nv12_to_bgra(
-            std::slice::from_raw_parts(ptr, len as usize),
-            self.width,
-            self.height,
-            self.stride,
-        );
+        let bytes = std::slice::from_raw_parts(ptr, len as usize).to_vec();
         let unlock = buffer.Unlock();
         unlock.map_err(|e| e.to_string())?;
-        bgra.ok_or_else(|| "Invalid NV12 output size/stride".into())
+        validate_nv12(bytes, self.width, self.height, self.stride)
     }
 }
 impl Drop for Decoder {
@@ -504,7 +529,27 @@ fn pack_size(width: u32, height: u32) -> u64 {
     ((width as u64) << 32) | height as u64
 }
 
+fn validate_nv12(
+    nv12: Vec<u8>,
+    width: u32,
+    height: u32,
+    stride: usize,
+) -> Result<DecodedFrame, String> {
+    let needed = stride
+        .checked_mul(height as usize)
+        .and_then(|y| y.checked_add(stride.checked_mul(height as usize / 2)?))
+        .ok_or_else(|| "Invalid NV12 output dimensions".to_string())?;
+    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 || stride < width as usize {
+        return Err("Invalid NV12 output dimensions or stride".into());
+    }
+    if nv12.len() < needed {
+        return Err("Invalid NV12 output buffer size".into());
+    }
+    Ok(DecodedFrame { nv12, stride })
+}
+
 /// BT.709 limited-range NV12, respecting padded rows without resizing.
+#[cfg(test)]
 fn nv12_to_bgra(nv12: &[u8], width: u32, height: u32, stride: usize) -> Option<Vec<u8>> {
     let w = width as usize;
     let h = height as usize;

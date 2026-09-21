@@ -389,6 +389,11 @@ public final class HostSession: @unchecked Sendable {
                         injector.handle(message)
                     case let .requestClose(id):
                         injector.close(id: id)
+                    case .requestKeyframe:
+                        // A client may deliberately drop stale compressed frames
+                        // to protect interaction latency. Restart its dependency
+                        // chain at the next encoded frame.
+                        encoder?.requestKeyframe()
                     }
                 }
             })
@@ -422,7 +427,8 @@ public final class HostSession: @unchecked Sendable {
         statsLock.withLock { usingHardware = enc.usingHardware }
 
         let cap = DisplayCapture(display: disp, fps: config.fps,
-            applicationPIDs: Set(([config.target] + config.additionalTargets).map(\.pid)))
+            applicationPIDs: Set(([config.target] + config.additionalTargets).map(\.pid)),
+            pixelFormat: config.videoFormat.capturePixelFormat)
         self.capture = cap
 
         let videoServer = VideoServer(hvccProvider: { enc.parameterSetsHVCC })
