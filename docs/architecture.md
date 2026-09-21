@@ -869,24 +869,43 @@ settings. Installers can explicitly launch the host with `--start-sharing` to
 resume using saved settings and existing grants; ordinary launches still wait
 for Start sharing.
 
-### 0.4.9: input follows the independently captured window
+### 0.4.10: verified focus before normal macOS input delivery
 
 Independent capture exposed an old input assumption: AXRaise plus an app
 activation request was followed immediately by a global HID event. When Xcode
-was covered by Conductor, the latter could still win desktop hit testing and
-receive Xcode's click. Keyboard events also discarded their window ID.
+was covered by Conductor, the latter could still receive Xcode's click. The
+0.4.9 attempt to use `CGEvent.postToPid` preserved event metadata in tests but
+failed actual Xcode clicks on the target Mac. Metadata tests were not evidence
+of AppKit/Electron delivery.
 
-The host now posts directly to the selected process and stamps mouse events
-with the ScreenCaptureKit window ID retained in the registry. Scroll events use
-the target process and location; macOS ignores mouse-window fields on scrolls.
-Focus uses
-AXFrontmost, AXMain, AXFocused and AXRaise, but event routing no longer depends
-on those requests completing before a click. Unsharing removes the capture ID,
-and all input requires an active registry entry. This uses the public
-[CGEvent.postToPid API](https://developer.apple.com/documentation/coregraphics/cgevent/posttopid(_:))
-and leaves the client protocol unchanged.
+Use the normal HID path after reading back both AXFrontmost and AXFocusedWindow
+for the intended app/window. Only request activation, AXMain and AXRaise when
+readback differs; wait briefly for confirmation and drop the action if focus
+cannot be verified. Inactive-window motion does not hit the app covering it.
+The client protocol is unchanged. The relevant public APIs are
+[AXFrontmost](https://developer.apple.com/documentation/applicationservices/kaxfrontmostattribute),
+[AXFocusedWindow](https://developer.apple.com/documentation/applicationservices/kaxfocusedwindowattribute),
+and [CGEvent.post](https://developer.apple.com/documentation/coregraphics/cgevent/post(tap:)).
 
-The signed 0.4.9 host was installed on the Mac Studio. All 98 Swift tests passed,
-including selected-process/window metadata and routing-identity cleanup. These
-tests do not prove delivery through the macOS window server. The live overlap
-retest was stopped at the user's request before completion and remains pending.
+AX work runs on a serial input worker instead of blocking the control server's
+receive actor. Adjacent motion for the same window coalesces, while clicks,
+keys and focus transitions remain ordered. Disconnect discards queued input
+and inserts a modifier/button reset barrier before the next session.
+
+The signed 0.4.10 host was installed on the M1 Max Mac Studio and tested with
+client 0.4.8 on the RTX 5090 PC. All 100 Swift tests pass. Live checks verified:
+
+- Xcode General/Info tab clicks, including the first click after returning from
+  Conductor while the Mac windows overlap.
+- Typing and clearing a character in Xcode's navigator filter.
+- Conductor conversation/diff tab clicks, Cmd-F via Windows Ctrl-F, typing and
+  clearing a Find query, and Escape to close Find.
+- Wheel scrolling in both apps and a Conductor scrollbar drag.
+
+No focus failures appeared in the sampled session. Five measured focus changes
+completed in 9-124 ms. Across 123 input samples in that host process, delivery
+variation above the session's minimum clock offset was median 2.0 ms, p95
+7.23 ms, max 115.24 ms (including focus changes). This is relative timing, not
+absolute network or input-to-photon latency. Steady decoder samples averaged
+0.3-0.7 ms per frame with queues generally below 0.3 ms; one startup burst
+reached 51.48 ms. Idle refresh rates are not a sustained-motion frame-rate test.
