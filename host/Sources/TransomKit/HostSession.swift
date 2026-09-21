@@ -8,6 +8,7 @@ import Foundation
 public struct HostConfig: Sendable {
     public var target: TargetApp
     public var additionalTargets: [TargetApp]
+    public var clientWindowSelection: Bool
     public var display: DisplayInfo
     public var host: String
     public var controlPort: UInt16
@@ -30,6 +31,7 @@ public struct HostConfig: Sendable {
     public init(
         target: TargetApp,
         additionalTargets: [TargetApp] = [],
+        clientWindowSelection: Bool = false,
         display: DisplayInfo,
         host: String = "127.0.0.1",
         controlPort: UInt16 = TransomPorts.control,
@@ -44,6 +46,7 @@ public struct HostConfig: Sendable {
         logInput: Bool = false
     ) {
         self.target = target
+        self.clientWindowSelection = clientWindowSelection
         var seen: Set<pid_t> = [target.pid]
         self.additionalTargets = additionalTargets.filter { seen.insert($0.pid).inserted }
         self.display = display
@@ -174,6 +177,8 @@ public final class HostSession: @unchecked Sendable {
     private var eventSink: AsyncStream<WindowWatcher.WindowEvent>.Continuation?
     private var clientSink: AsyncStream<ClientMessage>.Continuation?
     private var injector: InputInjector?
+    private var cursorMonitor: CursorMonitor?
+    private var browser: WindowBrowser?
     private var tasks: [Task<Void, Never>] = []
 
     // Everything a background callback writes lives behind this lock.
@@ -273,7 +278,7 @@ public final class HostSession: @unchecked Sendable {
 
         // Tile once at startup so streamed windows are non-overlapping (I-5), and
         // keep the requested-vs-actual placements for the Status view (I-4/OQ-2).
-        let targets = [config.target] + config.additionalTargets
+        let targets = config.clientWindowSelection ? [] : [config.target] + config.additionalTargets
         if config.tile {
             switch TileService.layout(pids: targets.map(\.pid), display: disp, gutter: config.gutter, fit: true)
             {
@@ -340,17 +345,28 @@ public final class HostSession: @unchecked Sendable {
 
         let controlServer = ControlServer(vdsSize: vdsSize, registry: registry, gutter: config.gutter)
         self.controlServer = controlServer
+        let cursorMonitor = CursorMonitor(registry: registry, display: disp) { message in
+            Task { await controlServer.send(message) }
+        }
+        self.cursorMonitor = cursorMonitor
+        let browser: WindowBrowser? = config.clientWindowSelection
+            ? WindowBrowser(registry: registry, display: disp, gutter: config.gutter, server: controlServer) : nil
+        self.browser = browser
         // Mouse/key events must not wait behind slow AX resize writes.
         await controlServer.setOnClientMessage { message in
             switch message {
-            case .input, .requestFocus: injector.handle(message)
+            case .input, .requestFocus:
+                injector.handle(message)
+                cursorMonitor.observe(message)
+            case .previewWindow(let id):
+                Task { await browser?.preview(id: id) }
             default: clientSink.yield(message)
             }
         }
         await controlServer.setOnConnectionChange { [weak self] connected in
             self?.statsLock.withLock { self?.controlConnected = connected }
             // A dropped client leaves no modifier held for the next one (issue #7).
-            if !connected { injector.resetModifiers() }
+            if !connected { injector.resetModifiers(); cursorMonitor.reset() }
         }
         let controlListener = try TCPListener(
             host: config.host, port: config.controlPort, label: "control")
@@ -389,6 +405,11 @@ public final class HostSession: @unchecked Sendable {
             Task {
                 for await message in clientMessages {
                     switch message {
+                    case .openWindow(let id):
+                        await browser?.open(id: id)
+                    case .releaseWindow(let id):
+                        await browser?.release(id: id)
+                    case .previewWindow: break
                     case let .requestResize(id, size, phase):
                         await resize.handle(id: id, size: size, phase: phase)
                     case let .commitResize(id, size, request):
@@ -424,6 +445,17 @@ public final class HostSession: @unchecked Sendable {
             statsLock.withLock { videoEnabled = true }
         }
 
+        if let browser {
+            if let capture { await browser.setCapture(capture) }
+            await browser.tick()
+            tasks.append(Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(150))
+                    await browser.tick()
+                }
+            })
+        }
+
         controlListener.advertise(
             address: config.host, videoPort: config.video ? config.videoPort : nil)
         statsLock.withLock { isRunning = true }
@@ -441,7 +473,8 @@ public final class HostSession: @unchecked Sendable {
 
         let cap = DisplayCapture(display: disp, fps: config.fps,
             applicationPIDs: Set(([config.target] + config.additionalTargets).map(\.pid)),
-            pixelFormat: config.videoFormat.capturePixelFormat)
+            pixelFormat: config.videoFormat.capturePixelFormat,
+            selectedWindows: config.clientWindowSelection ? [] : nil)
         self.capture = cap
 
         let videoServer = VideoServer(hvccProvider: { enc.parameterSetsHVCC }, requestKeyframe: { [weak enc, weak cap] in
@@ -491,6 +524,8 @@ public final class HostSession: @unchecked Sendable {
 
     /// Stop everything and reset to a clean state. Safe to call more than once.
     public func stop() async {
+        cursorMonitor?.stop()
+        await browser?.stop()
         controlListener?.stop()
         videoListener?.stop()
         await controlServer?.stop()
@@ -517,6 +552,8 @@ public final class HostSession: @unchecked Sendable {
         eventSink = nil
         clientSink = nil
         injector = nil
+        cursorMonitor = nil
+        browser = nil
 
         statsLock.withLock {
             isRunning = false

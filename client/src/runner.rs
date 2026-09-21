@@ -218,6 +218,11 @@ fn apply_for_display(
 
 fn print_control(ev: &ModelEvent, t: u64) {
     match ev {
+        ModelEvent::WindowCatalog { windows } => {
+            println!("[{t:>6}ms] {} available windows", windows.len())
+        }
+        ModelEvent::WindowOpened { id } => println!("[{t:>6}ms] window {id} ready"),
+        ModelEvent::WindowPreview { .. } | ModelEvent::CursorShape { .. } => {}
         ModelEvent::Connected { vds } => {
             println!("[{t:>6}ms] connected — VDS {}x{}", vds.w, vds.h)
         }

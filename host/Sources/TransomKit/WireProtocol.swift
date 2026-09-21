@@ -70,12 +70,22 @@ public enum ResizePhase: String, Codable, Sendable {
 /// The protocol version carried in `hello`. Bump on any breaking wire change.
 public let transomProtocolVersion = 1
 
+public struct AvailableWindow: Codable, Equatable, Sendable {
+    public var id: UInt64
+    public var title: String
+    public var minimized: Bool
+}
+
 // MARK: - Host -> Client
 
 public enum ControlMessage: Sendable, Equatable {
     /// First message on a fresh control connection: version + the full virtual
     /// display size, so the client can sanity-check every rect it receives.
     case hello(protocolVersion: Int, vdsSize: WireSize)
+    case windowCatalog(windows: [AvailableWindow])
+    case windowPreview(id: UInt64, jpeg: String)
+    case windowOpened(id: UInt64)
+    case cursorShape(id: UInt64, text: Bool, rect: WireRect, ts: UInt64)
     case windowCreated(id: UInt64, rect: WireRect, title: String, kind: WindowKind)
     /// ACTUAL geometry after an AX write or an observed move (I-4), never requested.
     case windowMoved(id: UInt64, rect: WireRect)
@@ -91,6 +101,9 @@ public enum ControlMessage: Sendable, Equatable {
 // MARK: - Client -> Host
 
 public enum ClientMessage: Sendable, Equatable {
+    case openWindow(id: UInt64)
+    case releaseWindow(id: UInt64)
+    case previewWindow(id: UInt64)
     case requestResize(id: UInt64, size: WireSize, phase: ResizePhase)
     case commitResize(id: UInt64, size: WireSize, request: UInt64)
     case requestFocus(id: UInt64)
@@ -107,7 +120,7 @@ public enum ClientMessage: Sendable, Equatable {
 
 extension ControlMessage: Codable {
     private enum Key: String, CodingKey {
-        case type, id, rect, title, kind, windows, displaySize, request, maxSize
+        case type, id, rect, title, kind, windows, displaySize, request, maxSize, jpeg, text, ts
         case protocolVersion = "protocol"
         case vdsSize, code, message
     }
@@ -119,6 +132,22 @@ extension ControlMessage: Codable {
             try c.encode("hello", forKey: .type)
             try c.encode(version, forKey: .protocolVersion)
             try c.encode(vdsSize, forKey: .vdsSize)
+        case .windowCatalog(let windows):
+            try c.encode("windowCatalog", forKey: .type)
+            try c.encode(windows, forKey: .windows)
+        case .windowPreview(let id, let jpeg):
+            try c.encode("windowPreview", forKey: .type)
+            try c.encode(id, forKey: .id)
+            try c.encode(jpeg, forKey: .jpeg)
+        case .windowOpened(let id):
+            try c.encode("windowOpened", forKey: .type)
+            try c.encode(id, forKey: .id)
+        case .cursorShape(let id, let text, let rect, let ts):
+            try c.encode("cursorShape", forKey: .type)
+            try c.encode(id, forKey: .id)
+            try c.encode(text, forKey: .text)
+            try c.encode(rect, forKey: .rect)
+            try c.encode(ts, forKey: .ts)
         case .windowCreated(let id, let rect, let title, let kind):
             try c.encode("windowCreated", forKey: .type)
             try c.encode(id, forKey: .id)
@@ -167,6 +196,14 @@ extension ControlMessage: Codable {
             self = .hello(
                 protocolVersion: try c.decode(Int.self, forKey: .protocolVersion),
                 vdsSize: try c.decode(WireSize.self, forKey: .vdsSize))
+        case "windowCatalog":
+            self = .windowCatalog(windows: try c.decode([AvailableWindow].self, forKey: .windows))
+        case "windowPreview":
+            self = .windowPreview(id: try c.decode(UInt64.self, forKey: .id), jpeg: try c.decode(String.self, forKey: .jpeg))
+        case "windowOpened":
+            self = .windowOpened(id: try c.decode(UInt64.self, forKey: .id))
+        case "cursorShape":
+            self = .cursorShape(id: try c.decode(UInt64.self, forKey: .id), text: try c.decode(Bool.self, forKey: .text), rect: try c.decode(WireRect.self, forKey: .rect), ts: try c.decode(UInt64.self, forKey: .ts))
         case "windowCreated":
             self = .windowCreated(
                 id: try c.decode(UInt64.self, forKey: .id),
@@ -212,6 +249,15 @@ extension ClientMessage: Codable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: Key.self)
         switch self {
+        case .openWindow(let id):
+            try c.encode("openWindow", forKey: .type)
+            try c.encode(id, forKey: .id)
+        case .releaseWindow(let id):
+            try c.encode("releaseWindow", forKey: .type)
+            try c.encode(id, forKey: .id)
+        case .previewWindow(let id):
+            try c.encode("previewWindow", forKey: .type)
+            try c.encode(id, forKey: .id)
         case .requestResize(let id, let size, let phase):
             try c.encode("requestResize", forKey: .type)
             try c.encode(id, forKey: .id)
@@ -243,6 +289,9 @@ extension ClientMessage: Codable {
         let c = try decoder.container(keyedBy: Key.self)
         let type = try c.decode(String.self, forKey: .type)
         switch type {
+        case "openWindow": self = .openWindow(id: try c.decode(UInt64.self, forKey: .id))
+        case "releaseWindow": self = .releaseWindow(id: try c.decode(UInt64.self, forKey: .id))
+        case "previewWindow": self = .previewWindow(id: try c.decode(UInt64.self, forKey: .id))
         case "requestResize":
             if let request = try c.decodeIfPresent(UInt64.self, forKey: .request),
                 request > 0, try c.decode(ResizePhase.self, forKey: .phase) == .end {

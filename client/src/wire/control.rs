@@ -76,9 +76,32 @@ pub struct TileWindow {
     pub rect: Rect,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailableWindow {
+    pub id: u64,
+    pub title: String,
+    pub minimized: bool,
+}
+
 /// Host → client. The full set the host can push (`ControlMessage` in Swift).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerMessage {
+    WindowCatalog {
+        windows: Vec<AvailableWindow>,
+    },
+    WindowPreview {
+        id: u64,
+        jpeg: String,
+    },
+    WindowOpened {
+        id: u64,
+    },
+    CursorShape {
+        id: u64,
+        text: bool,
+        rect: Rect,
+        ts: u64,
+    },
     /// First message on a fresh connection: protocol version + the whole virtual
     /// display size, so we can sanity-check every rect we receive.
     Hello {
@@ -129,6 +152,15 @@ pub enum ServerMessage {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientMessage {
+    OpenWindow {
+        id: u64,
+    },
+    ReleaseWindow {
+        id: u64,
+    },
+    PreviewWindow {
+        id: u64,
+    },
     RequestResize {
         id: u64,
         size: Size,
@@ -235,6 +267,38 @@ impl ServerMessage {
             .as_str()
             .ok_or_else(|| DecodeError::Shape("`type` is not a string".to_string()))?;
         match ty {
+            "windowCatalog" => {
+                let arr = field(&v, "windows")?
+                    .as_array()
+                    .ok_or_else(|| DecodeError::Shape("windows must be an array".into()))?;
+                if arr.len() > 4096 {
+                    return Err(DecodeError::Shape("too many windows".into()));
+                }
+                let windows = arr
+                    .iter()
+                    .map(|w| {
+                        Ok(AvailableWindow {
+                            id: u64_field(w, "id")?,
+                            title: str_field(w, "title")?,
+                            minimized: field(w, "minimized")?.as_bool().unwrap_or(false),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, DecodeError>>()?;
+                Ok(ServerMessage::WindowCatalog { windows })
+            }
+            "windowPreview" => Ok(ServerMessage::WindowPreview {
+                id: u64_field(&v, "id")?,
+                jpeg: str_field(&v, "jpeg")?,
+            }),
+            "windowOpened" => Ok(ServerMessage::WindowOpened {
+                id: u64_field(&v, "id")?,
+            }),
+            "cursorShape" => Ok(ServerMessage::CursorShape {
+                id: u64_field(&v, "id")?,
+                text: field(&v, "text")?.as_bool().unwrap_or(false),
+                rect: rect_field(&v, "rect")?,
+                ts: u64_field(&v, "ts")?,
+            }),
             "hello" => Ok(ServerMessage::Hello {
                 protocol: u32_field(&v, "protocol")?,
                 vds: size_field(&v, "vdsSize")?,
@@ -299,6 +363,19 @@ impl ClientMessage {
     /// Encode to a JSON `Value` matching the host's `ClientMessage` decoder.
     pub fn to_value(&self) -> Value {
         match self {
+            ClientMessage::OpenWindow { id }
+            | ClientMessage::ReleaseWindow { id }
+            | ClientMessage::PreviewWindow { id } => Value::object(vec![
+                (
+                    "type",
+                    Value::str(match self {
+                        ClientMessage::OpenWindow { .. } => "openWindow",
+                        ClientMessage::ReleaseWindow { .. } => "releaseWindow",
+                        _ => "previewWindow",
+                    }),
+                ),
+                ("id", Value::uint(*id)),
+            ]),
             ClientMessage::RequestResize { id, size, phase } => Value::object(vec![
                 ("type", Value::str("requestResize")),
                 ("id", Value::uint(*id)),

@@ -8,14 +8,11 @@ struct ContentView: View {
     @ObservedObject var host: HostAppModel
     @State private var displays: [DisplayInfo] = []
     @State private var apps: [TargetApp] = []
-    @State private var selectedPIDs: Set<pid_t> = []
     @State private var selectedDisplayID: CGDirectDisplayID = 0
     @State private var screenRecording = false
     @State private var accessibility = false
     @State private var detectedAddress = HostDiscovery.localAddresses().first ?? ""
     @State private var activeAddress: String?
-    @State private var search = ""
-    @AppStorage("sharedAppBundleIDs") private var savedApps = ""
     @AppStorage(HostDefaults.bindAddress) private var bindAddress = "127.0.0.1"
     @AppStorage(HostDefaults.automaticAddress) private var automaticAddress = true
     @AppStorage(HostDefaults.controlPort) private var controlPort = HostDefaults.defaultControlPort
@@ -39,7 +36,7 @@ struct ContentView: View {
             && (!videoEnabled || controlPort != videoPort)
     }
     private var canStart: Bool {
-        permissionsReady && !selectedPIDs.isEmpty && selectedDisplayID != 0
+        permissionsReady && !apps.isEmpty && selectedDisplayID != 0
             && PrivateAddress.isPrivateIPv4(effectiveAddress) && hostIsAssigned && portsValid && !host.starting
     }
 
@@ -113,11 +110,11 @@ struct ContentView: View {
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 8) {
-                Text(host.running ? "Shared windows" : "Choose your apps")
+                Text(host.running ? "Shared windows" : "Share your Mac windows")
                     .font(.system(size: 30, weight: .semibold))
                 Text(host.running
-                    ? "Open any of these windows from Transom on your PC."
-                    : "Select the Mac apps you want to use on Windows.")
+                    ? "These windows are in use on your PC. Browse all windows in the Windows app."
+                    : "Connect from Windows and choose the windows you want to use.")
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 16)
@@ -135,65 +132,18 @@ struct ContentView: View {
 
     private var appSelection: some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                Picker("Sharing display", selection: $selectedDisplayID) {
-                    Text("Choose a display").tag(CGDirectDisplayID(0))
-                    ForEach(displays, id: \.id) { display in
-                        Text("\(display.pixelWidth) × \(display.pixelHeight)\(display.isMain ? " (main)" : "")")
-                            .tag(display.id)
-                    }
-                }.frame(maxWidth: 330)
-                Spacer()
-                Button(action: refreshAll) { Label("Refresh", systemImage: "arrow.clockwise") }
+            Label("Choose windows on your PC", systemImage: "macwindow.on.rectangle")
+                .font(.title3.weight(.semibold))
+            Text("All open Mac windows appear in Transom on Windows. Open a preview to start using it. Apps you open later appear automatically.")
+                .font(.callout).foregroundStyle(.secondary)
+            Picker("Sharing display", selection: $selectedDisplayID) {
+                ForEach(displays, id: \.id) { display in
+                    Text("\(display.pixelWidth) × \(display.pixelHeight)\(display.isMain ? " · Main display" : "")").tag(display.id)
+                }
             }
-            Text("Use your virtual display. Shared windows move there while you work on the PC.")
+            Text("Windows you open from the PC move onto this display while shared.")
                 .font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Text("\(selectedPIDs.count) apps selected").font(.callout.weight(.medium))
-                Spacer()
-                TextField("Find an app", text: $search).textFieldStyle(.roundedBorder).frame(width: 220)
-            }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 14)], spacing: 14) {
-                ForEach(apps.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }, id: \.pid) { app in
-                    appCard(app)
-                }
-            }
-            if apps.isEmpty {
-                ContentUnavailableView("No apps available", systemImage: "macwindow",
-                    description: Text("Open an app on this Mac, then choose Refresh."))
-            }
-        }
-        .disabled(host.starting)
-    }
-
-    private func appCard(_ app: TargetApp) -> some View {
-        let selected = selectedPIDs.contains(app.pid)
-        return Button {
-            if selected { selectedPIDs.remove(app.pid) } else { selectedPIDs.insert(app.pid) }
-            savedApps = apps.filter { selectedPIDs.contains($0.pid) }.compactMap(\.bundleID).joined(separator: "\n")
-        } label: {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    if let icon = NSRunningApplication(processIdentifier: app.pid)?.icon {
-                        Image(nsImage: icon).resizable().frame(width: 44, height: 44)
-                    } else { Image(systemName: "macwindow").font(.largeTitle) }
-                    Spacer()
-                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(selected ? accent : Color.secondary.opacity(0.5))
-                        .font(.title3)
-                }
-                Text(app.name).font(.headline).lineLimit(1)
-                    .foregroundStyle(.primary)
-                Text(selected ? "Ready to share" : "Select app")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            .padding(18).frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? accent.opacity(0.06) : Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(selected ? accent : Color.secondary.opacity(0.18), lineWidth: selected ? 2 : 1))
-            .contentShape(RoundedRectangle(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(app.name).accessibilityValue(selected ? "Selected" : "Not selected")
+        }.disabled(host.starting)
     }
 
     private var sharedWindows: some View {
@@ -229,7 +179,7 @@ struct ContentView: View {
             }
             if host.previewWindows.isEmpty {
                 ContentUnavailableView("No shared windows", systemImage: "macwindow",
-                    description: Text("Open a window in a selected app to make it available on your PC."))
+                    description: Text("Choose a window in Transom on your PC to start sharing it."))
             }
         }
     }
@@ -300,10 +250,6 @@ struct ContentView: View {
         HostDefaults.repairStaleBindAddress()
         displays = Displays.all()
         apps = AppResolver.runningApps().filter { $0.pid != ProcessInfo.processInfo.processIdentifier }
-        if selectedPIDs.isEmpty {
-            let saved = Set(savedApps.split(separator: "\n").map(String.init))
-            selectedPIDs = Set(apps.filter { saved.contains($0.bundleID ?? "") }.map(\.pid))
-        } else { selectedPIDs.formIntersection(Set(apps.map(\.pid))) }
         if selectedDisplayID == 0 || !displays.contains(where: { $0.id == selectedDisplayID }) {
             selectedDisplayID = displays.first(where: { $0.isMain })?.id ?? displays.first?.id ?? 0
         }
@@ -314,7 +260,7 @@ struct ContentView: View {
         accessibility = AXIsProcessTrusted()
     }
     private func startSharing() {
-        let targets = apps.filter { selectedPIDs.contains($0.pid) }
+        let targets = AppResolver.runningApps().filter { $0.pid != ProcessInfo.processInfo.processIdentifier }
         guard let first = targets.first, let display = displays.first(where: { $0.id == selectedDisplayID }) else { return }
         let address = automaticAddress ? (HostDiscovery.localAddresses().first ?? "") : bindAddress
         guard PrivateAddress.isPrivateIPv4(address) else {
@@ -322,7 +268,7 @@ struct ContentView: View {
             return
         }
         activeAddress = address
-        host.start(config: HostConfig(target: first, additionalTargets: Array(targets.dropFirst()),
+        host.start(config: HostConfig(target: first, clientWindowSelection: true,
             display: display, host: address, controlPort: UInt16(clamping: controlPort),
             videoPort: UInt16(clamping: videoPort), gutter: gutter, tile: true,
             video: videoEnabled, bitrateMbps: bitrateMbps, fps: fps,

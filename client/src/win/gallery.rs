@@ -11,6 +11,7 @@ pub struct Card {
     pub opened: bool,
     pub pixels: Vec<u8>,
     pub size: Size,
+    pub last_request: Option<std::time::Instant>,
 }
 impl Card {
     pub fn new(window: Window, opened: bool) -> Self {
@@ -19,10 +20,54 @@ impl Card {
             opened,
             pixels: vec![],
             size: Size { w: 0, h: 0 },
+            last_request: None,
         }
     }
     pub fn update_preview_atlas(&mut self, pixels: &[u8], display: Size, native_display: Size) {
-        self.fill_preview(pixels, display, native_display, 480, 270);
+        if self.window.source.w > 0 {
+            self.fill_preview(pixels, display, native_display, 480, 270);
+        }
+    }
+    pub fn jpeg_preview(&mut self, encoded: &str) {
+        use windows::Win32::{Graphics::Imaging::*, System::Com::*};
+        let Some(bytes) = crate::wire::base64::decode(encoded) else {
+            return;
+        };
+        let result = (|| -> windows::core::Result<(Vec<u8>, Size)> {
+            unsafe {
+                let wic: IWICImagingFactory =
+                    CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+                let stream = wic.CreateStream()?;
+                stream.InitializeFromMemory(&bytes)?;
+                let decoder = wic.CreateDecoderFromStream(
+                    &stream,
+                    std::ptr::null(),
+                    WICDecodeMetadataCacheOnLoad,
+                )?;
+                let frame = decoder.GetFrame(0)?;
+                let (mut w, mut h) = (0, 0);
+                frame.GetSize(&mut w, &mut h)?;
+                if w == 0 || h == 0 || w > 480 || h > 320 {
+                    return Err(windows::core::Error::from_win32());
+                }
+                let converter = wic.CreateFormatConverter()?;
+                converter.Initialize(
+                    &frame,
+                    &GUID_WICPixelFormat32bppPBGRA,
+                    WICBitmapDitherTypeNone,
+                    None,
+                    0.,
+                    WICBitmapPaletteTypeCustom,
+                )?;
+                let mut pixels = vec![0; (w * h * 4) as usize];
+                converter.CopyPixels(std::ptr::null(), w * 4, &mut pixels)?;
+                Ok((pixels, Size { w, h }))
+            }
+        })();
+        if let Ok((pixels, size)) = result {
+            self.pixels = pixels;
+            self.size = size;
+        }
     }
     fn fill_preview(
         &mut self,

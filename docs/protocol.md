@@ -436,3 +436,22 @@ may prefix titles. The borderless Windows proxy displays the Mac chrome inside t
 streamed client area and input coordinates. A move-only gesture emits no
 `requestResize`; Begin/Live/End are reserved for size changes. Existing v1 hosts
 continue to work with the selector. Multiple shared apps require the newer host.
+
+### Client window browser and cursor hints (0.4.7)
+
+The host app uses client-side window selection. Its catalogue is separate from
+the active atlas; a catalogue entry has no crop and must never create a proxy.
+The CLI retains explicit app selection. Upgrade both desktop apps to use this mode.
+
+Host → client:
+- `{"type":"windowCatalog","windows":[{"id":42,"title":"Editor — Document","minimized":false}]}`: full replacement catalogue of standard/dialog AX windows from running regular apps, including minimized windows and windows on other displays. The host excludes its own panel and system overlays. IDs are stable for a live AX window. Sent on changes and reconnect.
+- `{"type":"windowPreview","id":42,"jpeg":"BASE64"}`: optional independent thumbnail; standard base64 JPEG, at most 128,000 compressed bytes and 320×200 pixels. It is only for the picker, never the interactive render path. Requests are spaced out and limited to visible cards. A missing preview is not an empty desktop crop.
+- `{"type":"windowOpened","id":42}`: follows `windowCreated` and actual geometry for an admitted window; the client may now create its proxy. Failed admission sends error code 3, preserving the existing shared set.
+- `{"type":"cursorShape","id":42,"text":true,"rect":{"x":20,"y":100,"w":800,"h":40},"ts":12345}`: AX text-field/area hint. Rect is window-local physical pixels; ts is the originating input timestamp, also retained while polling a stationary pointer. Use the native I-beam only inside this region, discard out-of-order hints, and fall back to the local arrow when a hint expires. Non-client resizing keeps the OS cursor. Video continues to exclude the cursor.
+
+Client → host:
+- `{"type":"openWindow","id":42}`: restore if minimized, tile only the selected set, verify actual geometry and unambiguous AX↔SCK identity, update the exact-window capture filter, then acknowledge. Listing alone never moves windows.
+- `{"type":"releaseWindow","id":42}`: hide the local view and free its atlas slot without closing the Mac document. The host sends `windowDestroyed` for the active stream; the catalogue entry remains.
+- `{"type":"previewWindow","id":42}`: request a small independent thumbnail. Protected/unavailable images can be omitted.
+
+AX hit testing runs on a separate, coalescing queue at 25 Hz. It never delays CGEvent injection or carries pointer motion through video. The browser discovers newly running apps/windows every 1.5 seconds and reconciles active geometry every 150 ms, in addition to immediate resize readback. The physical sharing display still bounds the simultaneously open set.

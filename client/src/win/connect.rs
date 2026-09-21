@@ -294,6 +294,36 @@ impl Dashboard {
             self.state.layout();
         }
     }
+    /// Spread independent thumbnails across ticks; never queue a burst behind input.
+    pub fn next_catalog_preview(&mut self) -> Option<u64> {
+        if !self.previews_due() {
+            return None;
+        }
+        self.state.last_preview = Instant::now();
+        for &i in &self.state.visible {
+            let card = &mut self.state.cards[i];
+            if card
+                .last_request
+                .map(|t| t.elapsed() > Duration::from_secs(5))
+                .unwrap_or(true)
+            {
+                card.last_request = Some(Instant::now());
+                return Some(card.window.id);
+            }
+        }
+        None
+    }
+    pub fn catalog_preview(&mut self, id: u64, jpeg: &str) {
+        if let Some(card) = self.state.cards.iter_mut().find(|c| c.window.id == id) {
+            card.jpeg_preview(jpeg);
+            unsafe {
+                self.state.invalidate();
+                for slot in 0..CARD_COUNT {
+                    let _ = InvalidateRect(self.state.control(CARD_BASE + slot), None, false);
+                }
+            }
+        }
+    }
     pub fn previews_due(&self) -> bool {
         self.state.view == NAV_APPS
             && !self.state.cards.is_empty()
@@ -760,7 +790,7 @@ impl State {
 
         if self.view == NAV_APPS {
             p.text(
-                "Shared windows",
+                "Mac windows",
                 rect(246., 220., 460., 36.),
                 22.,
                 true,
@@ -774,7 +804,7 @@ impl State {
                     self.cards.iter().filter(|c| c.opened).count()
                 )
             } else {
-                "Connect to your Mac to browse its shared windows.".into()
+                "Connect to your Mac to browse all its windows.".into()
             };
             p.text(
                 &detail,
@@ -803,8 +833,8 @@ impl State {
                     ("No matching windows", "Try another window title.")
                 } else if self.connected {
                     (
-                        "No shared windows",
-                        "On your Mac, select apps with open windows in Transom Host.",
+                        "No windows available",
+                        "Open a window on your Mac. It will appear here automatically.",
                     )
                 } else {
                     (

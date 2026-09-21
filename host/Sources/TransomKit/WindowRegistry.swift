@@ -69,6 +69,10 @@ public final class WindowRegistry: @unchecked Sendable {
         lock.withLock { entries[id] = Entry(id: id, rect: rect, title: title) }
     }
 
+    public func unshare(id: UInt64) {
+        lock.withLock { entries[id] = nil }
+    }
+
     public func updateRect(id: UInt64, rect: WireRect) {
         lock.withLock { entries[id]?.rect = rect }
     }

@@ -86,6 +86,7 @@ pub struct App {
     rx: Option<std::sync::mpsc::Receiver<SessionEvent>>,
     proxies: HashMap<u64, Proxy>,
     windows: HashMap<u64, Window>,
+    catalog: Option<Vec<crate::wire::control::AvailableWindow>>,
     resize_limits: HashMap<u64, Size>,
     hwnd_to_id: HashMap<isize, u64>,
     source: Option<SourceTexture>,
@@ -138,6 +139,7 @@ impl App {
             rx: None,
             proxies: HashMap::new(),
             windows: HashMap::new(),
+            catalog: None,
             resize_limits: HashMap::new(),
             hwnd_to_id: HashMap::new(),
             source: None,
@@ -232,6 +234,9 @@ impl App {
                         );
                         let _ = SetForegroundWindow(proxy.hwnd);
                     }
+                } else if self.catalog.is_some() {
+                    self.notice = Some("Opening window…".into());
+                    self.send(&ClientMessage::OpenWindow { id });
                 } else if let Some(w) = self.windows.get(&id).cloned() {
                     if let Err(e) = self.create_proxy(id, w.source, &w.title, app_ptr) {
                         self.notice = Some(format!("Could not open window: {e}"));
@@ -241,6 +246,9 @@ impl App {
                 self.update_status();
             }
             Some(Action::HideWindow(id)) => {
+                if self.catalog.is_some() {
+                    self.send(&ClientMessage::ReleaseWindow { id });
+                }
                 if let Some(proxy) = self.proxies.get(&id) {
                     unsafe {
                         let _ = ShowWindow(proxy.hwnd, SW_HIDE);
@@ -250,6 +258,11 @@ impl App {
                 self.update_status();
             }
             None => {}
+        }
+        if self.catalog.is_some() {
+            if let Some(id) = self.dashboard.next_catalog_preview() {
+                self.send(&ClientMessage::PreviewWindow { id });
+            }
         }
         let result = self.connecting.as_ref().and_then(|rx| rx.try_recv().ok());
         if let Some(result) = result {
@@ -314,6 +327,7 @@ impl App {
             self.destroy_proxy(id);
         }
         self.windows.clear();
+        self.catalog = None;
         self.resize_limits.clear();
         self.refresh_gallery();
         self.pending_mouse_moves.clear();
@@ -416,6 +430,30 @@ impl App {
 
     fn apply_model_event(&mut self, ev: ModelEvent, _app_ptr: *mut App) {
         match ev {
+            ModelEvent::WindowCatalog { windows } => {
+                self.catalog = Some(windows);
+            }
+            ModelEvent::WindowPreview { id, jpeg } => {
+                self.dashboard.catalog_preview(id, &jpeg);
+                return;
+            }
+            ModelEvent::WindowOpened { id } => {
+                self.notice = None;
+                if !self.proxies.contains_key(&id) {
+                    if let Some(w) = self.windows.get(&id).cloned() {
+                        if let Err(e) = self.create_proxy(id, w.source, &w.title, _app_ptr) {
+                            self.notice = Some(format!("Could not open window: {e}"));
+                            self.send(&ClientMessage::ReleaseWindow { id });
+                        }
+                    }
+                }
+            }
+            ModelEvent::CursorShape { id, text, rect, ts } => {
+                if let Some(proxy) = self.proxies.get(&id) {
+                    super::cursor::update(proxy.hwnd, text, rect, ts);
+                }
+                return;
+            }
             ModelEvent::Connected { vds } => {
                 self.vds = Some(vds);
                 self.ensure_source(vds);
@@ -482,7 +520,28 @@ impl App {
     }
 
     fn refresh_gallery(&mut self) {
-        let mut windows: Vec<_> = self.windows.values().cloned().collect();
+        let mut windows: Vec<_> = if let Some(catalog) = &self.catalog {
+            catalog
+                .iter()
+                .map(|w| Window {
+                    id: w.id,
+                    title: if w.minimized {
+                        format!("{} (minimized)", w.title)
+                    } else {
+                        w.title.clone()
+                    },
+                    kind: crate::wire::WindowKind::Normal,
+                    source: self.windows.get(&w.id).map(|w| w.source).unwrap_or(Rect {
+                        x: 0,
+                        y: 0,
+                        w: 0,
+                        h: 0,
+                    }),
+                })
+                .collect()
+        } else {
+            self.windows.values().cloned().collect()
+        };
         windows.sort_by_key(|w| w.id);
         self.dashboard.set_windows(
             windows
@@ -536,7 +595,7 @@ impl App {
                 self.update_status();
                 return;
             }
-            if self.dashboard.previews_due() {
+            if self.catalog.is_none() && self.dashboard.previews_due() {
                 if let (Some(vds), Ok((pixels, preview_size))) =
                     (self.vds, source.preview(&self.gpu))
                 {
@@ -705,6 +764,7 @@ impl App {
         self.pending_mouse_moves.remove(&id);
         if let Some(proxy) = self.proxies.remove(&id) {
             super::frame::set_limit(proxy.hwnd, None);
+            super::cursor::clear(proxy.hwnd);
             self.hwnd_to_id.remove(&(proxy.hwnd.0 as isize));
             unsafe {
                 let _ = DestroyWindow(proxy.hwnd);
@@ -740,6 +800,7 @@ impl App {
         let Some(proxy) = self.proxies.get_mut(&id) else {
             return;
         };
+        super::cursor::clear(proxy.hwnd);
         proxy.set_source(source);
         if (proxy.width != source.w || proxy.height != source.h)
             && !proxy.in_size_move
@@ -978,6 +1039,9 @@ impl App {
             }
 
             WM_CLOSE => {
+                if self.catalog.is_some() {
+                    self.send(&ClientMessage::ReleaseWindow { id });
+                }
                 // Close the local view, never the remote document. The card can
                 // reopen the same HWND without changing its position or size.
                 unsafe {
@@ -1042,6 +1106,12 @@ pub fn register_class() -> windows::core::Result<()> {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
+        if msg == windows::Win32::UI::WindowsAndMessaging::WM_SETCURSOR
+            && (lparam.0 as u16) as u32 == windows::Win32::UI::WindowsAndMessaging::HTCLIENT
+        {
+            super::cursor::apply(hwnd);
+            return LRESULT(1);
+        }
         if msg == windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST {
             return super::frame::hit_test(hwnd, lparam);
         }

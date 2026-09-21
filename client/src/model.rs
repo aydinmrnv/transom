@@ -30,6 +30,22 @@ pub struct Window {
 /// protocol so the platform code never touches JSON or message discriminators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelEvent {
+    WindowCatalog {
+        windows: Vec<crate::wire::control::AvailableWindow>,
+    },
+    WindowPreview {
+        id: u64,
+        jpeg: String,
+    },
+    WindowOpened {
+        id: u64,
+    },
+    CursorShape {
+        id: u64,
+        text: bool,
+        rect: Rect,
+        ts: u64,
+    },
     /// The session (re)synced: the host sent `hello`. Everything before is stale;
     /// the platform layer should expect a fresh set of `WindowAdded`s and tear
     /// down any proxy window whose id does not reappear (see `Resynced`).
@@ -125,6 +141,14 @@ impl WindowModel {
     /// removes a batch of stale windows).
     pub fn apply(&mut self, msg: ServerMessage) -> Vec<ModelEvent> {
         match msg {
+            ServerMessage::WindowCatalog { windows } => vec![ModelEvent::WindowCatalog { windows }],
+            ServerMessage::WindowPreview { id, jpeg } => {
+                vec![ModelEvent::WindowPreview { id, jpeg }]
+            }
+            ServerMessage::WindowOpened { id } => vec![ModelEvent::WindowOpened { id }],
+            ServerMessage::CursorShape { id, text, rect, ts } => {
+                vec![ModelEvent::CursorShape { id, text, rect, ts }]
+            }
             ServerMessage::Hello { vds, .. } => {
                 self.vds = Some(vds);
                 vec![ModelEvent::Connected { vds }]

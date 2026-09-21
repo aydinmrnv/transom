@@ -31,6 +31,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     private let fps: Int
     private let applicationPIDs: Set<pid_t>?
     private let pixelFormat: OSType
+    private var selectedWindows: [SCWindow]?
     private let queue = DispatchQueue(label: "one.transom.host.capture")
     // Accessed only on the capture queue, including explicit refreshes.
     private var lastPixelPTS = CMTime.invalid
@@ -57,13 +58,28 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
     public init(
         display: DisplayInfo, fps: Int = 60, applicationPIDs: Set<pid_t>? = nil,
-        pixelFormat: OSType = kCVPixelFormatType_32BGRA
+        pixelFormat: OSType = kCVPixelFormatType_32BGRA, selectedWindows: [SCWindow]? = nil
     ) {
         self.display = display
         self.fps = fps
         self.applicationPIDs = applicationPIDs
         self.pixelFormat = pixelFormat
+        self.selectedWindows = selectedWindows
         super.init()
+    }
+
+    /// Called serially by WindowBrowser; the capture queue only reads pixels.
+    public func selectWindows(_ windows: [SCWindow]) async throws {
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+        guard let scDisplay = content.displays.first(where: { $0.displayID == display.id }),
+            let stream = lock.withLock({ stream }) else { throw CaptureError.displayNotFound(display.id) }
+        try await stream.updateContentFilter(SCContentFilter(display: scDisplay, including: windows))
+        lock.withLock { selectedWindows = windows }
+    }
+
+    public func removeWindow(_ id: CGWindowID) async throws {
+        let windows = lock.withLock { selectedWindows?.filter { $0.windowID != id } ?? [] }
+        try await selectWindows(windows)
     }
 
     /// Stats from the most recent delivered frame, if any.
@@ -82,7 +98,9 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         }
 
         let filter: SCContentFilter
-        if let applicationPIDs {
+        if let selectedWindows {
+            filter = SCContentFilter(display: scDisplay, including: selectedWindows)
+        } else if let applicationPIDs {
             // Inclusion, not exclusion: other apps, the desktop and this host's
             // own panel must never appear inside a selected window's crop.
             let applications = content.applications.filter { applicationPIDs.contains($0.processID) }

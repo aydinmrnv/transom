@@ -13,6 +13,7 @@
 
 mod app;
 mod connect;
+mod cursor;
 mod decode;
 mod dpi;
 mod frame;

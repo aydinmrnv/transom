@@ -18,6 +18,7 @@ public actor ControlServer {
     private var sentBounds: [UInt64: WireSize] = [:]
     private var active: (id: UUID, transport: any PacketTransport)?
     private var stopped = false
+    private var catalog: [AvailableWindow]?
 
     /// Called for every decoded client→host message (e.g. `requestResize`,
     /// `input`). Phase 5 wires this to AX + `CGEventPost` via `InputInjector`.
@@ -89,6 +90,7 @@ public actor ControlServer {
     }
 
     public func send(_ message: ControlMessage) async {
+        if case .windowCatalog(let windows) = message { catalog = windows }
         guard let active else { return }
         do {
             try await active.transport.send(try WireCodec.encode(message))
@@ -167,6 +169,7 @@ public actor ControlServer {
         let windows = entries.map { WireWindow(id: $0.id, rect: $0.rect) }
         try await transport.send(
             try WireCodec.encode(.tileLayout(windows: windows, displaySize: vdsSize)))
+        if let catalog { try await transport.send(try WireCodec.encode(.windowCatalog(windows: catalog))) }
     }
 
     private static func message(for event: WindowWatcher.WindowEvent) -> ControlMessage {
