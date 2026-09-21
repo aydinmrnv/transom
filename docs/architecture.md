@@ -860,3 +860,11 @@ The client-side window browser lists running apps without requiring host-side
 app selection. Electron's AXManualAccessibility opt-in exposes Conductor's text
 area; the native Windows I-beam handle was verified inside that field. Cursor
 motion remains local and the video excludes the remote pointer.
+
+On macOS 27, starting capture creates a 66x20-point AXDialog sharing badge in
+the source app. The picker excludes titlebar-height nonstandard panels so these
+controls do not appear as duplicate "Window" cards. Standard windows and normal
+dialogs remain selectable. The host no longer exposes unused tiling/preview
+settings. Installers can explicitly launch the host with `--start-sharing` to
+resume using saved settings and existing grants; ordinary launches still wait
+for Start sharing.

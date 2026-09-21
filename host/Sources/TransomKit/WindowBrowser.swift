@@ -31,6 +31,14 @@ public actor WindowBrowser {
     public func setVideo(_ video: WindowVideoHub) { self.video = video }
     public func stop() { stopped = true }
 
+    static func selectableWindow(role: String, subrole: String, size: CGSize) -> Bool {
+        guard role == kAXWindowRole as String, size.width > 1, size.height > 1 else { return false }
+        // macOS creates tiny AXDialog panels for its in-window capture badge
+        // (66x20 points on the target Mac). They are controls, not app content.
+        // Keep standard windows and full-sized dialogs, including untitled ones.
+        return subrole == kAXStandardWindowSubrole as String || size.height > 32
+    }
+
     // Refuse ambiguous matches instead of ever showing the wrong window.
     static func matchIndex(title: String, frame: CGRect, choices: [(String, CGRect)]) -> Int? {
         let exact = choices.indices.filter {
@@ -79,15 +87,11 @@ public actor WindowBrowser {
             let scWindows = content?.windows.filter { $0.owningApplication?.processID == app.pid && $0.windowLayer == 0 } ?? []
             for win in windows {
                 AXUIElementSetMessagingTimeout(win.element, 0.08)
-                guard win.role == kAXWindowRole as String,
-                    let frame = win.frame(), frame.width > 1, frame.height > 1 else { continue }
+                guard let frame = win.frame(),
+                    Self.selectableWindow(role: win.role, subrole: win.subrole, size: frame.size) else { continue }
                 let match = Self.matchIndex(title: win.title, frame: frame, choices: scWindows.map { ($0.title ?? "", $0.frame) })
                 guard match != nil || (win.isMinimized && [kAXStandardWindowSubrole as String, kAXDialogSubrole as String].contains(win.subrole)) else { continue }
                 let id = registry.id(for: win.element).id
-                if candidates[id] == nil {
-                    let detail = "id=\(id) app=\(app.name) title=\(win.title) subrole=\(win.subrole) frame=\(frame) capture=\(match.map { scWindows[$0].windowID } ?? 0)"
-                    Log.general.notice("catalog candidate: \(detail, privacy: .public)")
-                }
                 let title = win.title.isEmpty || win.title == app.name ? app.name : "\(app.name) — \(win.title)"
                 next[id] = Candidate(element: win.element, capture: match.map { scWindows[$0] },
                                      info: AvailableWindow(id: id, title: title, minimized: win.isMinimized))

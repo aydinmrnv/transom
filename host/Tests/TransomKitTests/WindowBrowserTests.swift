@@ -5,6 +5,13 @@ import Testing
 
 @Suite("Client window selection and cursor hints")
 struct WindowBrowserTests {
+    @Test("capture badges are excluded without hiding standard windows or normal dialogs")
+    func captureBadge() {
+        #expect(!WindowBrowser.selectableWindow(role: "AXWindow", subrole: "AXDialog", size: CGSize(width: 66, height: 20)))
+        #expect(WindowBrowser.selectableWindow(role: "AXWindow", subrole: "AXDialog", size: CGSize(width: 400, height: 180)))
+        #expect(WindowBrowser.selectableWindow(role: "AXWindow", subrole: "AXStandardWindow", size: CGSize(width: 180, height: 30)))
+        #expect(!WindowBrowser.selectableWindow(role: "AXMenu", subrole: "", size: CGSize(width: 400, height: 180)))
+    }
     @Test("same-title windows use geometry; ambiguous windows are refused")
     func identity() {
         let a = CGRect(x: 10, y: 10, width: 800, height: 600)
