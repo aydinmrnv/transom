@@ -25,9 +25,10 @@ struct InputRoutingTests {
         InputInjector.address(key, pid: 123, windowID: nil)
         #expect(key.getIntegerValueField(.eventTargetUnixProcessID) == 123)
         let wheel = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 1, wheel2: 0, wheel3: 0))
+        wheel.location = CGPoint(x: 400, y: 300)
         InputInjector.address(wheel, pid: 789, windowID: nil)
         #expect(wheel.getIntegerValueField(.eventTargetUnixProcessID) == 789)
-        #expect(wheel.location == .zero)
+        #expect(wheel.location == CGPoint(x: 400, y: 300))
     }
 
     @Test("releasing a window discards its capture routing identity")
