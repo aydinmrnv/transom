@@ -43,6 +43,7 @@ pub struct VideoUpdate {
 impl VideoDecoder {
     pub fn receive(&self, size: Size, event: VideoEvent, device: &ID3D11Device) {
         match event {
+            VideoEvent::Window { .. } => {} // Routed before entering a decoder.
             VideoEvent::Config { hvcc } => {
                 let worker = DecoderWorker::start(hvcc, size.w, size.h, Some(device.clone()));
                 // Drop/join a superseded worker outside the shared-state lock.

@@ -22,6 +22,7 @@ mod glass;
 mod gpu;
 mod input;
 mod proxy;
+mod video_router;
 
 use std::process::ExitCode;
 

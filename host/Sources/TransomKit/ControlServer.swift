@@ -15,6 +15,7 @@ public actor ControlServer {
     private let vdsSize: WireSize
     private let registry: WindowRegistry
     private let gutter: Int
+    private let independentWindows: Bool
     private var sentBounds: [UInt64: WireSize] = [:]
     private var active: (id: UUID, transport: any PacketTransport)?
     private var stopped = false
@@ -30,10 +31,11 @@ public actor ControlServer {
     /// from the actor; the closure must be thread-safe.
     public var onConnectionChange: (@Sendable (Bool) -> Void)?
 
-    public init(vdsSize: WireSize, registry: WindowRegistry, gutter: Int = Tiler.defaultGutter) {
+    public init(vdsSize: WireSize, registry: WindowRegistry, gutter: Int = Tiler.defaultGutter, independentWindows: Bool = false) {
         self.vdsSize = vdsSize
         self.registry = registry
         self.gutter = gutter
+        self.independentWindows = independentWindows
     }
 
     public func setOnClientMessage(_ handler: @escaping @Sendable (ClientMessage) -> Void) {
@@ -80,7 +82,7 @@ public actor ControlServer {
         for entry in entries {
             let limit = ResizeClamp.clamp(current: tile(entry.rect), desired: display,
                 others: entries.filter { $0.id != entry.id }.map { tile($0.rect) }, display: display, gutter: gutter)
-            let maxSize = WireSize(w: max(entry.rect.w, UInt32(limit.width)), h: max(entry.rect.h, UInt32(limit.height)))
+            let maxSize = independentWindows ? vdsSize : WireSize(w: max(entry.rect.w, UInt32(limit.width)), h: max(entry.rect.h, UInt32(limit.height)))
             if sentBounds[entry.id] != maxSize {
                 sentBounds[entry.id] = maxSize
                 await send(.resizeBounds(id: entry.id, maxSize: maxSize))

@@ -116,6 +116,17 @@ pub fn run(args: &[String]) -> ExitCode {
                 apply_for_display(&ev, &mut windows, &mut order, &mut vds);
                 print_control(&ev, now_ms());
             }
+            SessionEvent::Video(VideoEvent::Window {
+                id,
+                generation,
+                size,
+                ..
+            }) => {
+                println!(
+                    "window video: {id} generation {generation} {}x{}",
+                    size.w, size.h
+                );
+            }
             SessionEvent::Video(VideoEvent::Config { hvcc }) => {
                 println!(
                     "[{:>6}ms] video: hvcC config, {} bytes (decoder can now start)",

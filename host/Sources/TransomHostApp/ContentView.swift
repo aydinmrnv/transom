@@ -159,7 +159,9 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         ZStack {
                             Color(nsColor: .windowBackgroundColor)
-                            if let cg = host.previewImage?.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                            if let image = host.windowImages[window.id] {
+                                Image(decorative: image, scale: 1).resizable().scaledToFit()
+                            } else if let cg = host.previewImage?.cgImage(forProposedRect: nil, context: nil, hints: nil),
                                 let crop = cg.cropping(to: window.rect.applying(CGAffineTransform(
                                     scaleX: CGFloat(cg.width) / max(host.displayPixelSize.width, 1),
                                     y: CGFloat(cg.height) / max(host.displayPixelSize.height, 1)))) {

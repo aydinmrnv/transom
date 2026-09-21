@@ -369,9 +369,20 @@ public enum WireCodec {
 /// - `frame` (0x02): `seq: u64` · `ptsMicros: u64` · `flags: u8` (bit0 = keyframe)
 ///   · the HEVC access-unit bytes. All integers big-endian.
 public enum VideoWire {
-    public enum Message: Equatable, Sendable {
+    public indirect enum Message: Equatable, Sendable {
+        case window(id: UInt64, generation: UInt64, size: WireSize, message: Message)
         case config(hvcc: Data)
         case frame(seq: UInt64, ptsMicros: UInt64, keyframe: Bool, data: Data)
+    }
+
+    public static func encodeWindow(id: UInt64, generation: UInt64, size: WireSize, payload: Data) -> Data {
+        var out = Data([0x10])
+        out.append(contentsOf: bigEndianBytes(id))
+        out.append(contentsOf: bigEndianBytes(generation))
+        out.append(contentsOf: bigEndianBytes(UInt64(size.w)).suffix(4))
+        out.append(contentsOf: bigEndianBytes(UInt64(size.h)).suffix(4))
+        out.append(payload)
+        return out
     }
 
     public static func encodeConfig(hvcc: Data) -> Data {
@@ -395,6 +406,14 @@ public enum VideoWire {
         let bytes = [UInt8](payload)
         guard let type = bytes.first else { return nil }
         switch type {
+        case 0x10:
+            guard bytes.count > 25, bytes[25] == 1 || bytes[25] == 2 else { return nil }
+            let id = beUInt64(bytes, 1), generation = beUInt64(bytes, 9)
+            let w = bytes[17..<21].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            let h = bytes[21..<25].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            guard id > 0, generation > 0, w > 0, h > 0, w <= 8192, h <= 8192,
+                let message = decode(Data(bytes[25...])) else { return nil }
+            return .window(id: id, generation: generation, size: WireSize(w: w, h: h), message: message)
         case 0x01:
             return .config(hvcc: Data(bytes.dropFirst()))
         case 0x02:

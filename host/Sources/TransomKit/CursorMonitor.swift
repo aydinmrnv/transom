@@ -14,6 +14,7 @@ public final class CursorMonitor: @unchecked Sendable {
     private let display: DisplayInfo
     private let emit: @Sendable (ControlMessage) -> Void
     private var lastTrace = ""
+    private var enabledApps: Set<pid_t> = []
 
     public init(registry: WindowRegistry, display: DisplayInfo, emit: @escaping @Sendable (ControlMessage) -> Void) {
         self.registry = registry; self.display = display; self.emit = emit
@@ -47,6 +48,11 @@ public final class CursorMonitor: @unchecked Sendable {
         guard AXUIElementGetPid(window, &pid) == .success else { return }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.04)
+        if enabledApps.insert(pid).inserted {
+            // Electron's documented opt-in exposes web text fields without
+            // enabling VoiceOver or changing global accessibility settings.
+            AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        }
         let origin = Coordinates.axGlobalRect(fromDisplayPixels: CGRect(x: Int(entry.rect.x), y: Int(entry.rect.y), width: Int(entry.rect.w), height: Int(entry.rect.h)), displayOriginPoints: display.originPoints, scale: display.scale)
         let point = CGPoint(x: origin.minX + CGFloat(hover.x) / display.scale,
                             y: origin.minY + CGFloat(hover.y) / display.scale)

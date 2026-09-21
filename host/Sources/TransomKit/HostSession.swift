@@ -127,6 +127,7 @@ public struct HostStatus: Sendable {
 /// Not `Sendable` on purpose — it carries a `CGImage` and is meant to be read
 /// synchronously on the main thread (the UI's timer), never sent across a task.
 public struct HostPreview {
+    public var windowImages: [UInt64: CGImage] = [:]
     public var image: CGImage?
     public var windows: [WindowRegistry.Entry]
     public var displayPixelWidth: Int
@@ -172,6 +173,8 @@ public final class HostSession: @unchecked Sendable {
     private var videoListener: SocketVideoListener?
     private var controlServer: ControlServer?
     private var videoServer: VideoServer?
+    private var windowVideo: WindowVideoHub?
+    private var windowPreviews: WindowPreviewCache?
     private var capture: DisplayCapture?
     private var encoder: HEVCEncoder?
     private var eventSink: AsyncStream<WindowWatcher.WindowEvent>.Continuation?
@@ -243,11 +246,13 @@ public final class HostSession: @unchecked Sendable {
     /// arrived yet; `windows` is still populated (control-only sessions have a
     /// window layout but no pixels). Call on the main thread — it is not `Sendable`.
     public func preview() -> HostPreview {
-        HostPreview(
+        var snapshot = HostPreview(
             image: capture?.latestImage(maxPixelWidth: 1280),
             windows: registry?.snapshot() ?? [],
             displayPixelWidth: config.display.pixelWidth,
             displayPixelHeight: config.display.pixelHeight)
+        snapshot.windowImages = windowPreviews?.images() ?? [:]
+        return snapshot
     }
 
     // MARK: - Lifecycle
@@ -327,7 +332,7 @@ public final class HostSession: @unchecked Sendable {
         // (ACTUAL geometry, I-4) through the same ordered event stream, so both this
         // CLI and the host app get resize for free.
         let resize = ResizeService(
-            registry: registry, display: disp, gutter: config.gutter,
+            registry: registry, display: disp, gutter: config.gutter, independentWindows: config.clientWindowSelection,
             emit: { event in eventSink.yield(event) })
 
         // Phase 5 (issue #7): input injection. Client Input/RequestFocus become
@@ -343,7 +348,7 @@ public final class HostSession: @unchecked Sendable {
         let (clientMessages, clientSink) = AsyncStream.makeStream(of: ClientMessage.self)
         self.clientSink = clientSink
 
-        let controlServer = ControlServer(vdsSize: vdsSize, registry: registry, gutter: config.gutter)
+        let controlServer = ControlServer(vdsSize: vdsSize, registry: registry, gutter: config.gutter, independentWindows: config.clientWindowSelection)
         self.controlServer = controlServer
         let cursorMonitor = CursorMonitor(registry: registry, display: disp) { message in
             Task { await controlServer.send(message) }
@@ -423,6 +428,7 @@ public final class HostSession: @unchecked Sendable {
                     case let .requestClose(id):
                         injector.close(id: id)
                     case .requestKeyframe:
+                        await windowVideo?.refresh()
                         // A client may deliberately drop stale compressed frames
                         // to protect interaction latency. Restart its dependency
                         // chain at the next encoded frame.
@@ -446,7 +452,7 @@ public final class HostSession: @unchecked Sendable {
         }
 
         if let browser {
-            if let capture { await browser.setCapture(capture) }
+            if let windowVideo { await browser.setVideo(windowVideo) }
             await browser.tick()
             tasks.append(Task {
                 while !Task.isCancelled {
@@ -462,6 +468,27 @@ public final class HostSession: @unchecked Sendable {
     }
 
     private func startVideo(disp: DisplayInfo, vdsSize: WireSize) async throws {
+        if config.clientWindowSelection {
+            let hub = WindowVideoHub(config: config, connectionChanged: { [weak self] connected in
+                self?.statsLock.withLock { self?.videoConnected = connected }
+            }, encoded: { [weak self] frame, summary, hardware in
+                self?.statsLock.withLock { self?.usingHardware = hardware }
+                self?.recordEncodedFrame(frame, formatSummary: summary)
+            })
+            windowVideo = hub
+            windowPreviews = await hub.previews
+            let listener = try SocketVideoListener(host: config.host, port: config.videoPort)
+            videoListener = listener
+            listener.start()
+            tasks.append(Task { await hub.serve(listener: listener) })
+            tasks.append(Task {
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .milliseconds(300)) } catch { break }
+                    await hub.tick()
+                }
+            })
+            return
+        }
         let enc = try HEVCEncoder(
             config: HEVCEncoder.Config(
                 width: disp.pixelWidth, height: disp.pixelHeight, fps: config.fps,
@@ -530,6 +557,7 @@ public final class HostSession: @unchecked Sendable {
         videoListener?.stop()
         await controlServer?.stop()
         await videoServer?.stop()
+        await windowVideo?.stop()
         if let capture { await capture.stop() }
         encoder?.finish()
         eventSink?.finish()
@@ -547,6 +575,8 @@ public final class HostSession: @unchecked Sendable {
         videoListener = nil
         controlServer = nil
         videoServer = nil
+        windowVideo = nil
+        windowPreviews = nil
         capture = nil
         encoder = nil
         eventSink = nil

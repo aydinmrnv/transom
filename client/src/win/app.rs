@@ -35,7 +35,7 @@ use super::connect::{Action, Dashboard};
 use super::gpu::{Gpu, SourceTexture};
 use crate::connections::Connection;
 use std::sync::mpsc::{self, Receiver};
-type ConnectResult = Result<(Connection, Session, Receiver<SessionEvent>, VideoDecoder), String>;
+type ConnectResult = Result<(Connection, Session, Receiver<SessionEvent>, VideoRouter), String>;
 use super::input;
 use super::proxy::Proxy;
 use crate::model::{ModelEvent, Window};
@@ -47,7 +47,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 #[cfg(windows)]
-use super::decode::VideoDecoder;
+use super::video_router::VideoRouter;
 
 struct NativeEvent {
     hwnd: HWND,
@@ -90,7 +90,8 @@ pub struct App {
     resize_limits: HashMap<u64, Size>,
     hwnd_to_id: HashMap<isize, u64>,
     source: Option<SourceTexture>,
-    decoder: Option<VideoDecoder>,
+    window_sources: HashMap<u64, SourceTexture>,
+    decoder: Option<VideoRouter>,
     vds: Option<Size>,
     cascade: u32,
     /// Latest unsent hover move per proxy. High-polling-rate mice can emit far
@@ -143,6 +144,7 @@ impl App {
             resize_limits: HashMap::new(),
             hwnd_to_id: HashMap::new(),
             source: None,
+            window_sources: HashMap::new(),
             decoder: None,
             vds: None,
             cascade: 0,
@@ -188,7 +190,7 @@ impl App {
                             "Mac is offline or not sharing. Open Transom Host and press Start.",
                         )?;
                 }
-                let decoder = VideoDecoder::default();
+                let decoder = VideoRouter::default();
                 let input = decoder.clone();
                 let (session, events) = Session::connect_with_video(
                     &connection.host,
@@ -316,6 +318,7 @@ impl App {
         self.rx = None;
         self.decoder = None;
         self.source = None;
+        self.window_sources.clear();
         self.vds = None;
         self.video_in = 0;
         self.video_decoded = 0;
@@ -502,11 +505,19 @@ impl App {
             }
             ModelEvent::WindowFocused { .. } => {}
             ModelEvent::WindowRemoved { id } => {
+                if let Some(decoder) = &self.decoder {
+                    decoder.remove(id);
+                }
+                self.window_sources.remove(&id);
                 self.windows.remove(&id);
                 self.destroy_proxy(id);
             }
             ModelEvent::Resynced { removed } => {
                 for id in removed {
+                    if let Some(decoder) = &self.decoder {
+                        decoder.remove(id);
+                    }
+                    self.window_sources.remove(&id);
                     self.windows.remove(&id);
                     self.destroy_proxy(id);
                 }
@@ -567,17 +578,72 @@ impl App {
     /// Take the latest decoded surface. Its copy and color conversion stay on
     /// the GPU; only small gallery previews are read back when visible.
     fn poll_decoder(&mut self) {
-        let Some(update) = self.decoder.as_ref().map(VideoDecoder::poll) else {
+        let Some(updates) = self.decoder.as_ref().map(VideoRouter::poll) else {
             return;
         };
-        self.video_in = update.received;
-        if update.request_keyframe {
-            self.send(&ClientMessage::RequestKeyframe);
-            eprintln!("video: requested a fresh keyframe after decoder backlog/error");
+        self.video_in = updates.iter().map(|(_, _, update)| update.received).sum();
+        let mut request_keyframe = false;
+        for (id, size, update) in updates {
+            request_keyframe |= update.request_keyframe;
+            if let Some(error) = update.error {
+                self.video_notice = Some(format!("Window {id}: {error}"));
+                self.update_status();
+            }
+            let Some(frame) = update.frame else {
+                continue;
+            };
+            if id != 0 {
+                let replace = self
+                    .window_sources
+                    .get(&id)
+                    .map_or(true, |s| s.width != size.w || s.height != size.h);
+                if replace {
+                    match SourceTexture::new(&self.gpu, size.w, size.h) {
+                        Ok(texture) => {
+                            self.window_sources.insert(id, texture);
+                        }
+                        Err(error) => {
+                            self.video_notice =
+                                Some(format!("Cannot create window video: {error}"));
+                            self.update_status();
+                            continue;
+                        }
+                    }
+                }
+            }
+            let source = if id == 0 {
+                self.source.as_mut()
+            } else {
+                self.window_sources.get_mut(&id)
+            };
+            let Some(source) = source else {
+                continue;
+            };
+            if let Err(error) = source.update_frame(&self.gpu, &frame) {
+                self.video_notice = Some(format!("Cannot render window {id}: {error}"));
+                self.update_status();
+                continue;
+            }
+            if id == 0 && self.catalog.is_none() && self.dashboard.previews_due() {
+                if let (Some(vds), Ok((pixels, preview_size))) =
+                    (self.vds, source.preview(&self.gpu))
+                {
+                    self.dashboard.update_previews(&pixels, preview_size, vds);
+                }
+            }
+            for (&proxy_id, proxy) in &mut self.proxies {
+                if id == 0 || id == proxy_id {
+                    proxy.dirty = true;
+                }
+            }
+            self.video_decoded += 1;
+            let recovered = self.video_notice.take().is_some();
+            if self.video_decoded == 1 || recovered {
+                self.update_status();
+            }
         }
-        if let Some(error) = update.error {
-            self.video_notice = Some(error);
-            self.update_status();
+        if request_keyframe {
+            self.send(&ClientMessage::RequestKeyframe);
         }
         if !self.warned_no_decode
             && self.video_notice.is_none()
@@ -587,32 +653,6 @@ impl App {
             self.warned_no_decode = true;
             self.video_notice = Some("Video is arriving but no picture has decoded yet. Waiting for a complete keyframe...".into());
             self.update_status();
-        }
-        let frame = update.frame;
-        if let (Some(frame), Some(source)) = (frame, self.source.as_mut()) {
-            if let Err(error) = source.update_frame(&self.gpu, &frame) {
-                self.video_notice = Some(format!("Cannot render video: {error}"));
-                self.update_status();
-                return;
-            }
-            if self.catalog.is_none() && self.dashboard.previews_due() {
-                if let (Some(vds), Ok((pixels, preview_size))) =
-                    (self.vds, source.preview(&self.gpu))
-                {
-                    self.dashboard.update_previews(&pixels, preview_size, vds);
-                }
-            }
-            for proxy in self.proxies.values_mut() {
-                proxy.dirty = true;
-            }
-            self.video_decoded += 1;
-            let recovered = self.video_notice.take().is_some();
-            if self.video_decoded == 1 {
-                eprintln!("video: first decoded frame uploaded to the display texture");
-            }
-            if self.video_decoded == 1 || recovered {
-                self.update_status();
-            }
         }
     }
 
@@ -849,10 +889,11 @@ impl App {
         for (id, source) in expired {
             self.update_source_rect(id, source);
         }
-        let source = self.source.as_ref();
-        for proxy in self.proxies.values_mut() {
+        for (&id, proxy) in &mut self.proxies {
+            let independent = self.window_sources.contains_key(&id);
+            let source = self.window_sources.get(&id).or(self.source.as_ref());
             if unsafe { IsWindowVisible(proxy.hwnd).as_bool() && !IsIconic(proxy.hwnd).as_bool() } {
-                proxy.render(&self.gpu, source);
+                proxy.render(&self.gpu, source, independent);
             }
         }
     }
@@ -886,7 +927,11 @@ impl App {
                         && h > 0
                         && !proxy.in_size_move
                         && (w != proxy.source.w || h != proxy.source.h);
-                    proxy.render(&self.gpu, self.source.as_ref());
+                    proxy.render(
+                        &self.gpu,
+                        self.window_sources.get(&id).or(self.source.as_ref()),
+                        self.window_sources.contains_key(&id),
+                    );
                 }
                 if request {
                     self.commit_resize(id, Size { w, h });
@@ -974,10 +1019,11 @@ impl App {
             }
 
             WM_PAINT => {
-                let source = self.source.as_ref();
+                let independent = self.window_sources.contains_key(&id);
+                let source = self.window_sources.get(&id).or(self.source.as_ref());
                 if let Some(proxy) = self.proxies.get_mut(&id) {
                     proxy.dirty = true;
-                    proxy.render(&self.gpu, source);
+                    proxy.render(&self.gpu, source, independent);
                 }
                 // Validate the whole window so we don't get flooded with WM_PAINT.
                 unsafe {

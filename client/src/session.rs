@@ -43,19 +43,7 @@ pub enum SessionEvent {
 ///
 /// `seq`/`pts_micros` are retained for A/V correlation and drop detection even
 /// though the current decode path keys only off arrival order (protocol.md §6).
-#[derive(Debug)]
-#[allow(dead_code)]
-pub enum VideoEvent {
-    Config {
-        hvcc: Vec<u8>,
-    },
-    Frame {
-        seq: u64,
-        pts_micros: u64,
-        keyframe: bool,
-        data: Vec<u8>,
-    },
-}
+pub use crate::wire::VideoMessage as VideoEvent;
 
 /// A handle to a live session: send requests to the host, and shut it down.
 pub struct Session {
@@ -287,6 +275,11 @@ fn video_loop(
     loop {
         match rx.recv() {
             Ok(Some(payload)) => match VideoMessage::decode(&payload) {
+                Ok(event @ VideoMessage::Window { .. }) => {
+                    if !deliver(event) {
+                        return;
+                    }
+                }
                 Ok(VideoMessage::Config { hvcc }) => {
                     if !deliver(VideoEvent::Config { hvcc }) {
                         return;

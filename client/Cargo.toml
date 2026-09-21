@@ -1,6 +1,6 @@
 [package]
 name = "transom-client"
-version = "0.4.7"
+version = "0.4.8"
 edition = "2021"
 rust-version = "1.74"
 license = "AGPL-3.0-or-later"

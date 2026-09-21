@@ -137,7 +137,7 @@ reconnecting client gets the full resync again.
 ```
 hello          { protocol: u32, vdsSize: Size }         // first message; version + display size
 windowCreated  { id: u64, rect: Rect, title: String, kind: WindowKind }
-resizeBounds   { id: u64, maxSize: Size }              // available non-overlapping host area
+resizeBounds   { id: u64, maxSize: Size }              // independent window maximum (legacy atlas: free area)
 resizeCompleted{ id: u64, rect: Rect, request: u64 }    // optional final resize acknowledgement
 windowDestroyed{ id: u64 }
 windowMoved    { id: u64, rect: Rect }                  // ACTUAL geometry, see I-4
@@ -188,7 +188,7 @@ resize its native window while waiting for the matching completion. A new drag
 invalidates the previous completion; unrelated/late tokens cannot finish it.
 For old hosts, the client falls back to latest actual geometry after 1.5 seconds.
 The host also sends `resizeBounds` after resync and when layout constraints
-change. Its conservative maximum preserves non-overlap with other shared windows.
+change. For independent window video (0.4.8), its maximum is the full sharing display, regardless of other windows. Legacy atlas sessions preserve non-overlap.
 Windows applies it as a native maximum tracking size, so dragging stops at the
 available boundary rather than jumping back on release. Bounds do not promise
 that macOS will accept smaller dimensions; app minimums still use actual readback.
@@ -413,7 +413,7 @@ best-effort may be fine and timestamp correlation can be dropped.
 **Cursor: local (0.4.6).** ScreenCaptureKit uses `showsCursor = false`.
 The client keeps its local OS pointer visible, so motion is immediate and never
 duplicated by a delayed pointer inside the video. Edge/corner cursors use native
-Windows hit testing. Remote app cursor shapes are not transmitted yet; content
+Windows hit testing. Text editing regions are transmitted with `cursorShape` (below); other content
 currently uses the local arrow. Input coordinates and Mac injection are unchanged.
 
 Still deferred:
@@ -440,7 +440,7 @@ continue to work with the selector. Multiple shared apps require the newer host.
 ### Client window browser and cursor hints (0.4.7)
 
 The host app uses client-side window selection. Its catalogue is separate from
-the active atlas; a catalogue entry has no crop and must never create a proxy.
+active streams; a catalogue entry has no crop and must never create a proxy.
 The CLI retains explicit app selection. Upgrade both desktop apps to use this mode.
 
 Host → client:
@@ -450,8 +450,41 @@ Host → client:
 - `{"type":"cursorShape","id":42,"text":true,"rect":{"x":20,"y":100,"w":800,"h":40},"ts":12345}`: AX text-field/area hint. Rect is window-local physical pixels; ts is the originating input timestamp, also retained while polling a stationary pointer. Use the native I-beam only inside this region, discard out-of-order hints, and fall back to the local arrow when a hint expires. Non-client resizing keeps the OS cursor. Video continues to exclude the cursor.
 
 Client → host:
-- `{"type":"openWindow","id":42}`: restore if minimized, tile only the selected set, verify actual geometry and unambiguous AX↔SCK identity, update the exact-window capture filter, then acknowledge. Listing alone never moves windows.
-- `{"type":"releaseWindow","id":42}`: hide the local view and free its atlas slot without closing the Mac document. The host sends `windowDestroyed` for the active stream; the catalogue entry remains.
+- `{"type":"openWindow","id":42}`: restore if minimized, place only this window on the sharing display, verify actual geometry and unambiguous AX↔SCK identity, start its independent capture, then acknowledge. Listing alone never moves windows.
+- `{"type":"releaseWindow","id":42}`: hide the local view and stop its independent stream without closing the Mac document. The host sends `windowDestroyed` for the active stream; the catalogue entry remains.
 - `{"type":"previewWindow","id":42}`: request a small independent thumbnail. Protected/unavailable images can be omitted.
 
-AX hit testing runs on a separate, coalescing queue at 25 Hz. It never delays CGEvent injection or carries pointer motion through video. The browser discovers newly running apps/windows every 1.5 seconds and reconciles active geometry every 150 ms, in addition to immediate resize readback. The physical sharing display still bounds the simultaneously open set.
+AX hit testing runs on a separate, coalescing queue at 25 Hz. It never delays CGEvent injection or carries pointer motion through video. The browser discovers newly running apps/windows every 1.5 seconds and reconciles active geometry every 150 ms, in addition to immediate resize readback. Each individual window remains subject to the Mac app’s minimum/maximum and the sharing display’s size. Other selected windows do not consume its resize allowance.
+
+
+### Independent window video (0.4.8)
+
+The desktop host uses one desktop-independent ScreenCaptureKit stream and HEVC
+encoder per selected window. Both apps must be updated. Legacy CLI display video
+keeps tags 0x01/0x02; the new client accepts either mode on the same video port.
+
+Every window packet is one length-prefixed video-channel message:
+
+| Offset | Field |
+|---|---|
+| 0 | 0x10 |
+| 1 | window ID, u64 big endian, nonzero |
+| 9 | encoder generation, u64 big endian, nonzero |
+| 17 | encoded width, u32 big endian, 1…8192 |
+| 21 | encoded height, u32 big endian, 1…8192 |
+| 25 | ordinary 0x01 config or 0x02 access-unit payload |
+
+Nested 0x10 envelopes are invalid. Config precedes frames for each generation.
+Generations increase across the whole host session, including close/reopen and
+resize. Sequence numbers and keyframe dependencies are per encoder. Reconnect
+resends each current config and requests independent keyframes. Receivers discard
+older generations and frames without their matching config. Retiring one window
+must not close the shared transport or reset another window’s decoder.
+
+Control geometry still carries the Mac display origin for input translation.
+An independent video texture is sampled from (0,0), using window-local physical
+pixels; its location on the Mac has no effect on the crop. NV12 dimensions round
+up to even, with at most one padding row/column; `rect.w/h` remains the actual
+window size. Capture and rendering never rescale settled pixels. During a resize
+the old surface may temporarily crop/letterbox until the new generation arrives.
+Opening or resizing a selected window never tiles or shrinks another window.

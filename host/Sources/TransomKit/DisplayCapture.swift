@@ -28,6 +28,9 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     }
 
     private let display: DisplayInfo
+    private let window: SCWindow?
+    private let width: Int
+    private let height: Int
     private let fps: Int
     private let applicationPIDs: Set<pid_t>?
     private let pixelFormat: OSType
@@ -58,9 +61,13 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
     public init(
         display: DisplayInfo, fps: Int = 60, applicationPIDs: Set<pid_t>? = nil,
-        pixelFormat: OSType = kCVPixelFormatType_32BGRA, selectedWindows: [SCWindow]? = nil
+        pixelFormat: OSType = kCVPixelFormatType_32BGRA, selectedWindows: [SCWindow]? = nil,
+        window: SCWindow? = nil, size: WireSize? = nil
     ) {
         self.display = display
+        self.window = window
+        self.width = size.map { Int($0.w) } ?? display.pixelWidth
+        self.height = size.map { Int($0.h) } ?? display.pixelHeight
         self.fps = fps
         self.applicationPIDs = applicationPIDs
         self.pixelFormat = pixelFormat
@@ -98,7 +105,9 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         }
 
         let filter: SCContentFilter
-        if let selectedWindows {
+        if let window {
+            filter = SCContentFilter(desktopIndependentWindow: window)
+        } else if let selectedWindows {
             filter = SCContentFilter(display: scDisplay, including: selectedWindows)
         } else if let applicationPIDs {
             // Inclusion, not exclusion: other apps, the desktop and this host's
@@ -113,8 +122,9 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
         let config = SCStreamConfiguration()
         // The load-bearing lines for I-1: exact native pixels, no scaling.
-        config.width = display.pixelWidth
-        config.height = display.pixelHeight
+        config.width = width
+        config.height = height
+        if window != nil { config.ignoreShadowsSingleWindow = true }
         config.pixelFormat = pixelFormat
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         // The direct NV12 encoder and the idle-frame cache retain surfaces.
@@ -245,12 +255,12 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         let dh = CVPixelBufferGetHeight(pixelBuffer)
         let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
         let stats = FrameStats(
-            configuredWidth: display.pixelWidth,
-            configuredHeight: display.pixelHeight,
+            configuredWidth: width,
+            configuredHeight: height,
             deliveredWidth: dw,
             deliveredHeight: dh,
             pixelFormat: fmt,
-            matchesNativePixels: dw == display.pixelWidth && dh == display.pixelHeight)
+            matchesNativePixels: dw == width && dh == height)
 
         let (ctx, frameHook):
             (

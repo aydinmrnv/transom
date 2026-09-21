@@ -151,7 +151,7 @@ impl Proxy {
 
     /// Draw one frame and present. `source_tex` is the shared decoded VDS texture;
     /// `None` (or checkerboard mode) draws a diagnostic instead.
-    pub fn render(&mut self, gpu: &Gpu, source_tex: Option<&SourceTexture>) {
+    pub fn render(&mut self, gpu: &Gpu, source_tex: Option<&SourceTexture>, independent: bool) {
         if !self.dirty {
             return;
         }
@@ -164,19 +164,27 @@ impl Proxy {
 
         // While waiting for a resize acknowledgement, crop/letterbox at native
         // scale. Only an actual interactive resize may stretch the pixels.
+        let source = if independent {
+            let (w, h) = source_tex
+                .map(|t| (t.width.min(self.source.w), t.height.min(self.source.h)))
+                .unwrap_or((self.source.w, self.source.h));
+            Rect { x: 0, y: 0, w, h }
+        } else {
+            self.source
+        };
         let stretch = self.in_size_move && self.resizing;
         let draw_w = if stretch || self.checkerboard {
             self.width
         } else {
-            self.width.min(self.source.w).max(1)
+            self.width.min(source.w).max(1)
         };
         let draw_h = if stretch || self.checkerboard {
             self.height
         } else {
-            self.height.min(self.source.h).max(1)
+            self.height.min(source.h).max(1)
         };
-        let crop_w = if stretch { self.source.w } else { draw_w };
-        let crop_h = if stretch { self.source.h } else { draw_h };
+        let crop_w = if stretch { source.w } else { draw_w };
+        let crop_h = if stretch { source.h } else { draw_h };
         if draw_w != self.width || draw_h != self.height {
             unsafe {
                 gpu.context
@@ -187,7 +195,7 @@ impl Proxy {
             RenderMode::Checkerboard
         } else if let Some(tex) = source_tex {
             RenderMode::Source {
-                uv_rect: tex.uv_rect(self.source.x, self.source.y, crop_w, crop_h),
+                uv_rect: tex.uv_rect(source.x, source.y, crop_w, crop_h),
             }
         } else {
             RenderMode::Waiting

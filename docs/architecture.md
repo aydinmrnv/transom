@@ -812,3 +812,22 @@ The optional synthetic benchmark was not rerun. Exact client/swapchain equality
 at 100%, 150% and 200%, and cross-monitor dragging, were not instrumented in this
 pass; geometry helper tests cover 96/144/192 DPI. Cursor-shape transmission and
 the fixed shared-display capacity remain limitations.
+
+
+### 0.4.8: independent selected windows
+
+The desktop path supersedes the shared atlas/non-overlap design in §2.2 and §3.
+The reported failure was structural: adding Xcode beside Conductor consumed the
+remaining display height, so the host and client both refused further growth.
+Desktop-independent ScreenCaptureKit filters now isolate each selected window,
+including when another Mac app covers it. Each has a bounded four-frame encoded
+queue, hardware HEVC encoder, and generation-tagged packets on one video socket.
+Windows routes packets into separate bounded decoder workers and GPU textures.
+The AX/control rect remains display-relative for input; video is window-local.
+Resizing restarts only the affected encoder after geometry settles. Other windows
+retain their size and reference chain. The host UI uses independent previews too.
+
+The legacy CLI capture/tiler remains available for diagnostics. Neither path
+creates a virtual display. Independent capture removes the combined area budget;
+it does not remove an individual Mac app’s minimum/maximum or display-size limit.
+Live verification and cursor results are recorded separately after installation.

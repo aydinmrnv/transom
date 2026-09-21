@@ -36,6 +36,14 @@ public actor VideoServer {
         self.requestKeyframe = requestKeyframe
     }
 
+    func attachShared(_ transport: (any PacketTransport)?) {
+        active = transport.map { (UUID(), $0) }
+        sentConfig = false
+        waitingForKeyframe = true
+        lastEncodedSequence = nil
+        if transport != nil { requestKeyframe() }
+    }
+
     public func setOnConnectionChange(_ handler: @escaping @Sendable (Bool) -> Void) {
         self.onConnectionChange = handler
     }

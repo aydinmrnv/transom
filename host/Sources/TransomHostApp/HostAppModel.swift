@@ -16,6 +16,7 @@ final class HostAppModel: ObservableObject {
     /// Live stream-preview state, refreshed on a faster timer than `status` so the
     /// picture and the window overlays feel live (window moves during a client
     /// drag come in around 10Hz). Driven by `HostSession.preview()`.
+    @Published var windowImages: [UInt64: CGImage] = [:]
     @Published var previewImage: NSImage?
     @Published var previewWindows: [PreviewWindow] = []
     @Published var displayPixelSize: CGSize = .zero
@@ -62,6 +63,7 @@ final class HostAppModel: ObservableObject {
         status = HostStatus()
         previewImage = nil
         previewWindows = []
+        windowImages = [:]
         displayPixelSize = .zero
         if let session {
             Task { await session.stop() }
@@ -95,6 +97,7 @@ final class HostAppModel: ObservableObject {
             $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible)
         }) else { return }
         let snap = session.preview()
+        windowImages = snap.windowImages
         if let cg = snap.image {
             previewImage = NSImage(
                 cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
