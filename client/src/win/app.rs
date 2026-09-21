@@ -466,7 +466,7 @@ impl App {
         match v {
             VideoEvent::Config { hvcc } => {
                 if let Some(vds) = self.vds {
-                    match DecoderWorker::start(hvcc, vds.w, vds.h) {
+                    match DecoderWorker::start(hvcc, vds.w, vds.h, Some(self.gpu.device.clone())) {
                         Ok(d) => self.decoder = Some(d),
                         Err(e) => {
                             self.video_notice = Some(format!("Cannot start video decoder: {e}"));
@@ -512,19 +512,26 @@ impl App {
         }
     }
 
-    /// Upload at most the newest completed decode. The expensive hardware-decode
-    /// drain and NV12→BGRA conversion happen on `transom-decode`; this UI-thread
-    /// step is only the final D3D texture update.
+    /// Take the latest decoded surface. Its copy and color conversion stay on
+    /// the GPU; only small gallery previews are read back when visible.
     fn poll_decoder(&mut self) {
         if let Some(error) = self.decoder.as_ref().and_then(DecoderWorker::take_error) {
             self.video_notice = Some(error);
             self.update_status();
         }
         let frame = self.decoder.as_ref().and_then(DecoderWorker::take_frame);
-        if let (Some(bgra), Some(source)) = (frame, self.source.as_ref()) {
-            source.update_bgra(&self.gpu, &bgra);
-            if let Some(vds) = self.vds {
-                self.dashboard.update_previews(&bgra, vds);
+        if let (Some(frame), Some(source)) = (frame, self.source.as_mut()) {
+            if let Err(error) = source.update_frame(&self.gpu, &frame) {
+                self.video_notice = Some(format!("Cannot render video: {error}"));
+                self.update_status();
+                return;
+            }
+            if self.dashboard.previews_due() {
+                if let (Some(vds), Ok((pixels, preview_size))) =
+                    (self.vds, source.preview(&self.gpu))
+                {
+                    self.dashboard.update_previews(&pixels, preview_size, vds);
+                }
             }
             self.video_decoded += 1;
             let recovered = self.video_notice.take().is_some();

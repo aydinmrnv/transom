@@ -294,13 +294,16 @@ impl Dashboard {
             self.state.layout();
         }
     }
-    pub fn update_previews(&mut self, pixels: &[u8], display: Size) {
-        if self.state.last_preview.elapsed() < Duration::from_millis(250) {
-            return;
-        }
+    pub fn previews_due(&self) -> bool {
+        self.state.view == NAV_APPS
+            && !self.state.cards.is_empty()
+            && self.state.last_preview.elapsed() >= Duration::from_millis(250)
+            && unsafe { IsWindowVisible(self.hwnd).as_bool() && !IsIconic(self.hwnd).as_bool() }
+    }
+    pub fn update_previews(&mut self, pixels: &[u8], display: Size, native_display: Size) {
         self.state.last_preview = Instant::now();
         for c in &mut self.state.cards {
-            c.update_preview(pixels, display);
+            c.update_preview_atlas(pixels, display, native_display);
         }
         unsafe {
             for slot in 0..CARD_COUNT {

@@ -14,6 +14,8 @@
 //! and render-target view. The decoded frame (the whole VDS) is one shared
 //! texture (`SourceTexture`); each window samples its sub-rect out of it.
 
+use super::decode::DecodedFrame;
+use crate::wire::Size;
 use std::mem::size_of;
 
 use windows::core::{s, Interface};
@@ -21,18 +23,24 @@ use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct3D::Fxc::{D3DCompile, D3DCOMPILE_ENABLE_STRICTNESS};
 use windows::Win32::Graphics::Direct3D::{
     ID3DBlob, D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
-    D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+    D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_SRV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Buffer, ID3D11Device, ID3D11DeviceContext, ID3D11PixelShader,
-    ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D,
-    ID3D11VertexShader, D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC,
-    D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_FILTER_MIN_MAG_MIP_POINT,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION,
-    D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT,
-    D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
+    D3D11CreateDevice, ID3D11Buffer, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
+    ID3D11PixelShader, ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView,
+    ID3D11Texture2D, ID3D11VertexShader, D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_RENDER_TARGET,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_BUFFER_DESC, D3D11_CPU_ACCESS_READ,
+    D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+    D3D11_FILTER_MIN_MAG_MIP_POINT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+    D3D11_MAP_WRITE_DISCARD, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION,
+    D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0, D3D11_SUBRESOURCE_DATA,
+    D3D11_TEX2D_SRV, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT,
+    D3D11_USAGE_DYNAMIC, D3D11_USAGE_STAGING, D3D11_VIEWPORT,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM,
+    DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
     IDXGIDevice, IDXGIFactory2, IDXGISwapChain1, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -59,6 +67,8 @@ pub enum RenderMode {
     Checkerboard,
     /// A flat diagnostic fill, shown before the first frame arrives.
     Waiting,
+    /// Native-resolution BT.709 conversion. Only the chroma plane is subsampled.
+    Nv12,
 }
 
 const SHADER_HLSL: &str = r#"
@@ -69,6 +79,7 @@ cbuffer Params : register(b0) {
     uint pad;
 };
 Texture2D srcTex : register(t0);
+Texture2D uvTex : register(t1);
 SamplerState pointSampler : register(s0);
 
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -91,6 +102,15 @@ float4 ps_main(VSOut i) : SV_Target {
     }
     if (mode == 2u) {
         return float4(0.08, 0.10, 0.14, 1.0);
+    }
+    if (mode == 3u) {
+        int2 p = int2(i.pos.xy);
+        float y = srcTex.Load(int3(p, 0)).r * 255.0 - 16.0;
+        float2 c = uvTex.Load(int3(p / 2, 0)).rg * 255.0 - 128.0;
+        // Match the limited-range BT.709 CPU fallback, including rounding.
+        float3 rgb = floor((float3(298*y + 459*c.y,
+            298*y - 55*c.x - 136*c.y, 298*y + 541*c.x) + 128.0) / 256.0);
+        return float4(saturate(rgb / 255.0), 1.0);
     }
     float2 uv = uvRect.xy + i.uv * uvRect.zw;
     return srcTex.Sample(pointSampler, uv);
@@ -119,7 +139,7 @@ impl Gpu {
                 None,
                 D3D_DRIVER_TYPE_HARDWARE,
                 HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                 Some(&levels),
                 D3D11_SDK_VERSION,
                 Some(&mut device),
@@ -129,11 +149,21 @@ impl Gpu {
         }
         let device = device.expect("D3D11CreateDevice returned no device");
         let context = context.expect("D3D11CreateDevice returned no context");
+        // Media Foundation decodes on an MTA worker using this same device.
+        let multithread: ID3D11Multithread = context.cast()?;
+        unsafe {
+            let _ = multithread.SetMultithreadProtected(true);
+        }
 
         // The DXGI factory that created the device is the one that must create its
         // swapchains.
         let dxgi_device: IDXGIDevice = device.cast()?;
         let adapter = unsafe { dxgi_device.GetAdapter()? };
+        let desc = unsafe { adapter.GetDesc()? };
+        eprintln!(
+            "video: D3D11 adapter {}",
+            String::from_utf16_lossy(&desc.Description).trim_end_matches('\0')
+        );
         let factory: IDXGIFactory2 = unsafe { adapter.GetParent()? };
 
         let vs_blob = compile(SHADER_HLSL, s!("vs_main"), s!("vs_5_0"))?;
@@ -237,6 +267,12 @@ impl Gpu {
                 mode: 2,
                 _pad: 0,
             },
+            RenderMode::Nv12 => Params {
+                uv_rect: [0.0, 0.0, 1.0, 1.0],
+                view_size: [width as f32, height as f32],
+                mode: 3,
+                _pad: 0,
+            },
         };
 
         unsafe {
@@ -285,6 +321,8 @@ impl Gpu {
                     .PSSetShaderResources(0, Some(&[Some(srv.clone())]));
             }
             self.context.Draw(3, 0);
+            self.context.PSSetShaderResources(0, Some(&[None, None]));
+            self.context.OMSetRenderTargets(None, None);
         }
     }
 }
@@ -296,6 +334,9 @@ pub struct SourceTexture {
     pub height: u32,
     texture: ID3D11Texture2D,
     pub srv: ID3D11ShaderResourceView,
+    rtv: ID3D11RenderTargetView,
+    nv12: Option<PlanarTexture>,
+    preview: Option<PreviewTexture>,
 }
 
 impl SourceTexture {
@@ -314,7 +355,7 @@ impl SourceTexture {
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            BindFlags: (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET).0 as u32,
             ..Default::default()
         };
 
@@ -346,9 +387,12 @@ impl SourceTexture {
         let texture = texture.unwrap();
 
         let mut srv: Option<ID3D11ShaderResourceView> = None;
+        let mut rtv = None;
         unsafe {
             gpu.device
-                .CreateShaderResourceView(&texture, None, Some(&mut srv))?
+                .CreateShaderResourceView(&texture, None, Some(&mut srv))?;
+            gpu.device
+                .CreateRenderTargetView(&texture, None, Some(&mut rtv))?;
         };
 
         Ok(SourceTexture {
@@ -356,7 +400,94 @@ impl SourceTexture {
             height,
             texture,
             srv: srv.expect("CreateShaderResourceView returned no view"),
+            rtv: rtv.unwrap(),
+            nv12: None,
+            preview: None,
         })
+    }
+
+    /// Copy the decoder's array slice on the GPU before returning its sample to
+    /// the pool, then convert to the shared BGRA atlas without CPU readback.
+    pub fn update_frame(&mut self, gpu: &Gpu, frame: &DecodedFrame) -> windows::core::Result<()> {
+        match frame {
+            DecodedFrame::Bgra(pixels) => self.update_bgra(gpu, pixels),
+            DecodedFrame::Nv12 {
+                texture,
+                subresource,
+                ..
+            } => unsafe {
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                texture.GetDesc(&mut desc);
+                if desc.Format != DXGI_FORMAT_NV12
+                    || desc.Width < self.width
+                    || desc.Height < self.height
+                    || *subresource >= desc.ArraySize * desc.MipLevels
+                {
+                    return Err(windows::core::Error::new(
+                        windows::Win32::Foundation::E_INVALIDARG,
+                        "Invalid decoder texture geometry",
+                    ));
+                }
+                if self.nv12.is_none() {
+                    self.nv12 = Some(PlanarTexture::new(gpu, self.width, self.height)?);
+                }
+                let nv12 = self.nv12.as_ref().unwrap();
+                let region = D3D11_BOX {
+                    left: 0,
+                    top: 0,
+                    front: 0,
+                    right: self.width,
+                    bottom: self.height,
+                    back: 1,
+                };
+                gpu.context.CopySubresourceRegion(
+                    &nv12.texture,
+                    0,
+                    0,
+                    0,
+                    0,
+                    &**texture,
+                    *subresource,
+                    Some(&region),
+                );
+                gpu.context
+                    .PSSetShaderResources(1, Some(&[Some(nv12.uv.clone())]));
+                gpu.draw(
+                    &self.rtv,
+                    self.width,
+                    self.height,
+                    RenderMode::Nv12,
+                    Some(&nv12.y),
+                );
+            },
+        }
+        Ok(())
+    }
+
+    /// Only the selector uses a reduced-size atlas. Interactive views always
+    /// sample the full-resolution source. At 4K this reads 2 MB, not 33 MB.
+    pub fn preview(&mut self, gpu: &Gpu) -> windows::core::Result<(Vec<u8>, Size)> {
+        if self.preview.is_none() {
+            let ratio = (960.0 / self.width as f64)
+                .min(540.0 / self.height as f64)
+                .min(1.0);
+            self.preview = Some(PreviewTexture::new(
+                gpu,
+                (self.width as f64 * ratio).max(1.0) as u32,
+                (self.height as f64 * ratio).max(1.0) as u32,
+            )?);
+        }
+        let preview = self.preview.as_ref().unwrap();
+        gpu.draw(
+            &preview.rtv,
+            preview.size.w,
+            preview.size.h,
+            RenderMode::Source {
+                uv_rect: [0.0, 0.0, 1.0, 1.0],
+            },
+            Some(&self.srv),
+        );
+        Ok((preview.read(gpu)?, preview.size))
     }
 
     /// Replace the whole texture's pixels with a freshly decoded BGRA frame.
@@ -386,6 +517,123 @@ impl SourceTexture {
             w as f32 / self.width as f32,
             h as f32 / self.height as f32,
         ]
+    }
+}
+
+struct PlanarTexture {
+    texture: ID3D11Texture2D,
+    y: ID3D11ShaderResourceView,
+    uv: ID3D11ShaderResourceView,
+}
+impl PlanarTexture {
+    fn new(gpu: &Gpu, width: u32, height: u32) -> windows::core::Result<Self> {
+        unsafe {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_NV12,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                ..Default::default()
+            };
+            let mut texture = None;
+            gpu.device
+                .CreateTexture2D(&desc, None, Some(&mut texture))?;
+            let texture = texture.unwrap();
+            let plane = |format| -> windows::core::Result<ID3D11ShaderResourceView> {
+                let view = D3D11_SHADER_RESOURCE_VIEW_DESC {
+                    Format: format,
+                    ViewDimension: D3D_SRV_DIMENSION_TEXTURE2D,
+                    Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                        Texture2D: D3D11_TEX2D_SRV {
+                            MostDetailedMip: 0,
+                            MipLevels: 1,
+                        },
+                    },
+                };
+                let mut srv = None;
+                gpu.device
+                    .CreateShaderResourceView(&texture, Some(&view), Some(&mut srv))?;
+                Ok(srv.unwrap())
+            };
+            let y = plane(DXGI_FORMAT_R8_UNORM)?;
+            let uv = plane(DXGI_FORMAT_R8G8_UNORM)?;
+            Ok(Self { texture, y, uv })
+        }
+    }
+}
+
+struct PreviewTexture {
+    texture: ID3D11Texture2D,
+    staging: ID3D11Texture2D,
+    rtv: ID3D11RenderTargetView,
+    size: Size,
+}
+impl PreviewTexture {
+    fn new(gpu: &Gpu, width: u32, height: u32) -> windows::core::Result<Self> {
+        unsafe {
+            let mut desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                ..Default::default()
+            };
+            let mut texture = None;
+            gpu.device
+                .CreateTexture2D(&desc, None, Some(&mut texture))?;
+            let texture = texture.unwrap();
+            let mut rtv = None;
+            gpu.device
+                .CreateRenderTargetView(&texture, None, Some(&mut rtv))?;
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            let mut staging = None;
+            gpu.device
+                .CreateTexture2D(&desc, None, Some(&mut staging))?;
+            Ok(Self {
+                texture,
+                staging: staging.unwrap(),
+                rtv: rtv.unwrap(),
+                size: Size {
+                    w: width,
+                    h: height,
+                },
+            })
+        }
+    }
+    fn read(&self, gpu: &Gpu) -> windows::core::Result<Vec<u8>> {
+        unsafe {
+            gpu.context.CopyResource(&self.staging, &self.texture);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            gpu.context
+                .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            let row_bytes = self.size.w as usize * 4;
+            let mut pixels = vec![0; row_bytes * self.size.h as usize];
+            for row in 0..self.size.h as usize {
+                std::ptr::copy_nonoverlapping(
+                    (mapped.pData as *const u8).add(row * mapped.RowPitch as usize),
+                    pixels.as_mut_ptr().add(row * row_bytes),
+                    row_bytes,
+                );
+            }
+            gpu.context.Unmap(&self.staging, 0);
+            Ok(pixels)
+        }
     }
 }
 
@@ -425,5 +673,53 @@ fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
         let ptr = blob.GetBufferPointer() as *const u8;
         let len = blob.GetBufferSize();
         std::slice::from_raw_parts(ptr, len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    #[ignore = "Requires real D3D11 device"]
+    fn nv12_shader_preserves_single_pixel_luma_and_bt709_colors() {
+        let gpu = Gpu::new().unwrap();
+        let (w, h) = (128, 96);
+        let planar = PlanarTexture::new(&gpu, w, h).unwrap();
+        let mut nv12 = vec![128u8; (w * h * 3 / 2) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                nv12[(y * w + x) as usize] = if (x + y) % 2 == 0 { 16 } else { 235 };
+            }
+        }
+        // Saturated and neutral chroma blocks exercise both NV12 planes.
+        for y in 0..h / 2 {
+            for x in 0..w / 2 {
+                let i = (w * h + y * w + x * 2) as usize;
+                nv12[i] = if x < w / 4 { 128 } else { 66 };
+                nv12[i + 1] = if x < w / 4 { 128 } else { 200 };
+            }
+        }
+        unsafe {
+            gpu.context
+                .UpdateSubresource(&planar.texture, 0, None, nv12.as_ptr().cast(), w, 0);
+        }
+        let output = PreviewTexture::new(&gpu, w, h).unwrap();
+        unsafe {
+            gpu.context
+                .PSSetShaderResources(1, Some(&[Some(planar.uv.clone())]));
+        }
+        gpu.draw(&output.rtv, w, h, RenderMode::Nv12, Some(&planar.y));
+        let pixels = output.read(&gpu).unwrap();
+        let expected = super::super::decode::nv12_to_bgra(&nv12, w, h, w as usize).unwrap();
+        let max_error = pixels
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(
+            max_error <= 1,
+            "native pixel/color conversion error {max_error}"
+        );
     }
 }
