@@ -426,6 +426,26 @@ impl App {
                 }
                 self.update_source_rect(id, source);
             }
+            ModelEvent::ResizeCompleted {
+                id,
+                source,
+                request,
+            } => {
+                let accepted = self
+                    .proxies
+                    .get_mut(&id)
+                    .is_some_and(|p| p.resize_sync.complete(request));
+                if accepted {
+                    eprintln!(
+                        "resize: window {id} request {request} acknowledged {}x{}",
+                        source.w, source.h
+                    );
+                    if let Some(w) = self.windows.get_mut(&id) {
+                        w.source = source;
+                    }
+                    self.update_source_rect(id, source);
+                }
+            }
             ModelEvent::WindowTitleChanged { id, title } => {
                 if let Some(w) = self.windows.get_mut(&id) {
                     w.title = title.clone();
@@ -512,6 +532,9 @@ impl App {
                 {
                     self.dashboard.update_previews(&pixels, preview_size, vds);
                 }
+            }
+            for proxy in self.proxies.values_mut() {
+                proxy.dirty = true;
             }
             self.video_decoded += 1;
             let recovered = self.video_notice.take().is_some();
@@ -643,11 +666,7 @@ impl App {
         // blit — the product's geometry-mirroring, applied at birth instead of only
         // on a user drag.
         if clamped {
-            self.send(&ClientMessage::RequestResize {
-                id,
-                size: Size { w: win_w, h: win_h },
-                phase: ResizePhase::End,
-            });
+            self.commit_resize(id, Size { w: win_w, h: win_h });
         }
 
         // Always-visible diagnostic: the source size, the fitted window size, and
@@ -710,13 +729,18 @@ impl App {
             return;
         };
         proxy.set_source(source);
-        if (proxy.width != source.w || proxy.height != source.h) && !proxy.in_size_move {
+        if (proxy.width != source.w || proxy.height != source.h)
+            && !proxy.in_size_move
+            && !proxy.resize_sync.waiting()
+        {
             let hwnd = proxy.hwnd;
             let outer =
                 super::frame::outer_size(source.w, source.h, super::dpi::dpi_for_window(hwnd));
             unsafe {
+                // A maximized viewport stays maximized even if the Mac clamps
+                // the size. Native pixels are letterboxed, never stretched.
                 if IsZoomed(hwnd).as_bool() {
-                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                    return;
                 }
                 let _ = SetWindowPos(
                     hwnd,
@@ -732,7 +756,28 @@ impl App {
         }
     }
 
+    fn commit_resize(&mut self, id: u64, size: Size) {
+        let Some(proxy) = self.proxies.get_mut(&id) else {
+            return;
+        };
+        let request = proxy.resize_sync.commit(Instant::now());
+        eprintln!(
+            "resize: window {id} request {request} {}x{}",
+            size.w, size.h
+        );
+        self.send(&ClientMessage::CommitResize { id, size, request });
+    }
+
     fn render_all(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<_> = self
+            .proxies
+            .iter_mut()
+            .filter_map(|(&id, p)| p.resize_sync.expired(now).then_some((id, p.source)))
+            .collect();
+        for (id, source) in expired {
+            self.update_source_rect(id, source);
+        }
         let source = self.source.as_ref();
         for proxy in self.proxies.values_mut() {
             if unsafe { IsWindowVisible(proxy.hwnd).as_bool() && !IsIconic(proxy.hwnd).as_bool() } {
@@ -755,7 +800,7 @@ impl App {
         let id = *self.hwnd_to_id.get(&(hwnd.0 as isize))?;
 
         match msg {
-            // Client pixels exclude the native caption and frame.
+            // The Mac window occupies the complete borderless client viewport.
             WM_SIZE => {
                 let mut r = RECT::default();
                 unsafe {
@@ -773,11 +818,7 @@ impl App {
                     proxy.render(&self.gpu, self.source.as_ref());
                 }
                 if request {
-                    self.send(&ClientMessage::RequestResize {
-                        id,
-                        size: Size { w, h },
-                        phase: ResizePhase::End,
-                    });
+                    self.commit_resize(id, Size { w, h });
                 }
                 Some(LRESULT(0))
             }
@@ -824,16 +865,20 @@ impl App {
                 if let Some(proxy) = self.proxies.get_mut(&id) {
                     let resized = proxy.resizing;
                     proxy.end_size_move();
-                    let size = Size {
-                        w: proxy.width,
-                        h: proxy.height,
-                    };
+                    // Read the final OS rect, not the last rendered swapchain:
+                    // WM_SIZE can still be coalesced in the native event queue.
+                    let mut r = RECT::default();
+                    unsafe {
+                        let _ = GetClientRect(hwnd, &mut r);
+                    }
                     if resized {
-                        self.send(&ClientMessage::RequestResize {
+                        self.commit_resize(
                             id,
-                            size,
-                            phase: ResizePhase::End,
-                        });
+                            Size {
+                                w: r.right.max(1) as u32,
+                                h: r.bottom.max(1) as u32,
+                            },
+                        );
                     }
                 }
                 Some(LRESULT(0))
@@ -860,6 +905,7 @@ impl App {
             WM_PAINT => {
                 let source = self.source.as_ref();
                 if let Some(proxy) = self.proxies.get_mut(&id) {
+                    proxy.dirty = true;
                     proxy.render(&self.gpu, source);
                 }
                 // Validate the whole window so we don't get flooded with WM_PAINT.
@@ -970,6 +1016,7 @@ pub fn register_class() -> windows::core::Result<()> {
     let instance = unsafe { GetModuleHandleW(None)? };
     let cursor = unsafe { LoadCursorW(None, IDC_ARROW)? };
     let class = WNDCLASSW {
+        style: windows::Win32::UI::WindowsAndMessaging::CS_DBLCLKS,
         lpfnWndProc: Some(wndproc),
         hInstance: instance.into(),
         lpszClassName: CLASS_NAME,
@@ -986,8 +1033,19 @@ pub fn register_class() -> windows::core::Result<()> {
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         if msg == windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST {
-            let hit = DefWindowProcW(hwnd, msg, wparam, lparam);
-            return LRESULT(super::frame::hit_test(hit.0 as u32) as isize);
+            return super::frame::hit_test(hwnd, lparam);
+        }
+        // Preserve WS_THICKFRAME/SYSMENU for native drag, resize and snapping,
+        // but remove the duplicate caption and border from the client viewport.
+        if msg == windows::Win32::UI::WindowsAndMessaging::WM_NCCALCSIZE {
+            if wparam.0 != 0 && IsZoomed(hwnd).as_bool() {
+                let params = &mut *(lparam.0
+                    as *mut windows::Win32::UI::WindowsAndMessaging::NCCALCSIZE_PARAMS);
+                let r = params.rgrc[0];
+                params.rgrc[0] =
+                    super::dpi::work_area_at((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+            }
+            return LRESULT(0);
         }
         // Stash the App pointer on NCCREATE, before any other message needs it.
         if msg == WM_NCCREATE {
@@ -1059,8 +1117,6 @@ pub fn run_pump(mut app: Box<App>) {
     // dashboard, menus, and proxy movement. Wndprocs only queue owned data.
     let timer = unsafe { SetTimer(None, 0, 16, Some(modal_tick)) };
     loop {
-        tick(app_ptr);
-
         // 2. Pump all pending Win32 messages. No Rust borrow of App is held here,
         //    so the reentrant wndproc's `*app_ptr` access is sound.
         let mut msg = MSG::default();
@@ -1094,6 +1150,7 @@ pub fn run_pump(mut app: Box<App>) {
         if quit {
             break;
         }
+        tick(app_ptr);
 
         // 4. If every window has closed and we were connected, exit; otherwise
         //    wait briefly for input or the next channel poll.
@@ -1134,10 +1191,10 @@ fn tick(app_ptr: *mut App) {
                 .unwrap_or(event.lp);
             (*app_ptr).handle_message(event.hwnd, event.msg, event.wp, lp);
         }
+        (*app_ptr).flush_mouse_moves();
         (*app_ptr).poll_dashboard();
         (*app_ptr).drain_session(app_ptr);
         (*app_ptr).poll_decoder();
-        (*app_ptr).flush_mouse_moves();
         (*app_ptr).render_all();
     }
     IN_TICK.with(|busy| busy.set(false));

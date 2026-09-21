@@ -240,6 +240,14 @@ fn print_control(ev: &ModelEvent, t: u64) {
         ModelEvent::WindowTitleChanged { id, title } => {
             println!("[{t:>6}ms] ~ window {id} title \"{title}\"")
         }
+        ModelEvent::ResizeCompleted {
+            id,
+            source,
+            request,
+        } => println!(
+            "[{t:>6}ms] resize {request} window {id}: {}x{}",
+            source.w, source.h
+        ),
         ModelEvent::WindowFocused { id } => println!("[{t:>6}ms] * window {id} focused"),
         ModelEvent::WindowRemoved { id } => println!("[{t:>6}ms] - window {id} destroyed"),
         ModelEvent::Resynced { removed } => {

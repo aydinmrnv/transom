@@ -96,6 +96,11 @@ pub enum ServerMessage {
         id: u64,
         rect: Rect,
     },
+    ResizeCompleted {
+        id: u64,
+        rect: Rect,
+        request: u64,
+    },
     WindowDestroyed {
         id: u64,
     },
@@ -124,6 +129,11 @@ pub enum ClientMessage {
         id: u64,
         size: Size,
         phase: ResizePhase,
+    },
+    CommitResize {
+        id: u64,
+        size: Size,
+        request: u64,
     },
     RequestFocus {
         id: u64,
@@ -235,6 +245,11 @@ impl ServerMessage {
                 id: u64_field(&v, "id")?,
                 rect: rect_field(&v, "rect")?,
             }),
+            "resizeCompleted" => Ok(ServerMessage::ResizeCompleted {
+                id: u64_field(&v, "id")?,
+                rect: rect_field(&v, "rect")?,
+                request: u64_field(&v, "request")?,
+            }),
             "windowDestroyed" => Ok(ServerMessage::WindowDestroyed {
                 id: u64_field(&v, "id")?,
             }),
@@ -288,6 +303,19 @@ impl ClientMessage {
                 ),
                 ("phase", Value::str(phase.wire())),
             ]),
+            ClientMessage::CommitResize { id, size, request } => Value::object(vec![
+                ("type", Value::str("requestResize")),
+                ("id", Value::uint(*id)),
+                (
+                    "size",
+                    Value::object(vec![
+                        ("w", Value::uint(size.w as u64)),
+                        ("h", Value::uint(size.h as u64)),
+                    ]),
+                ),
+                ("phase", Value::str("end")),
+                ("request", Value::uint(*request)),
+            ]),
             ClientMessage::RequestFocus { id } => Value::object(vec![
                 ("type", Value::str("requestFocus")),
                 ("id", Value::uint(*id)),
@@ -318,6 +346,23 @@ impl ClientMessage {
 mod tests {
     use super::*;
     use crate::wire::input::MouseButton;
+
+    #[test]
+    fn resize_commit_and_actual_ack_share_the_request_token() {
+        let encoded = ClientMessage::CommitResize {
+            id: 7,
+            size: Size { w: 900, h: 700 },
+            request: 19,
+        }
+        .to_value();
+        assert_eq!(
+            encoded.get("type").and_then(Value::as_str),
+            Some("requestResize")
+        );
+        assert_eq!(encoded.get("phase").and_then(Value::as_str), Some("end"));
+        assert_eq!(ServerMessage::decode(br#"{"type":"resizeCompleted","id":7,"request":19,"rect":{"x":0,"y":60,"w":898,"h":700}}"#).unwrap(),
+            ServerMessage::ResizeCompleted { id: 7, request: 19, rect: Rect { x: 0, y: 60, w: 898, h: 700 } });
+    }
 
     #[test]
     fn decodes_hello() {

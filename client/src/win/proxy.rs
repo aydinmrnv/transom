@@ -40,6 +40,8 @@ pub struct Proxy {
     /// True between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`.
     pub in_size_move: bool,
     pub resizing: bool,
+    pub resize_sync: crate::resize_sync::ResizeSync,
+    pub dirty: bool,
     last_live_send: Option<Instant>,
     /// M0 diagnostic: draw a 1px checkerboard instead of sampling the stream.
     pub checkerboard: bool,
@@ -62,6 +64,8 @@ impl Proxy {
             source,
             in_size_move: false,
             resizing: false,
+            resize_sync: Default::default(),
+            dirty: true,
             last_live_send: None,
             checkerboard,
         };
@@ -95,6 +99,7 @@ impl Proxy {
             self.report_pixel_size();
             return;
         }
+        self.dirty = true;
         // The immediate context also retains the bound RTV after drawing. Drop
         // that reference before ResizeBuffers, not only our Rust COM handle.
         unsafe {
@@ -147,6 +152,9 @@ impl Proxy {
     /// Draw one frame and present. `source_tex` is the shared decoded VDS texture;
     /// `None` (or checkerboard mode) draws a diagnostic instead.
     pub fn render(&mut self, gpu: &Gpu, source_tex: Option<&SourceTexture>) {
+        if !self.dirty {
+            return;
+        }
         if self.ensure_rtv(gpu).is_err() {
             return;
         }
@@ -191,7 +199,7 @@ impl Proxy {
             // Do not let DWM backpressure block the Win32 UI thread. If the flip
             // queue is full, keeping the already-queued newest frame is better
             // than making native window movement wait for a redundant present.
-            let _ = self.swapchain.Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+            self.dirty = self.swapchain.Present(0, DXGI_PRESENT_DO_NOT_WAIT).is_err();
         }
     }
 
@@ -200,6 +208,7 @@ impl Proxy {
     /// which the caller uses to decide whether to snap the OS window to match.
     pub fn set_source(&mut self, source: Rect) -> bool {
         let size_changed = self.source.w != source.w || self.source.h != source.h;
+        self.dirty |= self.source != source;
         self.source = source;
         size_changed
     }
@@ -217,12 +226,14 @@ impl Proxy {
     }
 
     pub fn begin_size_move(&mut self) {
+        self.resize_sync.begin();
         self.in_size_move = true;
         self.resizing = false;
         self.last_live_send = None;
     }
 
     pub fn end_size_move(&mut self) {
+        self.dirty = true;
         self.in_size_move = false;
         self.resizing = false;
         self.last_live_send = None;

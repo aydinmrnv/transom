@@ -107,7 +107,8 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             config.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
             config.colorSpaceName = CGColorSpace.sRGB
         }
-        config.showsCursor = true
+        // Cursor position is rendered locally by Windows, outside the video delay.
+        config.showsCursor = false
         config.scalesToFit = false
         // ScreenCaptureKit declares backgroundColor as unowned(unsafe). Keep the
         // CGColor alive through SCStream's configuration copy; releasing the

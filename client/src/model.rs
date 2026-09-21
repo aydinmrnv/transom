@@ -45,6 +45,11 @@ pub enum ModelEvent {
         source: Rect,
         size_changed: bool,
     },
+    ResizeCompleted {
+        id: u64,
+        source: Rect,
+        request: u64,
+    },
     WindowTitleChanged {
         id: u64,
         title: String,
@@ -169,6 +174,13 @@ impl WindowModel {
                     // since we have no title/kind. The next resync will reconcile.
                     Vec::new()
                 }
+            }
+            ServerMessage::ResizeCompleted { id, rect, request } => {
+                vec![ModelEvent::ResizeCompleted {
+                    id,
+                    source: rect,
+                    request,
+                }]
             }
             ServerMessage::WindowTitle { id, title } => {
                 if let Some(i) = self.index_of(id) {

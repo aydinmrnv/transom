@@ -62,9 +62,13 @@ public actor ControlServer {
     /// failure the connection is dropped; the next reconnect resyncs from the
     /// registry, so nothing is left half-described.
     public func broadcast(_ event: WindowWatcher.WindowEvent) async {
+        await send(Self.message(for: event))
+    }
+
+    public func send(_ message: ControlMessage) async {
         guard let active else { return }
         do {
-            try await active.transport.send(try WireCodec.encode(Self.message(for: event)))
+            try await active.transport.send(try WireCodec.encode(message))
         } catch {
             Log.general.notice(
                 "control: send failed, dropping client: \(error.localizedDescription, privacy: .public)"

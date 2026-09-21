@@ -48,7 +48,7 @@ public final class InputInjector: @unchecked Sendable {
             inject(id: id, event: event, ts: ts)
         case .requestFocus(let id):
             requestFocus(id: id)
-        case .requestResize, .requestClose, .requestKeyframe:
+        case .requestResize, .commitResize, .requestClose, .requestKeyframe:
             break
         }
     }

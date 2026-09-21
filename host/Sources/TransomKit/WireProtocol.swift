@@ -79,6 +79,7 @@ public enum ControlMessage: Sendable, Equatable {
     case windowCreated(id: UInt64, rect: WireRect, title: String, kind: WindowKind)
     /// ACTUAL geometry after an AX write or an observed move (I-4), never requested.
     case windowMoved(id: UInt64, rect: WireRect)
+    case resizeCompleted(id: UInt64, rect: WireRect, request: UInt64)
     case windowDestroyed(id: UInt64)
     case windowTitle(id: UInt64, title: String)
     case windowFocused(id: UInt64)
@@ -90,6 +91,7 @@ public enum ControlMessage: Sendable, Equatable {
 
 public enum ClientMessage: Sendable, Equatable {
     case requestResize(id: UInt64, size: WireSize, phase: ResizePhase)
+    case commitResize(id: UInt64, size: WireSize, request: UInt64)
     case requestFocus(id: UInt64)
     case requestClose(id: UInt64)
     /// The client dropped stale compressed frames and needs a new intra frame.
@@ -104,7 +106,7 @@ public enum ClientMessage: Sendable, Equatable {
 
 extension ControlMessage: Codable {
     private enum Key: String, CodingKey {
-        case type, id, rect, title, kind, windows, displaySize
+        case type, id, rect, title, kind, windows, displaySize, request
         case protocolVersion = "protocol"
         case vdsSize, code, message
     }
@@ -126,6 +128,11 @@ extension ControlMessage: Codable {
             try c.encode("windowMoved", forKey: .type)
             try c.encode(id, forKey: .id)
             try c.encode(rect, forKey: .rect)
+        case .resizeCompleted(let id, let rect, let request):
+            try c.encode("resizeCompleted", forKey: .type)
+            try c.encode(id, forKey: .id)
+            try c.encode(rect, forKey: .rect)
+            try c.encode(request, forKey: .request)
         case .windowDestroyed(let id):
             try c.encode("windowDestroyed", forKey: .type)
             try c.encode(id, forKey: .id)
@@ -165,6 +172,8 @@ extension ControlMessage: Codable {
             self = .windowMoved(
                 id: try c.decode(UInt64.self, forKey: .id),
                 rect: try c.decode(WireRect.self, forKey: .rect))
+        case "resizeCompleted":
+            self = .resizeCompleted(id: try c.decode(UInt64.self, forKey: .id), rect: try c.decode(WireRect.self, forKey: .rect), request: try c.decode(UInt64.self, forKey: .request))
         case "windowDestroyed":
             self = .windowDestroyed(id: try c.decode(UInt64.self, forKey: .id))
         case "windowTitle":
@@ -190,7 +199,7 @@ extension ControlMessage: Codable {
 
 extension ClientMessage: Codable {
     private enum Key: String, CodingKey {
-        case type, id, size, phase, event, ts
+        case type, id, size, phase, event, ts, request
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -201,6 +210,12 @@ extension ClientMessage: Codable {
             try c.encode(id, forKey: .id)
             try c.encode(size, forKey: .size)
             try c.encode(phase, forKey: .phase)
+        case .commitResize(let id, let size, let request):
+            try c.encode("requestResize", forKey: .type)
+            try c.encode(id, forKey: .id)
+            try c.encode(size, forKey: .size)
+            try c.encode(ResizePhase.end, forKey: .phase)
+            try c.encode(request, forKey: .request)
         case .requestFocus(let id):
             try c.encode("requestFocus", forKey: .type)
             try c.encode(id, forKey: .id)
@@ -222,6 +237,11 @@ extension ClientMessage: Codable {
         let type = try c.decode(String.self, forKey: .type)
         switch type {
         case "requestResize":
+            if let request = try c.decodeIfPresent(UInt64.self, forKey: .request),
+                request > 0, try c.decode(ResizePhase.self, forKey: .phase) == .end {
+                self = .commitResize(id: try c.decode(UInt64.self, forKey: .id), size: try c.decode(WireSize.self, forKey: .size), request: request)
+                return
+            }
             self = .requestResize(
                 id: try c.decode(UInt64.self, forKey: .id),
                 size: try c.decode(WireSize.self, forKey: .size),

@@ -137,6 +137,7 @@ reconnecting client gets the full resync again.
 ```
 hello          { protocol: u32, vdsSize: Size }         // first message; version + display size
 windowCreated  { id: u64, rect: Rect, title: String, kind: WindowKind }
+resizeCompleted{ id: u64, rect: Rect, request: u64 }    // optional final resize acknowledgement
 windowDestroyed{ id: u64 }
 windowMoved    { id: u64, rect: Rect }                  // ACTUAL geometry, see I-4
 windowTitle    { id: u64, title: String }
@@ -166,7 +167,7 @@ are the semantic message names; the wire value is the camelCase form. (The host
 is authoritative here; this line was corrected to match it — AGENTS.md.)
 
 ```
-requestResize  { id: u64, size: Size, phase: ResizePhase }
+requestResize  { id: u64, size: Size, phase: ResizePhase, request?: u64 }
 requestFocus   { id: u64 }
 requestClose   { id: u64 }
 requestKeyframe {}
@@ -176,6 +177,17 @@ input          { id: u64, event: InputEvent, ts: u64 }
 `ResizePhase` is `Begin | Live | End`, mapping to `WM_ENTERSIZEMOVE` /
 `WM_SIZING` / `WM_EXITSIZEMOVE`. The host throttles `Live` to ~10Hz and treats
 `End` as the authoritative 1:1 snap (architecture.md 2.1).
+
+In 0.4.6, an `end` resize may include a nonzero `request` token, monotonically
+increasing per window for the lifetime of a connection. After applying the final
+AX write and reading back actual geometry, the host sends `resizeCompleted` with
+the same token and actual rect. Ordinary `windowMoved` updates continue. The
+client updates video crops during a drag but does not let old live geometry
+resize its native window while waiting for the matching completion. A new drag
+invalidates the previous completion; unrelated/late tokens cannot finish it.
+For old hosts, the client falls back to latest actual geometry after 1.5 seconds.
+No requested size is assumed to have succeeded. Old clients omit the token and
+receive the original v1 behavior.
 
 `requestKeyframe` (0.4.5) asks the encoder for a fresh intra frame after a
 compressed queue overflow or decode error. The host refreshes even an idle
@@ -392,12 +404,11 @@ best-effort may be fine and timestamp correlation can be dropped.
 
 ## 8. Cursor (resolved) and what is still deferred
 
-**Cursor: captured, not synthesized.** The host sets
-`SCStreamConfiguration.showsCursor = true`, so the real Mac cursor is already in
-the captured frame, pixel-correct, for free. Input posts `CGEvent`s (Phase 5),
-the real cursor moves, SCK captures it. **The client hides its own OS cursor when
-it is over a proxy window** so there are not two cursors. Simplest correct answer
-for v1.
+**Cursor: local (0.4.6).** ScreenCaptureKit uses `showsCursor = false`.
+The client keeps its local OS pointer visible, so motion is immediate and never
+duplicated by a delayed pointer inside the video. Edge/corner cursors use native
+Windows hit testing. Remote app cursor shapes are not transmitted yet; content
+currently uses the local arrow. Input coordinates and Mac injection are unchanged.
 
 Still deferred:
 
@@ -415,7 +426,7 @@ the client drops, and a reconnecting client gets a full resync.
 
 `windowCreated` adds a shared window to the selector. The client opens a local
 view only when selected; hiding that view sends no `requestClose`. App names
-may prefix titles. Native Windows caption/frame pixels are excluded from the
+may prefix titles. The borderless Windows proxy displays the Mac chrome inside the
 streamed client area and input coordinates. A move-only gesture emits no
 `requestResize`; Begin/Live/End are reserved for size changes. Existing v1 hosts
 continue to work with the selector. Multiple shared apps require the newer host.

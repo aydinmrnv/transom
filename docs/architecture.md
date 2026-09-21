@@ -777,3 +777,24 @@ and tested the initial redesign. These are not real drag, physical-pixel or Mac
 multi-app runtime measurements. This PC was locked during the attempted visual
 check; those checks remain pending until it is unlocked. Previous 0.3.1 live
 video results do not verify the new native frame.
+
+
+### Pointer, borderless chrome and resize completion (0.4.6)
+
+The cursor is no longer part of ScreenCaptureKit video. Windows displays one
+local arrow and native resize cursors immediately; remote cursor shapes remain
+deferred. Input dispatch runs before preview GPU readback and independently of
+Mac AX resize writes. Unchanged video frames are no longer submitted repeatedly
+to the swapchain, which otherwise adds redundant work and queued presentations.
+
+Proxy windows retain WS_OVERLAPPEDWINDOW and native sizing/snap behavior while
+WM_NCCALCSIZE removes the duplicate Windows caption. The actual captured Mac
+chrome reaches the window edge. Six-DIP edges and larger corner targets resize;
+the clear strip above toolbar controls drags locally, as does Alt+drag anywhere.
+App toolbar controls remain remote input. A final resize request carries a token;
+only its matching actual-geometry acknowledgement settles the local viewport.
+Older live updates cannot pull it backwards after release. Maximized windows
+stay maximized when the Mac clamps geometry, with native pixels letterboxed.
+
+This supersedes the 0.4.0 caption choice and captured-cursor design above.
+Runtime verification for this revision is recorded after the target-machine test.

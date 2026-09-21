@@ -340,7 +340,13 @@ public final class HostSession: @unchecked Sendable {
 
         let controlServer = ControlServer(vdsSize: vdsSize, registry: registry)
         self.controlServer = controlServer
-        await controlServer.setOnClientMessage { message in clientSink.yield(message) }
+        // Mouse/key events must not wait behind slow AX resize writes.
+        await controlServer.setOnClientMessage { message in
+            switch message {
+            case .input, .requestFocus: injector.handle(message)
+            default: clientSink.yield(message)
+            }
+        }
         await controlServer.setOnConnectionChange { [weak self] connected in
             self?.statsLock.withLock { self?.controlConnected = connected }
             // A dropped client leaves no modifier held for the next one (issue #7).
@@ -385,6 +391,12 @@ public final class HostSession: @unchecked Sendable {
                     switch message {
                     case let .requestResize(id, size, phase):
                         await resize.handle(id: id, size: size, phase: phase)
+                    case let .commitResize(id, size, request):
+                        await resize.handle(id: id, size: size, phase: .end)
+                        if let rect = registry.snapshot().first(where: { $0.id == id })?.rect {
+                            await controlServer.send(.resizeCompleted(id: id, rect: rect, request: request))
+                            capture?.requestRefresh()
+                        }
                     case .input, .requestFocus:
                         injector.handle(message)
                     case let .requestClose(id):
