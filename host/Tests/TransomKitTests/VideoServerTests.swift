@@ -76,4 +76,33 @@ struct VideoServerTests {
         await transport.close()
         await connection.value
     }
+
+    @Test("a dropped encoded reference suppresses deltas until a recovery keyframe")
+    func recoversAfterQueueGap() async throws {
+        let server = VideoServer(hvccProvider: { Data([1, 2, 3]) })
+        let transport = RecordingVideoTransport()
+        let connection = Task { await server.serveConnection(transport) }
+        defer { connection.cancel() }
+        try await waitForConnection(transport)
+        func sequenced(_ n: UInt64, keyframe: Bool) -> HEVCEncoder.EncodedFrame {
+            var value = frame(keyframe: keyframe)
+            value.sequence = n
+            return value
+        }
+        await server.send(sequenced(0, keyframe: true))
+        await server.send(sequenced(1, keyframe: false))
+        // Frame 2 was evicted by the bounded encoder→network queue.
+        await server.send(sequenced(3, keyframe: false))
+        await server.send(sequenced(4, keyframe: false))
+        #expect(await transport.messages.count == 3)
+        await server.send(sequenced(5, keyframe: true))
+        await server.send(sequenced(6, keyframe: false))
+        let messages = await transport.messages
+        #expect(messages.count == 5)
+        if case .frame(let seq, _, let keyframe, _)? = VideoWire.decode(messages[3]) {
+            #expect(seq == 5 && keyframe)
+        } else { Issue.record("Expected recovery keyframe") }
+        await transport.close()
+        await connection.value
+    }
 }

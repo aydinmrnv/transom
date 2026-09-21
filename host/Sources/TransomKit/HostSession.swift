@@ -117,8 +117,8 @@ public struct HostStatus: Sendable {
 /// A cheap, poll-on-demand snapshot for the host app's live stream preview: the
 /// frame currently being encoded (nil when video is off or before the first frame)
 /// plus every window the AX watcher is tracking, with its **VDS-pixel** rect and id
-/// (protocol.md §3). The image is the native-pixel capture (never resampled, I-1);
-/// the preview panel scales it down for display. This is a viewport onto the
+/// (protocol.md §3). The selector image is reduced on the GPU before readback;
+/// window rects still refer to the native display. This is a viewport onto the
 /// session, never a fork of the capture path.
 ///
 /// Not `Sendable` on purpose — it carries a `CGImage` and is meant to be read
@@ -233,13 +233,13 @@ public final class HostSession: @unchecked Sendable {
     /// The latest capture frame + the live window rects, for the host app's
     /// stream-preview panel. Cheap enough to poll ~10 times/sec; reads the same
     /// live capture and registry the stream uses, so the panel shows exactly what
-    /// is going out. The frame is native pixels (not resampled, I-1) — the panel
-    /// scales it for display. `image` is nil when video is off or no frame has
+    /// is going out. Only this UI preview is reduced to 1280 pixels wide; streamed
+    /// interactive pixels remain native (I-1). `image` is nil when video is off or no frame has
     /// arrived yet; `windows` is still populated (control-only sessions have a
     /// window layout but no pixels). Call on the main thread — it is not `Sendable`.
     public func preview() -> HostPreview {
         HostPreview(
-            image: capture?.latestImage(),
+            image: capture?.latestImage(maxPixelWidth: 1280),
             windows: registry?.snapshot() ?? [],
             displayPixelWidth: config.display.pixelWidth,
             displayPixelHeight: config.display.pixelHeight)
@@ -394,6 +394,7 @@ public final class HostSession: @unchecked Sendable {
                         // to protect interaction latency. Restart its dependency
                         // chain at the next encoded frame.
                         encoder?.requestKeyframe()
+                        capture?.requestRefresh()
                     }
                 }
             })
@@ -431,7 +432,10 @@ public final class HostSession: @unchecked Sendable {
             pixelFormat: config.videoFormat.capturePixelFormat)
         self.capture = cap
 
-        let videoServer = VideoServer(hvccProvider: { enc.parameterSetsHVCC })
+        let videoServer = VideoServer(hvccProvider: { enc.parameterSetsHVCC }, requestKeyframe: { [weak enc, weak cap] in
+            enc?.requestKeyframe()
+            cap?.requestRefresh()
+        })
         self.videoServer = videoServer
         await videoServer.setOnConnectionChange { [weak self, weak enc, weak cap] connected in
             self?.statsLock.withLock { self?.videoConnected = connected }
@@ -449,7 +453,9 @@ public final class HostSession: @unchecked Sendable {
             // Read the encoder directly instead of self.encoder on a VT thread;
             // keep it weak so the callback does not retain its own encoder.
             self?.recordEncodedFrame(frame, formatSummary: enc?.outputFormatSummary ?? "unknown")
-            frameSink.yield(frame)
+            if case .dropped = frameSink.yield(frame) {
+                enc?.requestKeyframe()
+            }
         }
 
         let frameDuration = CMTimeMake(value: 1, timescale: Int32(config.fps))

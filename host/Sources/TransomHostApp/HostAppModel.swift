@@ -24,9 +24,9 @@ final class HostAppModel: ObservableObject {
     private var pollTimer: Timer?
     private var previewTimer: Timer?
 
-    /// How often the preview panel refreshes. ~12Hz is smooth enough for a control
-    /// panel while staying cheap (each tick resamples one downscaled frame).
-    private static let previewInterval = 1.0 / 12.0
+    /// Selector previews refresh at 4 Hz only while the host window is visible.
+    /// Remote interactive video has its own independent capture cadence.
+    private static let previewInterval = 0.25
 
     func start(config: HostConfig) {
         guard session == nil else { return }
@@ -91,6 +91,9 @@ final class HostAppModel: ObservableObject {
 
     private func pollPreview() {
         guard let session else { return }
+        guard NSApp.windows.contains(where: {
+            $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible)
+        }) else { return }
         let snap = session.preview()
         if let cg = snap.image {
             previewImage = NSImage(

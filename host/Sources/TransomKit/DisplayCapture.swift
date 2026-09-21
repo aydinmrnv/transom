@@ -99,7 +99,11 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         config.height = display.pixelHeight
         config.pixelFormat = pixelFormat
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-        config.queueDepth = 5
+        config.queueDepth = 3
+        if pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
+            config.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
+            config.colorSpaceName = CGColorSpace.itur_709
+        }
         config.showsCursor = true
         config.scalesToFit = false
         // ScreenCaptureKit declares backgroundColor as unowned(unsafe). Keep the
@@ -173,26 +177,28 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         Log.signposter.endInterval("capture", signpostState)
     }
 
-    /// Latest frame as a CGImage at **native pixels**, converted on demand. Nil
-    /// until the first complete frame arrives. Never resamples (I-1): callers that
-    /// only need a small preview let the display layer scale it down for drawing.
+    /// Latest frame converted on demand. The default keeps native pixels;
+    /// maxPixelWidth is only for selector thumbnails, never interactive video.
+    /// Nil until the first complete frame arrives.
     ///
     /// The IOSurface-backed buffer is grabbed under the lock and the (potentially
     /// expensive) `createCGImage` runs **outside** it — holding a strong ref keeps
     /// the buffer alive against pool recycling, exactly as the capture callback's
     /// own `onFrame` render does — so a 60fps capture callback is never blocked
     /// waiting on a preview conversion.
-    public func latestImage() -> CGImage? {
+    public func latestImage(maxPixelWidth: Int? = nil) -> CGImage? {
         let (buffer, ctx): (CVPixelBuffer?, CIContext) = lock.withLock {
             (latestPixelBuffer, ciContext)
         }
         guard let buffer else { return nil }
-        return ctx.createCGImage(
-            CIImage(cvPixelBuffer: buffer),
-            from: CGRect(
-                x: 0, y: 0,
-                width: CVPixelBufferGetWidth(buffer),
-                height: CVPixelBufferGetHeight(buffer)))
+        var image = CIImage(cvPixelBuffer: buffer)
+        // This optional reduction is exclusively for the host's selector UI.
+        // The capture→encoder path above always retains native pixels.
+        if let maxPixelWidth, maxPixelWidth > 0, image.extent.width > CGFloat(maxPixelWidth) {
+            let scale = CGFloat(maxPixelWidth) / image.extent.width
+            image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
+        return ctx.createCGImage(image, from: image.extent.integral)
     }
 
     // MARK: - SCStreamOutput

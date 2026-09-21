@@ -5,25 +5,30 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 use windows::core::Interface;
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Device, ID3D11Texture2D, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
 };
 
-// Three access units is enough to absorb a short decoder hiccup without turning
-// the queue into visible remote-desktop latency. If we overflow, we discard the
-// dependency chain and ask the host for a fresh keyframe.
 const MAX_PENDING_FRAMES: usize = 3;
 const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
 
-/// A decoded frame in the format produced by the Windows HEVC decoder.
-/// Keeping NV12 intact lets D3D11 do the YUV→RGB conversion in the pixel
-/// shader instead of expanding every 4K frame to a CPU-owned BGRA buffer.
-#[derive(Debug)]
-pub struct DecodedFrame {
-    pub nv12: Vec<u8>,
-    pub stride: usize,
+pub enum DecodedFrame {
+    CpuNv12 {
+        pixels: Vec<u8>,
+        stride: usize,
+    },
+    /// A pooled, owned GPU copy. MF samples remain on their MTA thread; no
+    /// apartment-bound interface or decoder-owned array crosses into the UI.
+    Nv12 {
+        texture: Arc<ID3D11Texture2D>,
+        subresource: u32,
+    },
 }
 
 #[derive(Default)]
@@ -38,10 +43,9 @@ struct EncodedFrame {
     keyframe: bool,
     pts_micros: u64,
     reset: bool,
+    queued: Instant,
 }
 impl PendingInput {
-    /// Queue one compressed access unit. Returns true when the dependency chain
-    /// was discarded and the caller should request a new keyframe.
     fn push(&mut self, mut frame: EncodedFrame) -> bool {
         if self.stopped {
             return false;
@@ -57,7 +61,7 @@ impl PendingInput {
         }
         if frame.data.len() > MAX_PENDING_BYTES {
             self.awaiting_keyframe = true;
-            return request_keyframe;
+            return true;
         }
         if self.awaiting_keyframe {
             if !frame.keyframe {
@@ -87,7 +91,12 @@ pub struct DecoderWorker {
     thread: Option<JoinHandle<()>>,
 }
 impl DecoderWorker {
-    pub fn start(hvcc: Vec<u8>, width: u32, height: u32) -> std::io::Result<Self> {
+    pub fn start(
+        hvcc: Vec<u8>,
+        width: u32,
+        height: u32,
+        device: Option<ID3D11Device>,
+    ) -> std::io::Result<Self> {
         let input = Arc::new((
             Mutex::new(PendingInput {
                 awaiting_keyframe: true,
@@ -107,9 +116,20 @@ impl DecoderWorker {
             .spawn(move || {
                 let result = (|| -> Result<(), String> {
                     let _com = ComApartment::new()?;
-                    let mut decoder = Decoder::new(&hvcc, width, height)?;
+                    let mut decoder = match Decoder::new(&hvcc, width, height, device.as_ref()) {
+                        Ok(decoder) => decoder,
+                        Err(error) if device.is_some() => {
+                            eprintln!(
+                                "video: GPU decoder unavailable ({error}); using CPU fallback"
+                            );
+                            Decoder::new(&hvcc, width, height, None)?
+                        }
+                        Err(error) => return Err(error),
+                    };
                     let mut recover = false;
                     let mut decoded = 0;
+                    let mut report = Instant::now();
+                    let mut timings = Vec::new();
                     loop {
                         let encoded = {
                             let (lock, ready) = &*worker_input;
@@ -135,13 +155,27 @@ impl DecoderWorker {
                                 .map_err(|e| format!("HEVC decoder flush: {e}"))?;
                             recover = false;
                         }
+                        let started = Instant::now();
+                        let queue_ms = encoded.queued.elapsed().as_secs_f64() * 1000.0;
                         match decoder.decode(&encoded.data, encoded.keyframe, encoded.pts_micros) {
                             Ok(Some(frame)) => {
+                                timings.push((started.elapsed().as_secs_f64() * 1000.0, queue_ms));
+                                if report.elapsed().as_secs() >= 5 {
+                                    let count = timings.len() as f64;
+                                    let decode_ms = timings.iter().map(|t| t.0).sum::<f64>() / count;
+                                    let queue_max = timings.iter().map(|t| t.1).fold(0.0, f64::max);
+                                    eprintln!("video performance: {:.1} decoded fps, mean decode {:.2} ms, max input queue {:.2} ms", count / report.elapsed().as_secs_f64(), decode_ms, queue_max);
+                                    report = Instant::now();
+                                    timings.clear();
+                                }
                                 decoded += 1;
                                 if decoded == 1 {
                                     eprintln!(
-                                        "video: first decoded NV12 frame ({} bytes)",
-                                        frame.nv12.len()
+                                        "video: first decoded frame ({})",
+                                        match &frame {
+                                            DecodedFrame::Nv12 { .. } => "D3D11 NV12 texture",
+                                            DecodedFrame::CpuNv12 { .. } => "CPU NV12 fallback",
+                                        }
                                     );
                                 }
                                 *worker_output.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -185,6 +219,7 @@ impl DecoderWorker {
                 keyframe,
                 pts_micros,
                 reset: false,
+                queued: Instant::now(),
             });
         if dropped_chain {
             self.keyframe_request.store(true, Ordering::Release);
@@ -248,6 +283,9 @@ impl Drop for MediaFoundation {
 struct Decoder {
     // Release the transform before shutting down Media Foundation.
     transform: IMFTransform,
+    _manager: Option<IMFDXGIDeviceManager>,
+    device: Option<ID3D11Device>,
+    surfaces: Vec<Arc<ID3D11Texture2D>>,
     _runtime: MediaFoundation,
     config: HevcConfig,
     width: u32,
@@ -258,12 +296,31 @@ struct Decoder {
     out_alignment: u32,
 }
 impl Decoder {
-    fn new(hvcc: &[u8], width: u32, height: u32) -> Result<Self, String> {
+    fn new(
+        hvcc: &[u8],
+        width: u32,
+        height: u32,
+        device: Option<&ID3D11Device>,
+    ) -> Result<Self, String> {
         let config = HevcConfig::parse(hvcc)?;
         if config.chroma != 1 || config.bit_depth != 8 {
             return Err(format!("Host sent HEVC chroma {} / {}-bit. Select 4:2:0 8-bit in Mac Video settings and restart sharing.", config.chroma, config.bit_depth));
         }
         let runtime = MediaFoundation::new()?;
+        let manager = if let Some(device) = device {
+            let mut token = 0;
+            let mut manager = None;
+            unsafe {
+                MFCreateDXGIDeviceManager(&mut token, &mut manager).map_err(|e| e.to_string())?;
+                let manager = manager.unwrap();
+                manager
+                    .ResetDevice(device, token)
+                    .map_err(|e| e.to_string())?;
+                Some(manager)
+            }
+        } else {
+            None
+        };
         let transforms =
             decoder_candidates().map_err(|e| format!("Find Windows HEVC decoder: {e}"))?;
         if transforms.is_empty() {
@@ -281,6 +338,15 @@ impl Decoder {
                         .map_err(|e| format!("Activate HEVC decoder: {e}"))?;
                     if let Ok(attrs) = transform.GetAttributes() {
                         let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
+                    }
+                    if let Some(manager) = &manager {
+                        let attrs = transform.GetAttributes().map_err(|e| e.to_string())?;
+                        if attrs.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) == 0 {
+                            return Err("HEVC transform is not D3D11 aware".into());
+                        }
+                        transform
+                            .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
+                            .map_err(|e| format!("Set HEVC D3D11 manager: {e}"))?;
                     }
                     if let Ok(codec) = transform.cast::<ICodecAPI>() {
                         let _ = codec.SetValue(&CODECAPI_AVLowLatencyMode, &true.into());
@@ -311,6 +377,9 @@ impl Decoder {
                 Ok(transform) => {
                     let mut decoder = Self {
                         transform,
+                        _manager: manager,
+                        device: device.cloned(),
+                        surfaces: Vec::new(),
                         _runtime: runtime,
                         config,
                         width,
@@ -406,7 +475,7 @@ impl Decoder {
             match result {
                 Ok(()) => {
                     if let Some(sample) = sample {
-                        latest = Some(self.sample_to_nv12(&sample)?);
+                        latest = Some(self.output_frame(sample)?);
                     }
                 }
                 Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(latest),
@@ -418,6 +487,73 @@ impl Decoder {
             }
         }
         Err("HEVC decoder made no progress while draining output".into())
+    }
+    unsafe fn output_frame(&mut self, sample: IMFSample) -> Result<DecodedFrame, String> {
+        if self._manager.is_some() {
+            let buffer = sample.GetBufferByIndex(0).map_err(|e| e.to_string())?;
+            let dxgi: IMFDXGIBuffer = buffer
+                .cast()
+                .map_err(|e| format!("HEVC GPU surface: {e}"))?;
+            let mut raw = std::ptr::null_mut();
+            dxgi.GetResource(&ID3D11Texture2D::IID, &mut raw)
+                .map_err(|e| e.to_string())?;
+            let texture = ID3D11Texture2D::from_raw(raw);
+            let subresource = dxgi.GetSubresourceIndex().map_err(|e| e.to_string())?;
+            let device = self.device.as_ref().unwrap();
+            let surface =
+                if let Some(surface) = self.surfaces.iter().find(|s| Arc::strong_count(s) == 1) {
+                    Arc::clone(surface)
+                } else {
+                    let mut desc = D3D11_TEXTURE2D_DESC::default();
+                    texture.GetDesc(&mut desc);
+                    if desc.Width < self.width
+                        || desc.Height < self.height
+                        || desc.Format != windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12
+                    {
+                        return Err("Invalid GPU decoder texture size/format".into());
+                    }
+                    desc.Width = self.width;
+                    desc.Height = self.height;
+                    desc.ArraySize = 1;
+                    desc.MipLevels = 1;
+                    desc.BindFlags = 0;
+                    desc.MiscFlags = 0;
+                    desc.CPUAccessFlags = 0;
+                    desc.Usage = D3D11_USAGE_DEFAULT;
+                    let mut owned = None;
+                    device
+                        .CreateTexture2D(&desc, None, Some(&mut owned))
+                        .map_err(|e| e.to_string())?;
+                    let owned = Arc::new(owned.unwrap());
+                    self.surfaces.push(Arc::clone(&owned));
+                    owned
+                };
+            let context = device.GetImmediateContext().map_err(|e| e.to_string())?;
+            let region = D3D11_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: self.width,
+                bottom: self.height,
+                back: 1,
+            };
+            context.CopySubresourceRegion(
+                &*surface,
+                0,
+                0,
+                0,
+                0,
+                &texture,
+                subresource,
+                Some(&region),
+            );
+            Ok(DecodedFrame::Nv12 {
+                texture: surface,
+                subresource: 0,
+            })
+        } else {
+            self.sample_to_nv12(&sample)
+        }
     }
     unsafe fn reset_output_type(&mut self) -> windows::core::Result<()> {
         let mut index = 0;
@@ -458,17 +594,17 @@ impl Decoder {
             two_d
                 .ContiguousCopyTo(&mut packed)
                 .map_err(|e| e.to_string())?;
-            return validate_nv12(packed, self.width, self.height, self.stride);
+            return validate_nv12(packed, self.width, self.height, self.width as usize);
         }
         let mut ptr = std::ptr::null_mut();
         let mut len = 0;
         buffer
             .Lock(&mut ptr, None, Some(&mut len))
             .map_err(|e| e.to_string())?;
-        let bytes = std::slice::from_raw_parts(ptr, len as usize).to_vec();
+        let pixels = std::slice::from_raw_parts(ptr, len as usize).to_vec();
         let unlock = buffer.Unlock();
         unlock.map_err(|e| e.to_string())?;
-        validate_nv12(bytes, self.width, self.height, self.stride)
+        validate_nv12(pixels, self.width, self.height, self.stride)
     }
 }
 impl Drop for Decoder {
@@ -530,27 +666,29 @@ fn pack_size(width: u32, height: u32) -> u64 {
 }
 
 fn validate_nv12(
-    nv12: Vec<u8>,
+    pixels: Vec<u8>,
     width: u32,
     height: u32,
     stride: usize,
 ) -> Result<DecodedFrame, String> {
     let needed = stride
         .checked_mul(height as usize)
-        .and_then(|y| y.checked_add(stride.checked_mul(height as usize / 2)?))
-        .ok_or_else(|| "Invalid NV12 output dimensions".to_string())?;
-    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 || stride < width as usize {
-        return Err("Invalid NV12 output dimensions or stride".into());
+        .and_then(|y| y.checked_add(stride.checked_mul(height as usize / 2)?));
+    if width == 0
+        || height == 0
+        || width % 2 != 0
+        || height % 2 != 0
+        || stride < width as usize
+        || needed.map(|n| pixels.len() < n).unwrap_or(true)
+    {
+        return Err("Invalid NV12 output size/stride".into());
     }
-    if nv12.len() < needed {
-        return Err("Invalid NV12 output buffer size".into());
-    }
-    Ok(DecodedFrame { nv12, stride })
+    Ok(DecodedFrame::CpuNv12 { pixels, stride })
 }
 
 /// BT.709 limited-range NV12, respecting padded rows without resizing.
 #[cfg(test)]
-fn nv12_to_bgra(nv12: &[u8], width: u32, height: u32, stride: usize) -> Option<Vec<u8>> {
+pub(super) fn nv12_to_bgra(nv12: &[u8], width: u32, height: u32, stride: usize) -> Option<Vec<u8>> {
     let w = width as usize;
     let h = height as usize;
     if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 || stride < w {
@@ -584,8 +722,118 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "Set TRANSOM_PERF_WIRE to a 3840x2160 HEVC Main wire fixture"]
+    fn benchmark_4k_decode() {
+        use crate::net::FramedReceiver;
+        use crate::wire::VideoMessage;
+        let Ok(path) = std::env::var("TRANSOM_PERF_WIRE") else {
+            eprintln!("Set TRANSOM_PERF_WIRE to run the optional 4K benchmark");
+            return;
+        };
+        let data = std::fs::read(path).unwrap();
+        let mut wire = FramedReceiver::new(&data[..]);
+        let _com = ComApartment::new().unwrap();
+        let VideoMessage::Config { hvcc } =
+            VideoMessage::decode(&wire.recv().unwrap().unwrap()).unwrap()
+        else {
+            panic!("config")
+        };
+        let gpu =
+            std::env::var_os("TRANSOM_PERF_GPU").map(|_| super::super::gpu::Gpu::new().unwrap());
+        let mut source = gpu
+            .as_ref()
+            .map(|g| super::super::gpu::SourceTexture::new(g, 3840, 2160).unwrap());
+        let mut decoder = Decoder::new(&hvcc, 3840, 2160, gpu.as_ref().map(|g| &g.device)).unwrap();
+        let mut elapsed = Vec::new();
+        let mut decoded = 0;
+        while let Some(payload) = wire.recv().unwrap() {
+            let VideoMessage::Frame {
+                data,
+                keyframe,
+                pts_micros,
+                ..
+            } = VideoMessage::decode(&payload).unwrap()
+            else {
+                panic!("frame")
+            };
+            let start = std::time::Instant::now();
+            if let Some(frame) = decoder.decode(&data, keyframe, pts_micros).unwrap() {
+                if let (Some(gpu), Some(source)) = (&gpu, &mut source) {
+                    assert!(
+                        matches!(frame, DecodedFrame::Nv12 { .. }),
+                        "hardware surface required"
+                    );
+                    source.update_frame(gpu, &frame).unwrap();
+                }
+                decoded += 1;
+            }
+            elapsed.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        elapsed.sort_by(f64::total_cmp);
+        if let (Some(gpu), Some(source)) = (&gpu, &mut source) {
+            let (pixels, _) = source.preview(gpu).unwrap();
+            assert!(pixels.chunks_exact(4).any(|p| p[0].abs_diff(p[2]) > 100));
+        }
+        let mean = elapsed.iter().sum::<f64>() / elapsed.len() as f64;
+        eprintln!("4K decode: {decoded}/{} frames, mean {mean:.2} ms, p50 {:.2} ms, p95 {:.2} ms, throughput {:.1} fps", elapsed.len(), elapsed[elapsed.len()/2], elapsed[elapsed.len()*95/100], 1000.0/mean);
+        assert!(decoded >= elapsed.len() - 2);
+    }
+
+    #[test]
+    #[ignore = "Requires D3D11 and Windows HEVC decoder on the target PC"]
+    fn gpu_decoded_colors_match_software_reference() {
+        use super::super::gpu::{Gpu, SourceTexture};
+        use crate::{net::FramedReceiver, wire::VideoMessage};
+        let _com = ComApartment::new().unwrap();
+        let gpu = Gpu::new().unwrap();
+        let data = include_bytes!("../../tests/fixtures/hevc-main.wire");
+        let mut wire = FramedReceiver::new(&data[..]);
+        let VideoMessage::Config { hvcc } =
+            VideoMessage::decode(&wire.recv().unwrap().unwrap()).unwrap()
+        else {
+            panic!("config")
+        };
+        let mut hardware = Decoder::new(&hvcc, 128, 96, Some(&gpu.device)).unwrap();
+        let mut software = Decoder::new(&hvcc, 128, 96, None).unwrap();
+        let mut source = SourceTexture::new(&gpu, 128, 96).unwrap();
+        let (mut cpu, mut graphics) = (Vec::new(), Vec::new());
+        while let Some(payload) = wire.recv().unwrap() {
+            let VideoMessage::Frame {
+                data,
+                keyframe,
+                pts_micros,
+                ..
+            } = VideoMessage::decode(&payload).unwrap()
+            else {
+                panic!("frame")
+            };
+            if let Some(frame) = hardware.decode(&data, keyframe, pts_micros).unwrap() {
+                assert!(matches!(frame, DecodedFrame::Nv12 { .. }));
+                source.update_frame(&gpu, &frame).unwrap();
+                graphics.push(source.preview(&gpu).unwrap().0);
+            }
+            if let Some(DecodedFrame::CpuNv12 { pixels, stride }) =
+                software.decode(&data, keyframe, pts_micros).unwrap()
+            {
+                cpu.push(nv12_to_bgra(&pixels, 128, 96, stride).unwrap());
+            }
+        }
+        assert!(cpu.len() >= 8 && graphics.len() >= 8);
+        for (index, (cpu, graphics)) in cpu.iter().zip(&graphics).enumerate() {
+            let max_error = cpu
+                .iter()
+                .zip(graphics)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(max_error <= 3, "frame {index} max color error {max_error}");
+        }
+        assert!(hardware.surfaces.len() <= 3, "GPU surfaces must be reused");
+    }
+
+    #[test]
     fn worker_reports_invalid_config_without_waiting_for_video_frames() {
-        let worker = DecoderWorker::start(vec![1, 2], 128, 96).unwrap();
+        let worker = DecoderWorker::start(vec![1, 2], 128, 96, None).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             if let Some(error) = worker.take_error() {
@@ -617,6 +865,7 @@ mod tests {
             keyframe,
             pts_micros: n,
             reset: false,
+            queued: Instant::now(),
         }
     }
     #[test]
@@ -653,7 +902,7 @@ mod tests {
         else {
             panic!("config expected")
         };
-        let mut decoder = Decoder::new(&hvcc, 128, 96).unwrap();
+        let mut decoder = Decoder::new(&hvcc, 128, 96, None).unwrap();
         let mut count = 0;
         while let Some(payload) = wire.recv().unwrap() {
             let VideoMessage::Frame {
@@ -665,9 +914,11 @@ mod tests {
             else {
                 panic!("frame expected")
             };
-            if let Some(frame) = decoder.decode(&data, keyframe, pts_micros).unwrap() {
-                assert!(frame.nv12.len() >= 128 * 96 * 3 / 2);
-                let bgra = nv12_to_bgra(&frame.nv12, 128, 96, frame.stride).unwrap();
+            if let Some(DecodedFrame::CpuNv12 { pixels, stride }) =
+                decoder.decode(&data, keyframe, pts_micros).unwrap()
+            {
+                let bgra = nv12_to_bgra(&pixels, 128, 96, stride).unwrap();
+                assert_eq!(bgra.len(), 128 * 96 * 4);
                 assert!(
                     bgra.chunks_exact(4).any(|p| p[0].abs_diff(p[2]) > 100),
                     "test colors must survive decode"

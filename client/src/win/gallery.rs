@@ -21,23 +21,24 @@ impl Card {
             size: Size { w: 0, h: 0 },
         }
     }
-    #[cfg(test)]
-    pub fn update_preview(&mut self, pixels: &[u8], display: Size) {
-        self.update_preview_sized(pixels, display, 480, 270);
+    pub fn update_preview_atlas(&mut self, pixels: &[u8], display: Size, native_display: Size) {
+        self.fill_preview(pixels, display, native_display, 480, 270);
     }
-    /// Build a small selector thumbnail directly from decoded NV12. This keeps
-    /// the expensive full-frame YUV→BGRA conversion off the video path; only the
-    /// few pixels needed by visible cards are converted, at the gallery rate.
-    pub fn update_preview_nv12(&mut self, nv12: &[u8], stride: usize, display: Size) {
-        self.update_preview_nv12_sized(nv12, stride, display, 480, 270);
-    }
-    #[cfg(test)]
-    pub fn update_preview_sized(&mut self, pixels: &[u8], display: Size, max_w: u32, max_h: u32) {
+    fn fill_preview(
+        &mut self,
+        pixels: &[u8],
+        display: Size,
+        native_display: Size,
+        max_w: u32,
+        max_h: u32,
+    ) {
         let r = self.window.source;
         if r.w == 0
             || r.h == 0
-            || r.x.saturating_add(r.w) > display.w
-            || r.y.saturating_add(r.h) > display.h
+            || display.w == 0
+            || display.h == 0
+            || r.x.saturating_add(r.w) > native_display.w
+            || r.y.saturating_add(r.h) > native_display.h
             || pixels.len() < display.w as usize * display.h as usize * 4
         {
             self.pixels.clear();
@@ -51,9 +52,11 @@ impl Card {
         let h = (r.h as f64 * ratio).max(1.0) as u32;
         self.pixels.resize((w * h * 4) as usize, 0);
         for y in 0..h {
-            let sy = r.y + (y as u64 * r.h as u64 / h as u64) as u32;
+            let native_y = r.y as u64 + y as u64 * r.h as u64 / h as u64;
+            let sy = (native_y * display.h as u64 / native_display.h as u64) as u32;
             for x in 0..w {
-                let sx = r.x + (x as u64 * r.w as u64 / w as u64) as u32;
+                let native_x = r.x as u64 + x as u64 * r.w as u64 / w as u64;
+                let sx = (native_x * display.w as u64 / native_display.w as u64) as u32;
                 let src = ((sy as usize * display.w as usize) + sx as usize) * 4;
                 let dst = ((y * w + x) * 4) as usize;
                 self.pixels[dst..dst + 4].copy_from_slice(&pixels[src..src + 4]);
@@ -61,60 +64,6 @@ impl Card {
         }
         self.size = Size { w, h };
     }
-    pub fn update_preview_nv12_sized(
-        &mut self,
-        nv12: &[u8],
-        stride: usize,
-        display: Size,
-        max_w: u32,
-        max_h: u32,
-    ) {
-        let r = self.window.source;
-        let needed = stride.saturating_mul(display.h as usize * 3 / 2);
-        if r.w == 0
-            || r.h == 0
-            || r.x.saturating_add(r.w) > display.w
-            || r.y.saturating_add(r.h) > display.h
-            || display.w % 2 != 0
-            || display.h % 2 != 0
-            || stride < display.w as usize
-            || nv12.len() < needed
-        {
-            self.pixels.clear();
-            self.size = Size { w: 0, h: 0 };
-            return;
-        }
-        let ratio = (max_w as f64 / r.w as f64)
-            .min(max_h as f64 / r.h as f64)
-            .min(1.0);
-        let w = (r.w as f64 * ratio).max(1.0) as u32;
-        let h = (r.h as f64 * ratio).max(1.0) as u32;
-        self.pixels.resize((w * h * 4) as usize, 0);
-        for y in 0..h {
-            let sy = r.y + (y as u64 * r.h as u64 / h as u64) as u32;
-            for x in 0..w {
-                let sx = r.x + (x as u64 * r.w as u64 / w as u64) as u32;
-                let pixel = nv12_to_bgra_pixel(nv12, stride, display.h, sx, sy);
-                let dst = ((y * w + x) * 4) as usize;
-                self.pixels[dst..dst + 4].copy_from_slice(&pixel);
-            }
-        }
-        self.size = Size { w, h };
-    }
-}
-
-fn nv12_to_bgra_pixel(nv12: &[u8], stride: usize, height: u32, x: u32, y: u32) -> [u8; 4] {
-    let y_offset = y as usize * stride + x as usize;
-    let uv_offset = stride * height as usize + (y as usize / 2) * stride + (x as usize / 2) * 2;
-    let yi = i32::from(nv12[y_offset]) - 16;
-    let u = i32::from(nv12[uv_offset]) - 128;
-    let v = i32::from(nv12[uv_offset + 1]) - 128;
-    [
-        ((298 * yi + 541 * u + 128) >> 8).clamp(0, 255) as u8,
-        ((298 * yi - 55 * u - 136 * v + 128) >> 8).clamp(0, 255) as u8,
-        ((298 * yi + 459 * v + 128) >> 8).clamp(0, 255) as u8,
-        255,
-    ]
 }
 
 pub fn accessible_title(card: &Card) -> String {
@@ -229,13 +178,14 @@ mod tests {
             },
             false,
         );
-        c.update_preview(
+        c.update_preview_atlas(
             &[1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4],
+            Size { w: 2, h: 2 },
             Size { w: 2, h: 2 },
         );
         assert_eq!(c.pixels, vec![2, 2, 2, 2, 4, 4, 4, 4]);
         c.window.source.x = u32::MAX;
-        c.update_preview(&[], Size { w: 2, h: 2 });
+        c.update_preview_atlas(&[], Size { w: 2, h: 2 }, Size { w: 2, h: 2 });
         assert!(c.pixels.is_empty());
     }
 }
