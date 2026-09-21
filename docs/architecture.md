@@ -876,8 +876,10 @@ activation request was followed immediately by a global HID event. When Xcode
 was covered by Conductor, the latter could still win desktop hit testing and
 receive Xcode's click. Keyboard events also discarded their window ID.
 
-The host now posts directly to the selected process and stamps pointer/scroll
-events with the ScreenCaptureKit window ID retained in the registry. Focus uses
+The host now posts directly to the selected process and stamps mouse events
+with the ScreenCaptureKit window ID retained in the registry. Scroll events use
+the target process and location; macOS ignores mouse-window fields on scrolls.
+Focus uses
 AXFrontmost, AXMain, AXFocused and AXRaise, but event routing no longer depends
 on those requests completing before a click. Unsharing removes the capture ID,
 and all input requires an active registry entry. This uses the public

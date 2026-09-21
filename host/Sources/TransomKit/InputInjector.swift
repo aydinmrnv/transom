@@ -207,7 +207,10 @@ public final class InputInjector: @unchecked Sendable {
         else { return }
         event.location = point
         event.flags = modifiers.flags(using: modifierMap)
-        post(event, to: id, pointer: true)
+        // CoreGraphics ignores mouse-window fields on scroll-wheel events.
+        // Process-directed delivery keeps another overlapping app out of this
+        // path; the app resolves the supplied location within its own windows.
+        post(event, to: id, pointer: false)
         traceChain(
             id: id, label: "scroll", x: x, y: y, point: point, extra: "dx=\(dx) dy=\(dy)", ts: ts)
     }

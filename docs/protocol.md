@@ -254,8 +254,10 @@ so the client is unaffected by the choice and needs no changes if it flips.
 make the selected window main/focused, and raise it. Activation is not an input
 routing guarantee: windows can overlap and macOS may defer or refuse activation.
 Every mouse, scroll, and keyboard event is delivered directly to the process
-owning `id`, using `CGEvent.postToPid`. Independent-window pointer events also
+owning `id`, using `CGEvent.postToPid`. Independent-window mouse events also
 carry the selected capture window ID in both public window-under-pointer fields.
+Scroll-wheel events use the target process and location; CoreGraphics ignores
+the mouse-specific window fields on that event type.
 Never fall back to global desktop hit testing when targeting fails. Input for a
 released or unknown window is discarded. The wire format does not change.
 
