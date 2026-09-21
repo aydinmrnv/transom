@@ -240,6 +240,10 @@ fn print_control(ev: &ModelEvent, t: u64) {
         ModelEvent::WindowTitleChanged { id, title } => {
             println!("[{t:>6}ms] ~ window {id} title \"{title}\"")
         }
+        ModelEvent::ResizeBounds { id, max_size } => println!(
+            "[{t:>6}ms] window {id} maximum {}x{}",
+            max_size.w, max_size.h
+        ),
         ModelEvent::ResizeCompleted {
             id,
             source,

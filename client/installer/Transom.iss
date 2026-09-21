@@ -3,7 +3,7 @@
 ;   ISCC.exe /DAppVersion=0.2.0 client\installer\Transom.iss
 
 #ifndef AppVersion
-  #define AppVersion "0.4.5"
+  #define AppVersion "0.4.6"
 #endif
 
 #define AppName "Transom"

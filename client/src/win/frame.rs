@@ -97,3 +97,48 @@ mod tests {
         }
     }
 }
+
+thread_local! {
+    static LIMITS: std::cell::RefCell<std::collections::HashMap<isize, Size>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+pub fn set_limit(hwnd: HWND, size: Option<Size>) {
+    LIMITS.with(|limits| {
+        let mut limits = limits.borrow_mut();
+        if let Some(size) = size.filter(|s| s.w > 0 && s.h > 0) {
+            limits.insert(hwnd.0 as isize, size);
+        } else {
+            limits.remove(&(hwnd.0 as isize));
+        }
+    });
+}
+pub fn apply_limit(hwnd: HWND, param: LPARAM) {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    let info = unsafe { &mut *(param.0 as *mut MINMAXINFO) };
+    let mut monitor = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe {
+        GetMonitorInfoW(
+            MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+            &mut monitor,
+        )
+        .as_bool()
+    } {
+        info.ptMaxPosition.x = monitor.rcWork.left - monitor.rcMonitor.left;
+        info.ptMaxPosition.y = monitor.rcWork.top - monitor.rcMonitor.top;
+        info.ptMaxSize.x = monitor.rcWork.right - monitor.rcWork.left;
+        info.ptMaxSize.y = monitor.rcWork.bottom - monitor.rcWork.top;
+    }
+    let limit = LIMITS.with(|limits| limits.borrow().get(&(hwnd.0 as isize)).copied());
+    if let Some(limit) = limit {
+        let w = (limit.w.min(i32::MAX as u32) as i32).max(info.ptMinTrackSize.x);
+        let h = (limit.h.min(i32::MAX as u32) as i32).max(info.ptMinTrackSize.y);
+        info.ptMaxTrackSize.x = info.ptMaxTrackSize.x.min(w);
+        info.ptMaxTrackSize.y = info.ptMaxTrackSize.y.min(h);
+        info.ptMaxSize.x = info.ptMaxSize.x.min(w);
+        info.ptMaxSize.y = info.ptMaxSize.y.min(h);
+    }
+}

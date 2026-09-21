@@ -79,6 +79,7 @@ public enum ControlMessage: Sendable, Equatable {
     case windowCreated(id: UInt64, rect: WireRect, title: String, kind: WindowKind)
     /// ACTUAL geometry after an AX write or an observed move (I-4), never requested.
     case windowMoved(id: UInt64, rect: WireRect)
+    case resizeBounds(id: UInt64, maxSize: WireSize)
     case resizeCompleted(id: UInt64, rect: WireRect, request: UInt64)
     case windowDestroyed(id: UInt64)
     case windowTitle(id: UInt64, title: String)
@@ -106,7 +107,7 @@ public enum ClientMessage: Sendable, Equatable {
 
 extension ControlMessage: Codable {
     private enum Key: String, CodingKey {
-        case type, id, rect, title, kind, windows, displaySize, request
+        case type, id, rect, title, kind, windows, displaySize, request, maxSize
         case protocolVersion = "protocol"
         case vdsSize, code, message
     }
@@ -128,6 +129,10 @@ extension ControlMessage: Codable {
             try c.encode("windowMoved", forKey: .type)
             try c.encode(id, forKey: .id)
             try c.encode(rect, forKey: .rect)
+        case .resizeBounds(let id, let maxSize):
+            try c.encode("resizeBounds", forKey: .type)
+            try c.encode(id, forKey: .id)
+            try c.encode(maxSize, forKey: .maxSize)
         case .resizeCompleted(let id, let rect, let request):
             try c.encode("resizeCompleted", forKey: .type)
             try c.encode(id, forKey: .id)
@@ -172,6 +177,8 @@ extension ControlMessage: Codable {
             self = .windowMoved(
                 id: try c.decode(UInt64.self, forKey: .id),
                 rect: try c.decode(WireRect.self, forKey: .rect))
+        case "resizeBounds":
+            self = .resizeBounds(id: try c.decode(UInt64.self, forKey: .id), maxSize: try c.decode(WireSize.self, forKey: .maxSize))
         case "resizeCompleted":
             self = .resizeCompleted(id: try c.decode(UInt64.self, forKey: .id), rect: try c.decode(WireRect.self, forKey: .rect), request: try c.decode(UInt64.self, forKey: .request))
         case "windowDestroyed":

@@ -45,6 +45,10 @@ pub enum ModelEvent {
         source: Rect,
         size_changed: bool,
     },
+    ResizeBounds {
+        id: u64,
+        max_size: Size,
+    },
     ResizeCompleted {
         id: u64,
         source: Rect,
@@ -174,6 +178,9 @@ impl WindowModel {
                     // since we have no title/kind. The next resync will reconcile.
                     Vec::new()
                 }
+            }
+            ServerMessage::ResizeBounds { id, max_size } => {
+                vec![ModelEvent::ResizeBounds { id, max_size }]
             }
             ServerMessage::ResizeCompleted { id, rect, request } => {
                 vec![ModelEvent::ResizeCompleted {

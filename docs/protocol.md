@@ -137,6 +137,7 @@ reconnecting client gets the full resync again.
 ```
 hello          { protocol: u32, vdsSize: Size }         // first message; version + display size
 windowCreated  { id: u64, rect: Rect, title: String, kind: WindowKind }
+resizeBounds   { id: u64, maxSize: Size }              // available non-overlapping host area
 resizeCompleted{ id: u64, rect: Rect, request: u64 }    // optional final resize acknowledgement
 windowDestroyed{ id: u64 }
 windowMoved    { id: u64, rect: Rect }                  // ACTUAL geometry, see I-4
@@ -186,6 +187,11 @@ client updates video crops during a drag but does not let old live geometry
 resize its native window while waiting for the matching completion. A new drag
 invalidates the previous completion; unrelated/late tokens cannot finish it.
 For old hosts, the client falls back to latest actual geometry after 1.5 seconds.
+The host also sends `resizeBounds` after resync and when layout constraints
+change. Its conservative maximum preserves non-overlap with other shared windows.
+Windows applies it as a native maximum tracking size, so dragging stops at the
+available boundary rather than jumping back on release. Bounds do not promise
+that macOS will accept smaller dimensions; app minimums still use actual readback.
 No requested size is assumed to have succeeded. Old clients omit the token and
 receive the original v1 behavior.
 

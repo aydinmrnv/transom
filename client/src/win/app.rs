@@ -86,6 +86,7 @@ pub struct App {
     rx: Option<std::sync::mpsc::Receiver<SessionEvent>>,
     proxies: HashMap<u64, Proxy>,
     windows: HashMap<u64, Window>,
+    resize_limits: HashMap<u64, Size>,
     hwnd_to_id: HashMap<isize, u64>,
     source: Option<SourceTexture>,
     decoder: Option<VideoDecoder>,
@@ -137,6 +138,7 @@ impl App {
             rx: None,
             proxies: HashMap::new(),
             windows: HashMap::new(),
+            resize_limits: HashMap::new(),
             hwnd_to_id: HashMap::new(),
             source: None,
             decoder: None,
@@ -312,6 +314,7 @@ impl App {
             self.destroy_proxy(id);
         }
         self.windows.clear();
+        self.resize_limits.clear();
         self.refresh_gallery();
         self.pending_mouse_moves.clear();
         self.cascade = 0;
@@ -425,6 +428,13 @@ impl App {
                     w.source = source;
                 }
                 self.update_source_rect(id, source);
+            }
+            ModelEvent::ResizeBounds { id, max_size } => {
+                self.resize_limits.insert(id, max_size);
+                if let Some(proxy) = self.proxies.get(&id) {
+                    super::frame::set_limit(proxy.hwnd, Some(max_size));
+                }
+                return;
             }
             ModelEvent::ResizeCompleted {
                 id,
@@ -640,6 +650,7 @@ impl App {
             );
         }
 
+        super::frame::set_limit(hwnd, self.resize_limits.get(&id).copied());
         let mut proxy = Proxy::new(&self.gpu, hwnd, source, self.cfg.checkerboard)?;
         // The window's client rect is the fitted size, not the source size, so bring
         // the swapchain to match up front (the creation-time WM_SIZE fires before the
@@ -693,6 +704,7 @@ impl App {
     fn destroy_proxy(&mut self, id: u64) {
         self.pending_mouse_moves.remove(&id);
         if let Some(proxy) = self.proxies.remove(&id) {
+            super::frame::set_limit(proxy.hwnd, None);
             self.hwnd_to_id.remove(&(proxy.hwnd.0 as isize));
             unsafe {
                 let _ = DestroyWindow(proxy.hwnd);
@@ -1035,6 +1047,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         if msg == windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST {
             return super::frame::hit_test(hwnd, lparam);
         }
+        if msg == windows::Win32::UI::WindowsAndMessaging::WM_GETMINMAXINFO {
+            let result = DefWindowProcW(hwnd, msg, wparam, lparam);
+            super::frame::apply_limit(hwnd, lparam);
+            return result;
+        }
         // Preserve WS_THICKFRAME/SYSMENU for native drag, resize and snapping,
         // but remove the duplicate caption and border from the client viewport.
         if msg == windows::Win32::UI::WindowsAndMessaging::WM_NCCALCSIZE {
@@ -1042,8 +1059,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let params = &mut *(lparam.0
                     as *mut windows::Win32::UI::WindowsAndMessaging::NCCALCSIZE_PARAMS);
                 let r = params.rgrc[0];
-                params.rgrc[0] =
-                    super::dpi::work_area_at((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+                let work = super::dpi::work_area_at((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+                params.rgrc[0] = RECT {
+                    left: r.left.max(work.left),
+                    top: r.top.max(work.top),
+                    right: r.right.min(work.right),
+                    bottom: r.bottom.min(work.bottom),
+                };
             }
             return LRESULT(0);
         }

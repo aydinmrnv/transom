@@ -338,7 +338,7 @@ public final class HostSession: @unchecked Sendable {
         let (clientMessages, clientSink) = AsyncStream.makeStream(of: ClientMessage.self)
         self.clientSink = clientSink
 
-        let controlServer = ControlServer(vdsSize: vdsSize, registry: registry)
+        let controlServer = ControlServer(vdsSize: vdsSize, registry: registry, gutter: config.gutter)
         self.controlServer = controlServer
         // Mouse/key events must not wait behind slow AX resize writes.
         await controlServer.setOnClientMessage { message in

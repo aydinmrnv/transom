@@ -96,6 +96,10 @@ pub enum ServerMessage {
         id: u64,
         rect: Rect,
     },
+    ResizeBounds {
+        id: u64,
+        max_size: Size,
+    },
     ResizeCompleted {
         id: u64,
         rect: Rect,
@@ -244,6 +248,10 @@ impl ServerMessage {
             "windowMoved" => Ok(ServerMessage::WindowMoved {
                 id: u64_field(&v, "id")?,
                 rect: rect_field(&v, "rect")?,
+            }),
+            "resizeBounds" => Ok(ServerMessage::ResizeBounds {
+                id: u64_field(&v, "id")?,
+                max_size: size_field(&v, "maxSize")?,
             }),
             "resizeCompleted" => Ok(ServerMessage::ResizeCompleted {
                 id: u64_field(&v, "id")?,
