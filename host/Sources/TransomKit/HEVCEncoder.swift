@@ -50,6 +50,8 @@ public final class HEVCEncoder: @unchecked Sendable {
         public let pts: CMTime
         public let isKeyframe: Bool
         public let data: Data
+        // Assigned before the bounded sending queue, so gaps remain detectable.
+        public var sequence: UInt64? = nil
     }
 
     /// The chroma / bit-depth the stream is encoded at. The default is the mode
@@ -201,6 +203,7 @@ public final class HEVCEncoder: @unchecked Sendable {
     private let v410Pool: CVPixelBufferPool
     private let keyframeLock = NSLock()
     private var forceNextKeyframe = false
+    private var outputSequence: UInt64 = 0
 
     /// A newly connected decoder has no reference frames. Safe to call from
     /// the video server actor; the capture/encode queue consumes the request.
@@ -415,8 +418,12 @@ public final class HEVCEncoder: @unchecked Sendable {
         }
 
         let data = extractFrameData ? Self.copyBytes(from: sampleBuffer) : Data()
+        let sequence = keyframeLock.withLock {
+            defer { outputSequence &+= 1 }
+            return outputSequence
+        }
         onEncodedFrame?(
-            EncodedFrame(byteCount: byteCount, pts: pts, isKeyframe: isKeyframe, data: data))
+            EncodedFrame(byteCount: byteCount, pts: pts, isKeyframe: isKeyframe, data: data, sequence: sequence))
     }
 
     /// Copy the contiguous encoded bytes out of a sample buffer for the wire.

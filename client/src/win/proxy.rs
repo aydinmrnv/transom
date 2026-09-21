@@ -40,6 +40,9 @@ pub struct Proxy {
     /// True between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`.
     pub in_size_move: bool,
     pub resizing: bool,
+    pub host_resize_pending: bool,
+    pub resize_sync: crate::resize_sync::ResizeSync,
+    pub dirty: bool,
     last_live_send: Option<Instant>,
     /// M0 diagnostic: draw a 1px checkerboard instead of sampling the stream.
     pub checkerboard: bool,
@@ -62,6 +65,9 @@ impl Proxy {
             source,
             in_size_move: false,
             resizing: false,
+            host_resize_pending: false,
+            resize_sync: Default::default(),
+            dirty: true,
             last_live_send: None,
             checkerboard,
         };
@@ -95,6 +101,7 @@ impl Proxy {
             self.report_pixel_size();
             return;
         }
+        self.dirty = true;
         // The immediate context also retains the bound RTV after drawing. Drop
         // that reference before ResizeBuffers, not only our Rust COM handle.
         unsafe {
@@ -119,7 +126,7 @@ impl Proxy {
     }
 
     fn report_pixel_size(&self) {
-        if !self.checkerboard {
+        if !self.checkerboard && std::env::var_os("TRANSOM_GEOMETRY_TRACE").is_none() {
             return;
         }
         use windows::Win32::Foundation::RECT;
@@ -146,7 +153,10 @@ impl Proxy {
 
     /// Draw one frame and present. `source_tex` is the shared decoded VDS texture;
     /// `None` (or checkerboard mode) draws a diagnostic instead.
-    pub fn render(&mut self, gpu: &Gpu, source_tex: Option<&SourceTexture>) {
+    pub fn render(&mut self, gpu: &Gpu, source_tex: Option<&SourceTexture>, independent: bool) {
+        if !self.dirty {
+            return;
+        }
         if self.ensure_rtv(gpu).is_err() {
             return;
         }
@@ -156,19 +166,27 @@ impl Proxy {
 
         // While waiting for a resize acknowledgement, crop/letterbox at native
         // scale. Only an actual interactive resize may stretch the pixels.
+        let source = if independent {
+            let (w, h) = source_tex
+                .map(|t| (t.width.min(self.source.w), t.height.min(self.source.h)))
+                .unwrap_or((self.source.w, self.source.h));
+            Rect { x: 0, y: 0, w, h }
+        } else {
+            self.source
+        };
         let stretch = self.in_size_move && self.resizing;
         let draw_w = if stretch || self.checkerboard {
             self.width
         } else {
-            self.width.min(self.source.w).max(1)
+            self.width.min(source.w).max(1)
         };
         let draw_h = if stretch || self.checkerboard {
             self.height
         } else {
-            self.height.min(self.source.h).max(1)
+            self.height.min(source.h).max(1)
         };
-        let crop_w = if stretch { self.source.w } else { draw_w };
-        let crop_h = if stretch { self.source.h } else { draw_h };
+        let crop_w = if stretch { source.w } else { draw_w };
+        let crop_h = if stretch { source.h } else { draw_h };
         if draw_w != self.width || draw_h != self.height {
             unsafe {
                 gpu.context
@@ -179,26 +197,19 @@ impl Proxy {
             RenderMode::Checkerboard
         } else if let Some(tex) = source_tex {
             RenderMode::Source {
-                uv_rect: tex.uv_rect(self.source.x, self.source.y, crop_w, crop_h),
+                uv_rect: tex.uv_rect(source.x, source.y, crop_w, crop_h),
             }
         } else {
             RenderMode::Waiting
         };
 
-        gpu.draw(
-            rtv,
-            draw_w,
-            draw_h,
-            mode,
-            source_tex.map(|t| &t.srv),
-            source_tex.map(|t| [t.width, t.height]).unwrap_or([1, 1]),
-        );
+        gpu.draw(rtv, draw_w, draw_h, mode, source_tex.map(|t| &t.srv));
 
         unsafe {
             // Do not let DWM backpressure block the Win32 UI thread. If the flip
             // queue is full, keeping the already-queued newest frame is better
             // than making native window movement wait for a redundant present.
-            let _ = self.swapchain.Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+            self.dirty = self.swapchain.Present(0, DXGI_PRESENT_DO_NOT_WAIT).is_err();
         }
     }
 
@@ -207,6 +218,7 @@ impl Proxy {
     /// which the caller uses to decide whether to snap the OS window to match.
     pub fn set_source(&mut self, source: Rect) -> bool {
         let size_changed = self.source.w != source.w || self.source.h != source.h;
+        self.dirty |= self.source != source;
         self.source = source;
         size_changed
     }
@@ -224,12 +236,14 @@ impl Proxy {
     }
 
     pub fn begin_size_move(&mut self) {
+        self.resize_sync.begin();
         self.in_size_move = true;
         self.resizing = false;
         self.last_live_send = None;
     }
 
     pub fn end_size_move(&mut self) {
+        self.dirty = true;
         self.in_size_move = false;
         self.resizing = false;
         self.last_live_send = None;

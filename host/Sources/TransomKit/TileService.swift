@@ -59,8 +59,14 @@ public enum TileService {
     public static func layout(pids: [pid_t], display: DisplayInfo, gutter: Int, fit: Bool = false)
         -> Result<[TilePlacement], TilerError>
     {
+        layout(windows: pids.flatMap { AXWindow.windows(pid: $0) }, display: display, gutter: gutter, fit: fit)
+    }
+
+    public static func layout(windows: [AXWindow], display: DisplayInfo, gutter: Int, fit: Bool = true)
+        -> Result<[TilePlacement], TilerError>
+    {
         var placeable: [(win: AXWindow, sizePoints: CGSize, sizePixels: TileSize)] = []
-        for win in pids.flatMap({ AXWindow.windows(pid: $0) }) where win.role == (kAXWindowRole as String) {
+        for win in windows where win.role == (kAXWindowRole as String) {
             guard !win.isMinimized, let size = win.size() else { continue }
             let px = TileSize(
                 width: Int(

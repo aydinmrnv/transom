@@ -33,6 +33,8 @@ mod discovery;
 mod hevc;
 mod model;
 mod net;
+#[cfg(any(windows, test))]
+mod resize_sync;
 mod runner;
 mod session;
 mod vk;

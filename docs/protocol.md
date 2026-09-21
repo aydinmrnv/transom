@@ -137,6 +137,8 @@ reconnecting client gets the full resync again.
 ```
 hello          { protocol: u32, vdsSize: Size }         // first message; version + display size
 windowCreated  { id: u64, rect: Rect, title: String, kind: WindowKind }
+resizeBounds   { id: u64, maxSize: Size }              // independent window maximum (legacy atlas: free area)
+resizeCompleted{ id: u64, rect: Rect, request: u64 }    // optional final resize acknowledgement
 windowDestroyed{ id: u64 }
 windowMoved    { id: u64, rect: Rect }                  // ACTUAL geometry, see I-4
 windowTitle    { id: u64, title: String }
@@ -166,15 +168,37 @@ are the semantic message names; the wire value is the camelCase form. (The host
 is authoritative here; this line was corrected to match it — AGENTS.md.)
 
 ```
-requestResize  { id: u64, size: Size, phase: ResizePhase }
+requestResize  { id: u64, size: Size, phase: ResizePhase, request?: u64 }
 requestFocus   { id: u64 }
 requestClose   { id: u64 }
+requestKeyframe {}
 input          { id: u64, event: InputEvent, ts: u64 }
 ```
 
 `ResizePhase` is `Begin | Live | End`, mapping to `WM_ENTERSIZEMOVE` /
 `WM_SIZING` / `WM_EXITSIZEMOVE`. The host throttles `Live` to ~10Hz and treats
 `End` as the authoritative 1:1 snap (architecture.md 2.1).
+
+In 0.4.6, an `end` resize may include a nonzero `request` token, monotonically
+increasing per window for the lifetime of a connection. After applying the final
+AX write and reading back actual geometry, the host sends `resizeCompleted` with
+the same token and actual rect. Ordinary `windowMoved` updates continue. The
+client updates video crops during a drag but does not let old live geometry
+resize its native window while waiting for the matching completion. A new drag
+invalidates the previous completion; unrelated/late tokens cannot finish it.
+For old hosts, the client falls back to latest actual geometry after 1.5 seconds.
+The host also sends `resizeBounds` after resync and when layout constraints
+change. For independent window video (0.4.8), its maximum is the full sharing display, regardless of other windows. Legacy atlas sessions preserve non-overlap.
+Windows applies it as a native maximum tracking size, so dragging stops at the
+available boundary rather than jumping back on release. Bounds do not promise
+that macOS will accept smaller dimensions; app minimums still use actual readback.
+No requested size is assumed to have succeeded. Old clients omit the token and
+receive the original v1 behavior.
+
+`requestKeyframe` (0.4.5) asks the encoder for a fresh intra frame after a
+compressed queue overflow or decode error. The host refreshes even an idle
+capture so recovery does not require moving the mouse. Older v1 hosts ignore
+this optional message; recovery then waits for their periodic keyframe.
 
 ### Input events (`Input`) — issue #7
 
@@ -226,11 +250,16 @@ The host does **not** synthesize repeats. Pick one, not both — this is the one
 ⌘). This is a **host-side policy**: the wire always carries raw Windows VK codes,
 so the client is unaffected by the choice and needs no changes if it flips.
 
-**Focus/raise.** `RequestFocus` raises the target Mac window (AX raise + activate
-its app). A `mouseDown` on a window that is not frontmost also raises it first, so
-the click lands in the right place. Raising changes the Mac's one frontmost app
-and key window; a client-"focused" window may still render unfocused until the
-raise happens (accepted, see issue #7 / invariants I-4).
+**Focus/raise.** Before a click, scroll, or non-modifier key, the host reads back
+the selected app's `AXFrontmost` and `AXFocusedWindow`. If needed it activates
+the app, makes the window main and raises it, then waits briefly for readback.
+Only verified focus permits normal HID event delivery. A refused focus request
+drops the action instead of clicking an overlapping app. `CGEvent.postToPid`
+is not used: it accepted metadata but failed real Xcode clicks on the target Mac.
+Input runs on a serial worker independent of network receive; adjacent motion
+coalesces without crossing click/key/focus barriers. Inactive-window motion and
+input for released or unknown windows are discarded. Disconnect clears queued
+input before the next session. The wire format does not change.
 
 ### Types
 
@@ -332,9 +361,25 @@ and [sequence header format](https://learn.microsoft.com/en-us/windows/win32/med
 
 The client waits for a keyframe on connect and after a compressed-queue overrun.
 Encoded deltas retain their order in a bounded queue; replacing arbitrary
-compressed frames breaks reference dependencies. Decoded frames may be dropped
-freely. Older Mac hosts can delay the next keyframe on an idle display; update
+compressed frames breaks reference dependencies. Sequence numbers are assigned
+before the host's sending queue, so a gap causes it to suppress dependent deltas
+and request a new keyframe. The client's 8-frame/50-ms queue also requests recovery
+when it discards a dependency chain. Decoded frames may be dropped freely.
+The network reader feeds the decoder directly, independently of the Windows UI
+pump. When a fresh burst fills the queue, the reader briefly waits for the
+decoder to consume frames. This wait never holds the UI state lock. A backlog
+older than 50 ms triggers keyframe recovery instead of accumulating delay.
+Older Mac hosts can delay the next keyframe on an idle display; update
 the host to receive the connection-triggered refresh behavior.
+
+On compatible Windows GPUs, the client gives the HEVC transform the renderer's
+D3D11 device through an `IMFDXGIDeviceManager`. NV12 decode surfaces are copied
+on the GPU and converted with a native-resolution BT.709 shader. An NV12 CPU
+fallback is retained for other decoders; full-frame CPU conversion is avoided.
+The host requests 420v/BT.709 directly from ScreenCaptureKit in this mode.
+Its RGB capture color space is sRGB to match the Windows presentation surface.
+The Mac video listener uses standard kernel TCP; control/discovery retain
+Network.framework. This changes no port, framing or video message fields.
 
 Rect metadata lives on the **control** channel, not in the frame header; the
 client correlates by timestamp.
@@ -370,12 +415,11 @@ best-effort may be fine and timestamp correlation can be dropped.
 
 ## 8. Cursor (resolved) and what is still deferred
 
-**Cursor: captured, not synthesized.** The host sets
-`SCStreamConfiguration.showsCursor = true`, so the real Mac cursor is already in
-the captured frame, pixel-correct, for free. Input posts `CGEvent`s (Phase 5),
-the real cursor moves, SCK captures it. **The client hides its own OS cursor when
-it is over a proxy window** so there are not two cursors. Simplest correct answer
-for v1.
+**Cursor: local (0.4.6).** ScreenCaptureKit uses `showsCursor = false`.
+The client keeps its local OS pointer visible, so motion is immediate and never
+duplicated by a delayed pointer inside the video. Edge/corner cursors use native
+Windows hit testing. Text editing regions are transmitted with `cursorShape` (below); other content
+currently uses the local arrow. Input coordinates and Mac injection are unchanged.
 
 Still deferred:
 
@@ -393,7 +437,61 @@ the client drops, and a reconnecting client gets a full resync.
 
 `windowCreated` adds a shared window to the selector. The client opens a local
 view only when selected; hiding that view sends no `requestClose`. App names
-may prefix titles. Native Windows caption/frame pixels are excluded from the
+may prefix titles. The borderless Windows proxy displays the Mac chrome inside the
 streamed client area and input coordinates. A move-only gesture emits no
 `requestResize`; Begin/Live/End are reserved for size changes. Existing v1 hosts
 continue to work with the selector. Multiple shared apps require the newer host.
+
+### Client window browser and cursor hints (0.4.7)
+
+The host app uses client-side window selection. Its catalogue is separate from
+active streams; a catalogue entry has no crop and must never create a proxy.
+The CLI retains explicit app selection. Upgrade both desktop apps to use this mode.
+
+Host → client:
+- `{"type":"windowCatalog","windows":[{"id":42,"title":"Editor — Document","minimized":false}]}`: full replacement catalogue of standard/dialog AX windows from running regular apps, including minimized windows and windows on other displays. The host excludes its own panel and system overlays. IDs are stable for a live AX window. Sent on changes and reconnect.
+- `{"type":"windowPreview","id":42,"jpeg":"BASE64"}`: optional independent thumbnail; standard base64 JPEG, at most 128,000 compressed bytes and 320×200 pixels. It is only for the picker, never the interactive render path. Requests are spaced out and limited to visible cards. A missing preview is not an empty desktop crop.
+- `{"type":"windowOpened","id":42}`: follows `windowCreated` and actual geometry for an admitted window; the client may now create its proxy. Failed admission sends error code 3, preserving the existing shared set.
+- `{"type":"cursorShape","id":42,"text":true,"rect":{"x":20,"y":100,"w":800,"h":40},"ts":12345}`: AX text-field/area hint. Rect is window-local physical pixels; ts is the originating input timestamp, also retained while polling a stationary pointer. Use the native I-beam only inside this region, discard out-of-order hints, and fall back to the local arrow when a hint expires. Non-client resizing keeps the OS cursor. Video continues to exclude the cursor.
+
+Client → host:
+- `{"type":"openWindow","id":42}`: restore if minimized, place only this window on the sharing display, verify actual geometry and unambiguous AX↔SCK identity, start its independent capture, then acknowledge. Listing alone never moves windows.
+- `{"type":"releaseWindow","id":42}`: hide the local view and stop its independent stream without closing the Mac document. The host sends `windowDestroyed` for the active stream; the catalogue entry remains.
+- `{"type":"previewWindow","id":42}`: request a small independent thumbnail. Protected/unavailable images can be omitted.
+
+AX hit testing runs on a separate, coalescing queue at 25 Hz. It never delays CGEvent injection or carries pointer motion through video. The browser discovers newly running apps/windows every 1.5 seconds and reconciles active geometry every 150 ms, in addition to immediate resize readback. Each individual window remains subject to the Mac app’s minimum/maximum and the sharing display’s size. Other selected windows do not consume its resize allowance.
+
+
+### Independent window video (0.4.8)
+
+The desktop host uses one desktop-independent ScreenCaptureKit stream and HEVC
+encoder per selected window. Both apps must be updated. Legacy CLI display video
+keeps tags 0x01/0x02; the new client accepts either mode on the same video port.
+
+Every window packet is one length-prefixed video-channel message:
+
+| Offset | Field |
+|---|---|
+| 0 | 0x10 |
+| 1 | window ID, u64 big endian, nonzero |
+| 9 | encoder generation, u64 big endian, nonzero |
+| 17 | encoded width, u32 big endian, 1…8192 |
+| 21 | encoded height, u32 big endian, 1…8192 |
+| 25 | ordinary 0x01 config or 0x02 access-unit payload |
+
+Nested 0x10 envelopes are invalid. Config precedes frames for each generation.
+Generations increase across the whole host session, including close/reopen and
+resize. Sequence numbers and keyframe dependencies are per encoder. Reconnect
+resends each current config and requests independent keyframes. Receivers discard
+older generations and frames without their matching config. Retiring one window
+must not close the shared transport or reset another window’s decoder.
+
+Control geometry still carries the Mac display origin for input translation.
+An independent video texture is sampled from (0,0), using window-local physical
+pixels; its location on the Mac has no effect on the crop. NV12 dimensions round
+up to even, with at most one padding row/column; `rect.w/h` remains the actual
+window size. Capture and rendering never rescale settled pixels. During a resize
+the old surface may temporarily crop/letterbox until the new generation arrives.
+Opening or resizing a selected window never tiles or shrinks another window.
+The desktop host admits up to 16 active windows per session. Opening a further
+window returns error code 3 without changing any current stream.

@@ -8,6 +8,7 @@
 //! runs, which is how the protocol gets verified against the live Swift host
 //! without a Windows box (invariants I-7).
 
+pub mod base64;
 pub mod control;
 pub mod frame;
 pub mod input;

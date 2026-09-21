@@ -72,6 +72,23 @@ struct ServerShutdownTests {
         #expect(changes.values == [true, false])
     }
 
+    @Test("overlapping windows each receive the whole display resize allowance")
+    func independentBounds() async throws {
+        let registry = WindowRegistry()
+        registry.record(id: 1, rect: WireRect(x: 0, y: 50, w: 2600, h: 1800), title: "Editor")
+        registry.record(id: 2, rect: WireRect(x: 0, y: 50, w: 2600, h: 1800), title: "Browser")
+        let size = WireSize(w: 3840, h: 2160)
+        let server = ControlServer(vdsSize: size, registry: registry, independentWindows: true)
+        let transport = ShutdownTransport()
+        let connection = Task { await server.serveConnection(transport) }
+        try await transport.waitForReceive()
+        let messages = try await transport.messages.map { try JSONDecoder().decode(ControlMessage.self, from: $0) }
+        #expect(messages.contains(.resizeBounds(id: 1, maxSize: size)))
+        #expect(messages.contains(.resizeBounds(id: 2, maxSize: size)))
+        await server.stop()
+        await connection.value
+    }
+
     @Test("video stop closes the client and rejects queued connections")
     func videoStop() async throws {
         let server = VideoServer(hvccProvider: { nil })

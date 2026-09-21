@@ -22,6 +22,7 @@ public actor ResizeService {
     private let registry: WindowRegistry
     private let display: DisplayInfo
     private let gutter: Int
+    private let independentWindows: Bool
     private let emit: @Sendable (WindowWatcher.WindowEvent) -> Void
     private let now: @Sendable () -> Double
     private var throttle: ResizeThrottle
@@ -35,6 +36,7 @@ public actor ResizeService {
         registry: WindowRegistry,
         display: DisplayInfo,
         gutter: Int,
+        independentWindows: Bool = false,
         interval: Double = 0.1,
         now: @escaping @Sendable () -> Double = ResizeService.monotonicSeconds,
         emit: @escaping @Sendable (WindowWatcher.WindowEvent) -> Void
@@ -42,6 +44,7 @@ public actor ResizeService {
         self.registry = registry
         self.display = display
         self.gutter = gutter
+        self.independentWindows = independentWindows
         self.emit = emit
         self.now = now
         self.throttle = ResizeThrottle(interval: interval)
@@ -83,7 +86,17 @@ public actor ResizeService {
         let entries = registry.snapshot()
         let requested = TileSize(width: Int(size.w), height: Int(size.h))
         let target: TileSize
-        if let current = entries.first(where: { $0.id == id })?.rect {
+        if independentWindows {
+            target = TileSize(width: max(1, min(requested.width, display.pixelWidth)),
+                              height: max(1, min(requested.height, display.pixelHeight)))
+            let window = AXWindow(element: element, index: -1)
+            if let frame = window.frame() {
+                let origin = CGPoint(
+                    x: max(display.originPoints.x, min(frame.minX, display.originPoints.x + CGFloat(display.pixelWidth - target.width) / display.scale)),
+                    y: max(display.originPoints.y, min(frame.minY, display.originPoints.y + CGFloat(display.pixelHeight - target.height) / display.scale)))
+                if origin != frame.origin { window.setPosition(origin) }
+            }
+        } else if let current = entries.first(where: { $0.id == id })?.rect {
             let others = entries.filter { $0.id != id }.map { Self.tileRect($0.rect) }
             target = ResizeClamp.clamp(
                 current: Self.tileRect(current),

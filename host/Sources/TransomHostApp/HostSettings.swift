@@ -14,13 +14,10 @@ enum HostDefaults {
     static let videoPort = "host.videoPort"
     static let bitrateMbps = "host.bitrateMbps"
     static let fps = "host.fps"
-    static let gutter = "host.gutter"
     static let video = "host.video"
     static let chroma = "host.chroma"
     static let namesakeModifiers = "host.namesakeModifiers"
     static let logInput = "host.logInput"
-    static let previewOutlines = "host.previewOutlines"
-    static let previewLabels = "host.previewLabels"
 
     /// Valid TCP port range. Start is gated on both ports falling inside it so a
     /// value never gets silently clamped into a different endpoint at serve time.
@@ -74,8 +71,6 @@ struct HostSettingsView: View {
                 .tabItem { Label("Connection", systemImage: "network") }
             VideoSettings()
                 .tabItem { Label("Video", systemImage: "video") }
-            LayoutSettings()
-                .tabItem { Label("Layout", systemImage: "rectangle.3.group") }
             InputSettings()
                 .tabItem { Label("Input", systemImage: "keyboard") }
         }
@@ -184,34 +179,6 @@ private struct VideoSettings: View {
             .disabled(!videoEnabled)
             Section {
                 Text("Video changes apply the next time you press Start.")
-                    .font(.caption2).foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
-// MARK: - Layout
-
-private struct LayoutSettings: View {
-    @AppStorage(HostDefaults.gutter) private var gutter = Tiler.defaultGutter
-    @AppStorage(HostDefaults.previewOutlines) private var previewOutlines = true
-    @AppStorage(HostDefaults.previewLabels) private var previewLabels = true
-
-    var body: some View {
-        Form {
-            Section("Tiling") {
-                TextField("Gutter (px)", value: $gutter, format: .number.grouping(.never))
-                Text(
-                    "Space left between tiled windows when the session starts. Windows are laid out "
-                        + "once, non-overlapping (I-5). Applies at the next Start."
-                )
-                .font(.caption2).foregroundStyle(.secondary)
-            }
-            Section("Stream preview") {
-                Toggle("Outline tracked windows", isOn: $previewOutlines)
-                Toggle("Show window labels", isOn: $previewLabels)
-                Text("These apply live to the preview panel.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }

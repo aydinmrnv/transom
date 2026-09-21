@@ -13,6 +13,7 @@
 
 mod app;
 mod connect;
+mod cursor;
 mod decode;
 mod dpi;
 mod frame;
@@ -21,6 +22,7 @@ mod glass;
 mod gpu;
 mod input;
 mod proxy;
+mod video_router;
 
 use std::process::ExitCode;
 

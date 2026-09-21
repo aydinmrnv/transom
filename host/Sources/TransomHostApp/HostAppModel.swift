@@ -16,6 +16,7 @@ final class HostAppModel: ObservableObject {
     /// Live stream-preview state, refreshed on a faster timer than `status` so the
     /// picture and the window overlays feel live (window moves during a client
     /// drag come in around 10Hz). Driven by `HostSession.preview()`.
+    @Published var windowImages: [UInt64: CGImage] = [:]
     @Published var previewImage: NSImage?
     @Published var previewWindows: [PreviewWindow] = []
     @Published var displayPixelSize: CGSize = .zero
@@ -24,9 +25,9 @@ final class HostAppModel: ObservableObject {
     private var pollTimer: Timer?
     private var previewTimer: Timer?
 
-    /// How often the preview panel refreshes. ~12Hz is smooth enough for a control
-    /// panel while staying cheap (each tick resamples one downscaled frame).
-    private static let previewInterval = 1.0 / 12.0
+    /// Selector previews refresh at 4 Hz only while the host window is visible.
+    /// Remote interactive video has its own independent capture cadence.
+    private static let previewInterval = 0.25
 
     func start(config: HostConfig) {
         guard session == nil else { return }
@@ -62,6 +63,7 @@ final class HostAppModel: ObservableObject {
         status = HostStatus()
         previewImage = nil
         previewWindows = []
+        windowImages = [:]
         displayPixelSize = .zero
         if let session {
             Task { await session.stop() }
@@ -91,7 +93,11 @@ final class HostAppModel: ObservableObject {
 
     private func pollPreview() {
         guard let session else { return }
+        guard NSApp.windows.contains(where: {
+            $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible)
+        }) else { return }
         let snap = session.preview()
+        windowImages = snap.windowImages
         if let cg = snap.image {
             previewImage = NSImage(
                 cgImage: cg, size: NSSize(width: cg.width, height: cg.height))

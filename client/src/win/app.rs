@@ -35,7 +35,7 @@ use super::connect::{Action, Dashboard};
 use super::gpu::{Gpu, SourceTexture};
 use crate::connections::Connection;
 use std::sync::mpsc::{self, Receiver};
-type ConnectResult = Result<(Connection, Session, Receiver<SessionEvent>), String>;
+type ConnectResult = Result<(Connection, Session, Receiver<SessionEvent>, VideoRouter), String>;
 use super::input;
 use super::proxy::Proxy;
 use crate::model::{ModelEvent, Window};
@@ -47,7 +47,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 #[cfg(windows)]
-use super::decode::DecoderWorker;
+use super::video_router::VideoRouter;
 
 struct NativeEvent {
     hwnd: HWND,
@@ -86,9 +86,12 @@ pub struct App {
     rx: Option<std::sync::mpsc::Receiver<SessionEvent>>,
     proxies: HashMap<u64, Proxy>,
     windows: HashMap<u64, Window>,
+    catalog: Option<Vec<crate::wire::control::AvailableWindow>>,
+    resize_limits: HashMap<u64, Size>,
     hwnd_to_id: HashMap<isize, u64>,
     source: Option<SourceTexture>,
-    decoder: Option<DecoderWorker>,
+    window_sources: HashMap<u64, SourceTexture>,
+    decoder: Option<VideoRouter>,
     vds: Option<Size>,
     cascade: u32,
     /// Latest unsent hover move per proxy. High-polling-rate mice can emit far
@@ -137,8 +140,11 @@ impl App {
             rx: None,
             proxies: HashMap::new(),
             windows: HashMap::new(),
+            catalog: None,
+            resize_limits: HashMap::new(),
             hwnd_to_id: HashMap::new(),
             source: None,
+            window_sources: HashMap::new(),
             decoder: None,
             vds: None,
             cascade: 0,
@@ -170,6 +176,7 @@ impl App {
             .set_status(&format!("Connecting to {}…", connection.name), true);
         let (tx, rx) = mpsc::channel();
         self.connecting = Some(rx);
+        let device = self.gpu.device.clone();
         std::thread::spawn(move || {
             let result = (|| {
                 // Rediscover saved Bonjour identities before using an endpoint:
@@ -183,13 +190,18 @@ impl App {
                             "Mac is offline or not sharing. Open Transom Host and press Start.",
                         )?;
                 }
-                let (session, events) = Session::connect(
+                let decoder = VideoRouter::default();
+                let input = decoder.clone();
+                let (session, events) = Session::connect_with_video(
                     &connection.host,
                     connection.control_port,
                     connection.video_port,
+                    Some(Box::new(move |size, event| {
+                        input.receive(size, event, &device)
+                    })),
                 )
                 .map_err(|e| e.to_string())?;
-                Ok((connection, session, events))
+                Ok((connection, session, events, decoder))
             })();
             // If the user cancelled, dropping the failed delivery closes sockets.
             let _ = tx.send(result);
@@ -224,6 +236,9 @@ impl App {
                         );
                         let _ = SetForegroundWindow(proxy.hwnd);
                     }
+                } else if self.catalog.is_some() {
+                    self.notice = Some("Opening window…".into());
+                    self.send(&ClientMessage::OpenWindow { id });
                 } else if let Some(w) = self.windows.get(&id).cloned() {
                     if let Err(e) = self.create_proxy(id, w.source, &w.title, app_ptr) {
                         self.notice = Some(format!("Could not open window: {e}"));
@@ -233,6 +248,9 @@ impl App {
                 self.update_status();
             }
             Some(Action::HideWindow(id)) => {
+                if self.catalog.is_some() {
+                    self.send(&ClientMessage::ReleaseWindow { id });
+                }
                 if let Some(proxy) = self.proxies.get(&id) {
                     unsafe {
                         let _ = ShowWindow(proxy.hwnd, SW_HIDE);
@@ -243,15 +261,21 @@ impl App {
             }
             None => {}
         }
+        if self.catalog.is_some() {
+            if let Some(id) = self.dashboard.next_catalog_preview() {
+                self.send(&ClientMessage::PreviewWindow { id });
+            }
+        }
         let result = self.connecting.as_ref().and_then(|rx| rx.try_recv().ok());
         if let Some(result) = result {
             self.connecting = None;
             match result {
-                Ok((c, session, rx)) => {
+                Ok((c, session, rx, decoder)) => {
                     self.cfg.host = c.host.clone();
                     self.cfg.control_port = c.control_port;
                     self.cfg.video_port = c.video_port;
                     self.selected = Some(c.clone());
+                    self.decoder = Some(decoder);
                     self.session = Some(session);
                     self.rx = Some(rx);
                     self.reconnect_at = None;
@@ -294,6 +318,7 @@ impl App {
         self.rx = None;
         self.decoder = None;
         self.source = None;
+        self.window_sources.clear();
         self.vds = None;
         self.video_in = 0;
         self.video_decoded = 0;
@@ -305,6 +330,8 @@ impl App {
             self.destroy_proxy(id);
         }
         self.windows.clear();
+        self.catalog = None;
+        self.resize_limits.clear();
         self.refresh_gallery();
         self.pending_mouse_moves.clear();
         self.cascade = 0;
@@ -406,6 +433,30 @@ impl App {
 
     fn apply_model_event(&mut self, ev: ModelEvent, _app_ptr: *mut App) {
         match ev {
+            ModelEvent::WindowCatalog { windows } => {
+                self.catalog = Some(windows);
+            }
+            ModelEvent::WindowPreview { id, jpeg } => {
+                self.dashboard.catalog_preview(id, &jpeg);
+                return;
+            }
+            ModelEvent::WindowOpened { id } => {
+                self.notice = None;
+                if !self.proxies.contains_key(&id) {
+                    if let Some(w) = self.windows.get(&id).cloned() {
+                        if let Err(e) = self.create_proxy(id, w.source, &w.title, _app_ptr) {
+                            self.notice = Some(format!("Could not open window: {e}"));
+                            self.send(&ClientMessage::ReleaseWindow { id });
+                        }
+                    }
+                }
+            }
+            ModelEvent::CursorShape { id, text, rect, ts } => {
+                if let Some(proxy) = self.proxies.get(&id) {
+                    super::cursor::update(proxy.hwnd, text, rect, ts);
+                }
+                return;
+            }
             ModelEvent::Connected { vds } => {
                 self.vds = Some(vds);
                 self.ensure_source(vds);
@@ -419,6 +470,33 @@ impl App {
                 }
                 self.update_source_rect(id, source);
             }
+            ModelEvent::ResizeBounds { id, max_size } => {
+                self.resize_limits.insert(id, max_size);
+                if let Some(proxy) = self.proxies.get(&id) {
+                    super::frame::set_limit(proxy.hwnd, Some(max_size));
+                }
+                return;
+            }
+            ModelEvent::ResizeCompleted {
+                id,
+                source,
+                request,
+            } => {
+                let accepted = self
+                    .proxies
+                    .get_mut(&id)
+                    .is_some_and(|p| p.resize_sync.complete(request));
+                if accepted {
+                    eprintln!(
+                        "resize: window {id} request {request} acknowledged {}x{}",
+                        source.w, source.h
+                    );
+                    if let Some(w) = self.windows.get_mut(&id) {
+                        w.source = source;
+                    }
+                    self.update_source_rect(id, source);
+                }
+            }
             ModelEvent::WindowTitleChanged { id, title } => {
                 if let Some(w) = self.windows.get_mut(&id) {
                     w.title = title.clone();
@@ -427,11 +505,19 @@ impl App {
             }
             ModelEvent::WindowFocused { .. } => {}
             ModelEvent::WindowRemoved { id } => {
+                if let Some(decoder) = &self.decoder {
+                    decoder.remove(id);
+                }
+                self.window_sources.remove(&id);
                 self.windows.remove(&id);
                 self.destroy_proxy(id);
             }
             ModelEvent::Resynced { removed } => {
                 for id in removed {
+                    if let Some(decoder) = &self.decoder {
+                        decoder.remove(id);
+                    }
+                    self.window_sources.remove(&id);
                     self.windows.remove(&id);
                     self.destroy_proxy(id);
                 }
@@ -445,7 +531,28 @@ impl App {
     }
 
     fn refresh_gallery(&mut self) {
-        let mut windows: Vec<_> = self.windows.values().cloned().collect();
+        let mut windows: Vec<_> = if let Some(catalog) = &self.catalog {
+            catalog
+                .iter()
+                .map(|w| Window {
+                    id: w.id,
+                    title: if w.minimized {
+                        format!("{} (minimized)", w.title)
+                    } else {
+                        w.title.clone()
+                    },
+                    kind: crate::wire::WindowKind::Normal,
+                    source: self.windows.get(&w.id).map(|w| w.source).unwrap_or(Rect {
+                        x: 0,
+                        y: 0,
+                        w: 0,
+                        h: 0,
+                    }),
+                })
+                .collect()
+        } else {
+            self.windows.values().cloned().collect()
+        };
         windows.sort_by_key(|w| w.id);
         self.dashboard.set_windows(
             windows
@@ -462,90 +569,91 @@ impl App {
         );
     }
 
-    fn apply_video(&mut self, v: VideoEvent) {
-        match v {
-            VideoEvent::Config { hvcc } => {
-                if let Some(vds) = self.vds {
-                    match DecoderWorker::start(hvcc, vds.w, vds.h) {
-                        Ok(d) => self.decoder = Some(d),
-                        Err(e) => {
-                            self.video_notice = Some(format!("Cannot start video decoder: {e}"));
+    fn apply_video(&mut self, event: VideoEvent) {
+        if let (Some(size), Some(decoder)) = (self.vds, self.decoder.as_ref()) {
+            decoder.receive(size, event, &self.gpu.device);
+        }
+    }
+
+    /// Take the latest decoded surface. Its copy and color conversion stay on
+    /// the GPU; only small gallery previews are read back when visible.
+    fn poll_decoder(&mut self) {
+        let Some(updates) = self.decoder.as_ref().map(VideoRouter::poll) else {
+            return;
+        };
+        self.video_in = updates.iter().map(|(_, _, update)| update.received).sum();
+        let mut request_keyframe = false;
+        for (id, size, update) in updates {
+            request_keyframe |= update.request_keyframe;
+            if let Some(error) = update.error {
+                self.video_notice = Some(format!("Window {id}: {error}"));
+                self.update_status();
+            }
+            let Some(frame) = update.frame else {
+                continue;
+            };
+            if id != 0 {
+                let replace = self
+                    .window_sources
+                    .get(&id)
+                    .map_or(true, |s| s.width != size.w || s.height != size.h);
+                if replace {
+                    match SourceTexture::new(&self.gpu, size.w, size.h) {
+                        Ok(texture) => {
+                            eprintln!("window video: {id} texture {}x{}", size.w, size.h);
+                            self.window_sources.insert(id, texture);
+                        }
+                        Err(error) => {
+                            self.video_notice =
+                                Some(format!("Cannot create window video: {error}"));
                             self.update_status();
+                            continue;
                         }
                     }
                 }
             }
-            VideoEvent::Frame {
-                data,
-                keyframe,
-                pts_micros,
-                ..
-            } => {
-                self.video_in += 1;
-                if self.video_in <= 3 {
-                    eprintln!(
-                        "video: access unit {} ({} bytes, keyframe={keyframe})",
-                        self.video_in,
-                        data.len()
-                    );
-                }
-                if let Some(decoder) = self.decoder.as_ref() {
-                    decoder.submit(data, keyframe, pts_micros);
-                }
-                // A newly connected client must wait for a complete keyframe.
-                // Preserve any more specific error reported by the worker.
-                if !self.warned_no_decode
-                    && self.notice.is_none()
-                    && self.video_notice.is_none()
-                    && self.video_decoded == 0
-                    && self.video_in >= 120
+            let source = if id == 0 {
+                self.source.as_mut()
+            } else {
+                self.window_sources.get_mut(&id)
+            };
+            let Some(source) = source else {
+                continue;
+            };
+            if let Err(error) = source.update_frame(&self.gpu, &frame) {
+                self.video_notice = Some(format!("Cannot render window {id}: {error}"));
+                self.update_status();
+                continue;
+            }
+            if id == 0 && self.catalog.is_none() && self.dashboard.previews_due() {
+                if let (Some(vds), Ok((pixels, preview_size))) =
+                    (self.vds, source.preview(&self.gpu))
                 {
-                    self.warned_no_decode = true;
-                    self.video_notice=Some("Video is arriving but no picture has decoded yet. Waiting for a complete keyframe…".into());
-                    self.update_status();
-                    eprintln!(
-                        "video: received {} access units; waiting for a decodable keyframe",
-                        self.video_in
-                    );
+                    self.dashboard.update_previews(&pixels, preview_size, vds);
                 }
             }
-        }
-    }
-
-    /// Upload at most the newest completed decode. The decoder keeps NV12 intact;
-    /// the D3D pixel shader performs the color conversion while each proxy window
-    /// samples its own crop.
-    fn poll_decoder(&mut self) {
-        let needs_keyframe = self
-            .decoder
-            .as_ref()
-            .map(DecoderWorker::take_keyframe_request)
-            .unwrap_or(false);
-        if needs_keyframe {
-            self.send(&ClientMessage::RequestKeyframe);
-            self.video_notice = Some("Video fell behind; recovering…".into());
-            self.update_status();
-            eprintln!("video: dropped stale frames; requested a fresh keyframe");
-        }
-        if let Some(error) = self.decoder.as_ref().and_then(DecoderWorker::take_error) {
-            self.video_notice = Some(error);
-            self.update_status();
-        }
-        let frame = self.decoder.as_ref().and_then(DecoderWorker::take_frame);
-        if let (Some(frame), Some(source)) = (frame, self.source.as_ref()) {
-            source.update_nv12(&self.gpu, &frame.nv12, frame.stride);
-            if let Some(vds) = self.vds {
-                self.dashboard
-                    .update_previews_nv12(&frame.nv12, frame.stride, vds);
+            for (&proxy_id, proxy) in &mut self.proxies {
+                if id == 0 || id == proxy_id {
+                    proxy.dirty = true;
+                }
             }
             self.video_decoded += 1;
             let recovered = self.video_notice.take().is_some();
-            if self.video_decoded == 1 {
-                eprintln!("video: first decoded frame uploaded to the display texture");
-            }
             if self.video_decoded == 1 || recovered {
                 self.update_status();
             }
+        }
+        if request_keyframe {
+            self.send(&ClientMessage::RequestKeyframe);
+        }
+        if !self.warned_no_decode
+            && self.video_notice.is_none()
+            && self.video_decoded == 0
+            && self.video_in >= 120
+        {
+            self.warned_no_decode = true;
+            self.video_notice = Some("Video is arriving but no picture has decoded yet. Waiting for a complete keyframe...".into());
+            self.update_status();
         }
     }
 
@@ -642,6 +750,7 @@ impl App {
             );
         }
 
+        super::frame::set_limit(hwnd, self.resize_limits.get(&id).copied());
         let mut proxy = Proxy::new(&self.gpu, hwnd, source, self.cfg.checkerboard)?;
         // The window's client rect is the fitted size, not the source size, so bring
         // the swapchain to match up front (the creation-time WM_SIZE fires before the
@@ -668,11 +777,7 @@ impl App {
         // blit — the product's geometry-mirroring, applied at birth instead of only
         // on a user drag.
         if clamped {
-            self.send(&ClientMessage::RequestResize {
-                id,
-                size: Size { w: win_w, h: win_h },
-                phase: ResizePhase::End,
-            });
+            self.commit_resize(id, Size { w: win_w, h: win_h });
         }
 
         // Always-visible diagnostic: the source size, the fitted window size, and
@@ -699,6 +804,8 @@ impl App {
     fn destroy_proxy(&mut self, id: u64) {
         self.pending_mouse_moves.remove(&id);
         if let Some(proxy) = self.proxies.remove(&id) {
+            super::frame::set_limit(proxy.hwnd, None);
+            super::cursor::clear(proxy.hwnd);
             self.hwnd_to_id.remove(&(proxy.hwnd.0 as isize));
             unsafe {
                 let _ = DestroyWindow(proxy.hwnd);
@@ -734,34 +841,66 @@ impl App {
         let Some(proxy) = self.proxies.get_mut(&id) else {
             return;
         };
+        super::cursor::clear(proxy.hwnd);
         proxy.set_source(source);
-        if (proxy.width != source.w || proxy.height != source.h) && !proxy.in_size_move {
+        if (proxy.width != source.w || proxy.height != source.h)
+            && !proxy.in_size_move
+            && !proxy.resize_sync.waiting()
+        {
             let hwnd = proxy.hwnd;
             let outer =
                 super::frame::outer_size(source.w, source.h, super::dpi::dpi_for_window(hwnd));
             unsafe {
-                if IsZoomed(hwnd).as_bool() {
-                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                // Windows can keep a maximized outer frame at (-13,-13).
+                // Reposition it into the work area before applying Mac readback,
+                // otherwise NCCALCSIZE clips another border on every roundtrip.
+                let (x, y, flags) = if IsZoomed(hwnd).as_bool() {
+                    let mut rect = RECT::default();
+                    let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
+                    let work = super::dpi::work_area_at(
+                        (rect.left + rect.right) / 2,
+                        (rect.top + rect.bottom) / 2,
+                    );
+                    (work.left, work.top, SWP_NOZORDER | SWP_NOACTIVATE)
+                } else {
+                    (0, 0, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
+                };
+                proxy.host_resize_pending = true;
+                if SetWindowPos(hwnd, None, x, y, outer.0, outer.1, flags).is_err() {
+                    proxy.host_resize_pending = false;
                 }
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    0,
-                    0,
-                    outer.0,
-                    outer.1,
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
             }
             // The resulting WM_SIZE resizes the swapchain to the exact rect.
         }
     }
 
+    fn commit_resize(&mut self, id: u64, size: Size) {
+        let Some(proxy) = self.proxies.get_mut(&id) else {
+            return;
+        };
+        let request = proxy.resize_sync.commit(Instant::now());
+        eprintln!(
+            "resize: window {id} request {request} {}x{}",
+            size.w, size.h
+        );
+        self.send(&ClientMessage::CommitResize { id, size, request });
+    }
+
     fn render_all(&mut self) {
-        let source = self.source.as_ref();
-        for proxy in self.proxies.values_mut() {
+        let now = Instant::now();
+        let expired: Vec<_> = self
+            .proxies
+            .iter_mut()
+            .filter_map(|(&id, p)| p.resize_sync.expired(now).then_some((id, p.source)))
+            .collect();
+        for (id, source) in expired {
+            self.update_source_rect(id, source);
+        }
+        for (&id, proxy) in &mut self.proxies {
+            let independent = self.window_sources.contains_key(&id);
+            let source = self.window_sources.get(&id).or(self.source.as_ref());
             if unsafe { IsWindowVisible(proxy.hwnd).as_bool() && !IsIconic(proxy.hwnd).as_bool() } {
-                proxy.render(&self.gpu, source);
+                proxy.render(&self.gpu, source, independent);
             }
         }
     }
@@ -780,7 +919,7 @@ impl App {
         let id = *self.hwnd_to_id.get(&(hwnd.0 as isize))?;
 
         match msg {
-            // Client pixels exclude the native caption and frame.
+            // The Mac window occupies the complete borderless client viewport.
             WM_SIZE => {
                 let mut r = RECT::default();
                 unsafe {
@@ -791,18 +930,20 @@ impl App {
                 let mut request = false;
                 if let Some(proxy) = self.proxies.get_mut(&id) {
                     proxy.resize_swapchain(&self.gpu, w, h);
-                    request = w > 0
+                    let from_host = std::mem::take(&mut proxy.host_resize_pending);
+                    request = !from_host
+                        && w > 0
                         && h > 0
                         && !proxy.in_size_move
                         && (w != proxy.source.w || h != proxy.source.h);
-                    proxy.render(&self.gpu, self.source.as_ref());
+                    proxy.render(
+                        &self.gpu,
+                        self.window_sources.get(&id).or(self.source.as_ref()),
+                        self.window_sources.contains_key(&id),
+                    );
                 }
                 if request {
-                    self.send(&ClientMessage::RequestResize {
-                        id,
-                        size: Size { w, h },
-                        phase: ResizePhase::End,
-                    });
+                    self.commit_resize(id, Size { w, h });
                 }
                 Some(LRESULT(0))
             }
@@ -810,6 +951,7 @@ impl App {
             WM_ENTERSIZEMOVE => {
                 self.pending_mouse_moves.remove(&id);
                 if let Some(proxy) = self.proxies.get_mut(&id) {
+                    proxy.host_resize_pending = false;
                     proxy.begin_size_move();
                 }
 
@@ -849,16 +991,20 @@ impl App {
                 if let Some(proxy) = self.proxies.get_mut(&id) {
                     let resized = proxy.resizing;
                     proxy.end_size_move();
-                    let size = Size {
-                        w: proxy.width,
-                        h: proxy.height,
-                    };
+                    // Read the final OS rect, not the last rendered swapchain:
+                    // WM_SIZE can still be coalesced in the native event queue.
+                    let mut r = RECT::default();
+                    unsafe {
+                        let _ = GetClientRect(hwnd, &mut r);
+                    }
                     if resized {
-                        self.send(&ClientMessage::RequestResize {
+                        self.commit_resize(
                             id,
-                            size,
-                            phase: ResizePhase::End,
-                        });
+                            Size {
+                                w: r.right.max(1) as u32,
+                                h: r.bottom.max(1) as u32,
+                            },
+                        );
                     }
                 }
                 Some(LRESULT(0))
@@ -883,9 +1029,11 @@ impl App {
             }
 
             WM_PAINT => {
-                let source = self.source.as_ref();
+                let independent = self.window_sources.contains_key(&id);
+                let source = self.window_sources.get(&id).or(self.source.as_ref());
                 if let Some(proxy) = self.proxies.get_mut(&id) {
-                    proxy.render(&self.gpu, source);
+                    proxy.dirty = true;
+                    proxy.render(&self.gpu, source, independent);
                 }
                 // Validate the whole window so we don't get flooded with WM_PAINT.
                 unsafe {
@@ -947,6 +1095,9 @@ impl App {
             }
 
             WM_CLOSE => {
+                if self.catalog.is_some() {
+                    self.send(&ClientMessage::ReleaseWindow { id });
+                }
                 // Close the local view, never the remote document. The card can
                 // reopen the same HWND without changing its position or size.
                 unsafe {
@@ -995,6 +1146,7 @@ pub fn register_class() -> windows::core::Result<()> {
     let instance = unsafe { GetModuleHandleW(None)? };
     let cursor = unsafe { LoadCursorW(None, IDC_ARROW)? };
     let class = WNDCLASSW {
+        style: windows::Win32::UI::WindowsAndMessaging::CS_DBLCLKS,
         lpfnWndProc: Some(wndproc),
         hInstance: instance.into(),
         lpszClassName: CLASS_NAME,
@@ -1010,9 +1162,36 @@ pub fn register_class() -> windows::core::Result<()> {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
+        if msg == windows::Win32::UI::WindowsAndMessaging::WM_SETCURSOR
+            && (lparam.0 as u16) as u32 == windows::Win32::UI::WindowsAndMessaging::HTCLIENT
+        {
+            super::cursor::apply(hwnd);
+            return LRESULT(1);
+        }
         if msg == windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST {
-            let hit = DefWindowProcW(hwnd, msg, wparam, lparam);
-            return LRESULT(super::frame::hit_test(hit.0 as u32) as isize);
+            return super::frame::hit_test(hwnd, lparam);
+        }
+        if msg == windows::Win32::UI::WindowsAndMessaging::WM_GETMINMAXINFO {
+            let result = DefWindowProcW(hwnd, msg, wparam, lparam);
+            super::frame::apply_limit(hwnd, lparam);
+            return result;
+        }
+        // Preserve WS_THICKFRAME/SYSMENU for native drag, resize and snapping,
+        // but remove the duplicate caption and border from the client viewport.
+        if msg == windows::Win32::UI::WindowsAndMessaging::WM_NCCALCSIZE {
+            if wparam.0 != 0 && IsZoomed(hwnd).as_bool() {
+                let params = &mut *(lparam.0
+                    as *mut windows::Win32::UI::WindowsAndMessaging::NCCALCSIZE_PARAMS);
+                let r = params.rgrc[0];
+                let work = super::dpi::work_area_at((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+                params.rgrc[0] = RECT {
+                    left: r.left.max(work.left),
+                    top: r.top.max(work.top),
+                    right: r.right.min(work.right),
+                    bottom: r.bottom.min(work.bottom),
+                };
+            }
+            return LRESULT(0);
         }
         // Stash the App pointer on NCCREATE, before any other message needs it.
         if msg == WM_NCCREATE {
@@ -1084,8 +1263,6 @@ pub fn run_pump(mut app: Box<App>) {
     // dashboard, menus, and proxy movement. Wndprocs only queue owned data.
     let timer = unsafe { SetTimer(None, 0, 16, Some(modal_tick)) };
     loop {
-        tick(app_ptr);
-
         // 2. Pump all pending Win32 messages. No Rust borrow of App is held here,
         //    so the reentrant wndproc's `*app_ptr` access is sound.
         let mut msg = MSG::default();
@@ -1119,6 +1296,7 @@ pub fn run_pump(mut app: Box<App>) {
         if quit {
             break;
         }
+        tick(app_ptr);
 
         // 4. If every window has closed and we were connected, exit; otherwise
         //    wait briefly for input or the next channel poll.
@@ -1159,10 +1337,10 @@ fn tick(app_ptr: *mut App) {
                 .unwrap_or(event.lp);
             (*app_ptr).handle_message(event.hwnd, event.msg, event.wp, lp);
         }
+        (*app_ptr).flush_mouse_moves();
         (*app_ptr).poll_dashboard();
         (*app_ptr).drain_session(app_ptr);
         (*app_ptr).poll_decoder();
-        (*app_ptr).flush_mouse_moves();
         (*app_ptr).render_all();
     }
     IN_TICK.with(|busy| busy.set(false));

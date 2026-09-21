@@ -14,8 +14,12 @@ import Foundation
 public actor ControlServer {
     private let vdsSize: WireSize
     private let registry: WindowRegistry
+    private let gutter: Int
+    private let independentWindows: Bool
+    private var sentBounds: [UInt64: WireSize] = [:]
     private var active: (id: UUID, transport: any PacketTransport)?
     private var stopped = false
+    private var catalog: [AvailableWindow]?
 
     /// Called for every decoded client→host message (e.g. `requestResize`,
     /// `input`). Phase 5 wires this to AX + `CGEventPost` via `InputInjector`.
@@ -27,9 +31,11 @@ public actor ControlServer {
     /// from the actor; the closure must be thread-safe.
     public var onConnectionChange: (@Sendable (Bool) -> Void)?
 
-    public init(vdsSize: WireSize, registry: WindowRegistry) {
+    public init(vdsSize: WireSize, registry: WindowRegistry, gutter: Int = Tiler.defaultGutter, independentWindows: Bool = false) {
         self.vdsSize = vdsSize
         self.registry = registry
+        self.gutter = gutter
+        self.independentWindows = independentWindows
     }
 
     public func setOnClientMessage(_ handler: @escaping @Sendable (ClientMessage) -> Void) {
@@ -62,9 +68,34 @@ public actor ControlServer {
     /// failure the connection is dropped; the next reconnect resyncs from the
     /// registry, so nothing is left half-described.
     public func broadcast(_ event: WindowWatcher.WindowEvent) async {
+        await send(Self.message(for: event))
+        switch event {
+        case .created, .moved, .destroyed: await sendResizeBounds()
+        default: break
+        }
+    }
+
+    private func sendResizeBounds() async {
+        let entries = registry.snapshot()
+        let display = TileSize(width: Int(vdsSize.w), height: Int(vdsSize.h))
+        func tile(_ r: WireRect) -> TileRect { TileRect(x: Int(r.x), y: Int(r.y), width: Int(r.w), height: Int(r.h)) }
+        for entry in entries {
+            let limit = ResizeClamp.clamp(current: tile(entry.rect), desired: display,
+                others: entries.filter { $0.id != entry.id }.map { tile($0.rect) }, display: display, gutter: gutter)
+            let maxSize = independentWindows ? vdsSize : WireSize(w: max(entry.rect.w, UInt32(limit.width)), h: max(entry.rect.h, UInt32(limit.height)))
+            if sentBounds[entry.id] != maxSize {
+                sentBounds[entry.id] = maxSize
+                await send(.resizeBounds(id: entry.id, maxSize: maxSize))
+            }
+        }
+        sentBounds = sentBounds.filter { id, _ in entries.contains { $0.id == id } }
+    }
+
+    public func send(_ message: ControlMessage) async {
+        if case .windowCatalog(let windows) = message { catalog = windows }
         guard let active else { return }
         do {
-            try await active.transport.send(try WireCodec.encode(Self.message(for: event)))
+            try await active.transport.send(try WireCodec.encode(message))
         } catch {
             Log.general.notice(
                 "control: send failed, dropping client: \(error.localizedDescription, privacy: .public)"
@@ -84,11 +115,13 @@ public actor ControlServer {
         }
         let connectionID = UUID()
         active = (connectionID, transport)
+        sentBounds.removeAll()
         Log.general.notice("control: client connected")
         onConnectionChange?(true)
 
         do {
             try await sendResync(to: transport)
+            await sendResizeBounds()
         } catch {
             Log.general.notice(
                 "control: resync failed: \(error.localizedDescription, privacy: .public)")
@@ -138,6 +171,7 @@ public actor ControlServer {
         let windows = entries.map { WireWindow(id: $0.id, rect: $0.rect) }
         try await transport.send(
             try WireCodec.encode(.tileLayout(windows: windows, displaySize: vdsSize)))
+        if let catalog { try await transport.send(try WireCodec.encode(.windowCatalog(windows: catalog))) }
     }
 
     private static func message(for event: WindowWatcher.WindowEvent) -> ControlMessage {

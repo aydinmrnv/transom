@@ -28,9 +28,13 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     }
 
     private let display: DisplayInfo
+    private let window: SCWindow?
+    private let width: Int
+    private let height: Int
     private let fps: Int
     private let applicationPIDs: Set<pid_t>?
     private let pixelFormat: OSType
+    private var selectedWindows: [SCWindow]?
     private let queue = DispatchQueue(label: "one.transom.host.capture")
     // Accessed only on the capture queue, including explicit refreshes.
     private var lastPixelPTS = CMTime.invalid
@@ -57,13 +61,32 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
     public init(
         display: DisplayInfo, fps: Int = 60, applicationPIDs: Set<pid_t>? = nil,
-        pixelFormat: OSType = kCVPixelFormatType_32BGRA
+        pixelFormat: OSType = kCVPixelFormatType_32BGRA, selectedWindows: [SCWindow]? = nil,
+        window: SCWindow? = nil, size: WireSize? = nil
     ) {
         self.display = display
+        self.window = window
+        self.width = size.map { Int($0.w) } ?? display.pixelWidth
+        self.height = size.map { Int($0.h) } ?? display.pixelHeight
         self.fps = fps
         self.applicationPIDs = applicationPIDs
         self.pixelFormat = pixelFormat
+        self.selectedWindows = selectedWindows
         super.init()
+    }
+
+    /// Called serially by WindowBrowser; the capture queue only reads pixels.
+    public func selectWindows(_ windows: [SCWindow]) async throws {
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+        guard let scDisplay = content.displays.first(where: { $0.displayID == display.id }),
+            let stream = lock.withLock({ stream }) else { throw CaptureError.displayNotFound(display.id) }
+        try await stream.updateContentFilter(SCContentFilter(display: scDisplay, including: windows))
+        lock.withLock { selectedWindows = windows }
+    }
+
+    public func removeWindow(_ id: CGWindowID) async throws {
+        let windows = lock.withLock { selectedWindows?.filter { $0.windowID != id } ?? [] }
+        try await selectWindows(windows)
     }
 
     /// Stats from the most recent delivered frame, if any.
@@ -82,7 +105,11 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         }
 
         let filter: SCContentFilter
-        if let applicationPIDs {
+        if let window {
+            filter = SCContentFilter(desktopIndependentWindow: window)
+        } else if let selectedWindows {
+            filter = SCContentFilter(display: scDisplay, including: selectedWindows)
+        } else if let applicationPIDs {
             // Inclusion, not exclusion: other apps, the desktop and this host's
             // own panel must never appear inside a selected window's crop.
             let applications = content.applications.filter { applicationPIDs.contains($0.processID) }
@@ -95,12 +122,21 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
         let config = SCStreamConfiguration()
         // The load-bearing lines for I-1: exact native pixels, no scaling.
-        config.width = display.pixelWidth
-        config.height = display.pixelHeight
+        config.width = width
+        config.height = height
+        if window != nil { config.ignoreShadowsSingleWindow = true }
         config.pixelFormat = pixelFormat
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        // The direct NV12 encoder and the idle-frame cache retain surfaces.
+        // Leave enough capture surfaces available while those GPU jobs finish;
+        // this is a surface pool, not an encoded-frame playback queue.
         config.queueDepth = 5
-        config.showsCursor = true
+        if pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
+            config.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
+            config.colorSpaceName = CGColorSpace.sRGB
+        }
+        // Cursor position is rendered locally by Windows, outside the video delay.
+        config.showsCursor = false
         config.scalesToFit = false
         // ScreenCaptureKit declares backgroundColor as unowned(unsafe). Keep the
         // CGColor alive through SCStream's configuration copy; releasing the
@@ -173,26 +209,28 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         Log.signposter.endInterval("capture", signpostState)
     }
 
-    /// Latest frame as a CGImage at **native pixels**, converted on demand. Nil
-    /// until the first complete frame arrives. Never resamples (I-1): callers that
-    /// only need a small preview let the display layer scale it down for drawing.
+    /// Latest frame converted on demand. The default keeps native pixels;
+    /// maxPixelWidth is only for selector thumbnails, never interactive video.
+    /// Nil until the first complete frame arrives.
     ///
     /// The IOSurface-backed buffer is grabbed under the lock and the (potentially
     /// expensive) `createCGImage` runs **outside** it — holding a strong ref keeps
     /// the buffer alive against pool recycling, exactly as the capture callback's
     /// own `onFrame` render does — so a 60fps capture callback is never blocked
     /// waiting on a preview conversion.
-    public func latestImage() -> CGImage? {
+    public func latestImage(maxPixelWidth: Int? = nil) -> CGImage? {
         let (buffer, ctx): (CVPixelBuffer?, CIContext) = lock.withLock {
             (latestPixelBuffer, ciContext)
         }
         guard let buffer else { return nil }
-        return ctx.createCGImage(
-            CIImage(cvPixelBuffer: buffer),
-            from: CGRect(
-                x: 0, y: 0,
-                width: CVPixelBufferGetWidth(buffer),
-                height: CVPixelBufferGetHeight(buffer)))
+        var image = CIImage(cvPixelBuffer: buffer)
+        // This optional reduction is exclusively for the host's selector UI.
+        // The capture→encoder path above always retains native pixels.
+        if let maxPixelWidth, maxPixelWidth > 0, image.extent.width > CGFloat(maxPixelWidth) {
+            let scale = CGFloat(maxPixelWidth) / image.extent.width
+            image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
+        return ctx.createCGImage(image, from: image.extent.integral)
     }
 
     // MARK: - SCStreamOutput
@@ -211,18 +249,25 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             status == .complete
         else { return }
 
+        // SCK can shrink a growing window into the old fixed-size surface even
+        // with scalesToFit disabled. Keep the last native frame until the new
+        // encoder generation has the settled dimensions; never forward those
+        // intermediate resampled pixels to a second client-side resize.
+        if window != nil, let scale = attachments.first?[.contentScale] as? Double,
+           abs(scale - 1) > 0.001 { return }
+
         guard let pixelBuffer = sampleBuffer.imageBuffer else { return }
 
         let dw = CVPixelBufferGetWidth(pixelBuffer)
         let dh = CVPixelBufferGetHeight(pixelBuffer)
         let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
         let stats = FrameStats(
-            configuredWidth: display.pixelWidth,
-            configuredHeight: display.pixelHeight,
+            configuredWidth: width,
+            configuredHeight: height,
             deliveredWidth: dw,
             deliveredHeight: dh,
             pixelFormat: fmt,
-            matchesNativePixels: dw == display.pixelWidth && dh == display.pixelHeight)
+            matchesNativePixels: dw == width && dh == height)
 
         let (ctx, frameHook):
             (

@@ -8,6 +8,12 @@
 /// One decoded video-channel message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VideoMessage {
+    Window {
+        id: u64,
+        generation: u64,
+        size: crate::wire::Size,
+        message: Box<VideoMessage>,
+    },
     /// `0x01` — the HEVC `hvcC` configuration record (VPS/SPS/PPS). Sent before
     /// the first frame and again after a reconnect; an `hvc1` stream carries no
     /// inline parameter sets, so the decoder needs this first.
@@ -25,6 +31,7 @@ pub enum VideoMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VideoDecodeError {
     Empty,
+    InvalidWindow,
     UnknownTag(u8),
     /// A `frame` payload was shorter than its fixed header.
     TruncatedFrame(usize),
@@ -33,6 +40,7 @@ pub enum VideoDecodeError {
 impl std::fmt::Display for VideoDecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            VideoDecodeError::InvalidWindow => write!(f, "invalid window video envelope"),
             VideoDecodeError::Empty => write!(f, "empty video payload"),
             VideoDecodeError::UnknownTag(t) => write!(f, "unknown video tag 0x{t:02x}"),
             VideoDecodeError::TruncatedFrame(n) => {
@@ -52,6 +60,32 @@ impl VideoMessage {
     pub fn decode(payload: &[u8]) -> Result<VideoMessage, VideoDecodeError> {
         let (&tag, rest) = payload.split_first().ok_or(VideoDecodeError::Empty)?;
         match tag {
+            0x10 => {
+                if payload.len() <= 25 || !matches!(payload[25], 1 | 2) {
+                    return Err(VideoDecodeError::InvalidWindow);
+                }
+                let id = be_u64(&payload[1..9]);
+                let generation = be_u64(&payload[9..17]);
+                let size = crate::wire::Size {
+                    w: u32::from_be_bytes(payload[17..21].try_into().unwrap()),
+                    h: u32::from_be_bytes(payload[21..25].try_into().unwrap()),
+                };
+                if id == 0
+                    || generation == 0
+                    || size.w == 0
+                    || size.h == 0
+                    || size.w > 8192
+                    || size.h > 8192
+                {
+                    return Err(VideoDecodeError::InvalidWindow);
+                }
+                Ok(Self::Window {
+                    id,
+                    generation,
+                    size,
+                    message: Box::new(Self::decode(&payload[25..])?),
+                })
+            }
             0x01 => Ok(VideoMessage::Config {
                 hvcc: rest.to_vec(),
             }),
@@ -156,5 +190,36 @@ mod tests {
             Err(VideoDecodeError::UnknownTag(0x09))
         );
         assert_eq!(VideoMessage::decode(&[]), Err(VideoDecodeError::Empty));
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    #[test]
+    fn window_envelope_matches_swift_and_rejects_nested_or_invalid_dimensions() {
+        let mut packet = vec![0x10];
+        packet.extend(u64::MAX.to_be_bytes());
+        packet.extend(7_u64.to_be_bytes());
+        packet.extend(2600_u32.to_be_bytes());
+        packet.extend(1800_u32.to_be_bytes());
+        packet.extend([1, 0, 255]);
+        assert_eq!(
+            VideoMessage::decode(&packet).unwrap(),
+            VideoMessage::Window {
+                id: u64::MAX,
+                generation: 7,
+                size: crate::wire::Size { w: 2600, h: 1800 },
+                message: Box::new(VideoMessage::Config { hvcc: vec![0, 255] }),
+            }
+        );
+        for n in 0..26 {
+            assert!(VideoMessage::decode(&packet[..n]).is_err());
+        }
+        packet[25] = 0x10;
+        assert!(VideoMessage::decode(&packet).is_err());
+        packet[25] = 1;
+        packet[17..21].copy_from_slice(&8193_u32.to_be_bytes());
+        assert!(VideoMessage::decode(&packet).is_err());
     }
 }

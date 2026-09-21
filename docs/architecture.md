@@ -686,6 +686,52 @@ not resample an interactive frame.
 
 ## 9. Decision log
 
+### Windows hardware decode and queue recovery (0.4.5)
+
+A 240-frame synthetic 3840×2160/60 HEVC Main stream measured 36.19 ms mean,
+39.41 ms p95 per decode/conversion on ALIENWARE_A51 with the previous CPU BGRA
+path (27.6 frames/s throughput). Giving Media Foundation the RTX 5090 D3D11
+device and retaining GPU surfaces reduced CPU submission time including native
+color conversion to 1.95 ms mean, 2.96 ms p95. This is a component benchmark,
+not a capture-to-display latency measurement or proof of Parsec parity.
+
+MF decoder samples cannot be marshalled by AgileReference on this installation
+(IMFSample returned REGDB_E_IIDNOTREG). Samples therefore stay on the MTA worker;
+a reusable pool of owned GPU textures crosses to the UI. D3D11 multithread
+protection is enabled. Native 1px luma/color readback and hardware-versus-software
+HEVC color comparisons pass on this PC. Gallery readback is limited to a small
+atlas at 4 Hz when visible; interactive rendering never uses that atlas.
+
+The host's newest-four encoded queue could previously discard a reference frame
+silently. Encoder sequence numbers now survive queue eviction, and the server
+suppresses deltas until a fresh keyframe. Client overflow/error recovery also
+requests a keyframe and an idle refresh. The Mac captures NV12/BT.709 directly
+and reduces only its selector preview before CPU readback.
+
+Live testing on the M1 Max and RTX 5090 exposed a second bottleneck. The
+Network.framework video connection degraded to 6.45 fps: all 420 received frames
+over 65 seconds were keyframes, with repeated TCP retransmissions visible in a
+header-only packet trace. A standard socket relay of the same stream sustained
+55.1 fps over 40 seconds with zero sequence gaps (20 periodic keyframes in 2,205
+frames). The video listener now uses kernel TCP with the same length-prefixed
+wire format. Dedicated read/write queues keep socket waits off capture and actor
+executors; shutdown interrupts both directions before descriptor destruction.
+Control and Bonjour continue to use Network.framework.
+
+The installed 0.4.5 pair sustained about 55 fps at 3840×2160 on a moving browser
+test scene. Five-second decode means ranged from 0.4–2.5 ms, and host sends averaged about
+0.22 ms. This is delivered/decoded frame rate, not measured input-to-photon
+latency. The optional VideoToolbox low-latency rate-control specification was
+tested and rejected: it reduced capture/encode throughput to about 34 fps on
+this Mac. Hardware encoding retains RealTime and disabled frame reordering.
+
+Video packets now reach the decoder directly from its network reader. A short
+burst waits for room in the eight-frame compressed queue, outside the UI state
+lock; a queue older than 50 ms still recovers at a keyframe. Native window
+movement, remote key input and disconnect were exercised on the installed PC
+build. These checks do not establish all-monitor 100%/150%/200% DPI behavior or
+Parsec latency parity; those remain separate measurements.
+
 | Decision | Rationale |
 |---|---|
 | Virtual display as sprite sheet, one stream | One encoder, no occlusion, popups free, no cold start (3) |
@@ -731,3 +777,135 @@ and tested the initial redesign. These are not real drag, physical-pixel or Mac
 multi-app runtime measurements. This PC was locked during the attempted visual
 check; those checks remain pending until it is unlocked. Previous 0.3.1 live
 video results do not verify the new native frame.
+
+
+### Pointer, borderless chrome and resize completion (0.4.6)
+
+The cursor is no longer part of ScreenCaptureKit video. Windows displays one
+local arrow and native resize cursors immediately; remote cursor shapes remain
+deferred. Input dispatch runs before preview GPU readback and independently of
+Mac AX resize writes. Unchanged video frames are no longer submitted repeatedly
+to the swapchain, which otherwise adds redundant work and queued presentations.
+
+Proxy windows retain WS_OVERLAPPEDWINDOW and native sizing/snap behavior while
+WM_NCCALCSIZE removes the duplicate Windows caption. The actual captured Mac
+chrome reaches the window edge. Six-DIP edges and larger corner targets resize;
+the clear strip above toolbar controls drags locally, as does Alt+drag anywhere.
+App toolbar controls remain remote input. A final resize request carries a token;
+only its matching actual-geometry acknowledgement settles the local viewport.
+Older live updates cannot pull it backwards after release. The host also sends
+conservative resize bounds so native drags stop before hitting a neighboring
+tile. Maximized windows retain their restore placement while fitting an actual
+Mac clamp; no intermediate SW_RESTORE or resize feedback loop is needed.
+
+This supersedes the 0.4.0 caption choice and captured-cursor design above.
+Verified on the M1 Max host and RTX 5090 PC at 200% Windows scaling: the installed
+0.4.6 pair showed one local cursor and no Windows caption. Dragging changed the
+local origin from (40,40) to (180,162) without changing the source or sending a
+resize. Final requests 1586x1686 and 1456x1756 both received exact actual-size
+acknowledgements. Maximizing requested 1586x2064; macOS returned 1586x1958, and
+the viewport settled to that size without the previous blank strip. Restore
+returned to the previous local position. Clicks, typing and Ctrl+W worked.
+The moving scene held approximately 55 fps with 0.3–0.5 ms decode means.
+83 Windows tests (including hardware tests) and 88 Swift tests passed.
+The optional synthetic benchmark was not rerun. Exact client/swapchain equality
+at 100%, 150% and 200%, and cross-monitor dragging, were not instrumented in this
+pass; geometry helper tests cover 96/144/192 DPI. Cursor-shape transmission and
+the fixed shared-display capacity remain limitations.
+
+
+### 0.4.8: independent selected windows
+
+The desktop path supersedes the shared atlas/non-overlap design in §2.2 and §3.
+The reported failure was structural: adding Xcode beside Conductor consumed the
+remaining display height, so the host and client both refused further growth.
+Desktop-independent ScreenCaptureKit filters now isolate each selected window,
+including when another Mac app covers it. Each has a bounded four-frame encoded
+queue, hardware HEVC encoder, and generation-tagged packets on one video socket.
+Windows routes packets into separate bounded decoder workers and GPU textures.
+The AX/control rect remains display-relative for input; video is window-local.
+Resizing restarts only the affected encoder after geometry settles. Other windows
+retain their size and reference chain. The host UI uses independent previews too.
+
+The legacy CLI capture/tiler remains available for diagnostics. Neither path
+creates a virtual display. Independent capture removes the combined area budget;
+it does not remove an individual Mac app’s minimum/maximum or display-size limit.
+On the M1 Max Mac Studio and RTX 5090 PC, Xcode and Conductor were both captured
+at 3840x1950 simultaneously, with independent content despite overlapping on the
+Mac. Maximize requested 3840x2064 and received the actual 3840x1950 allowance.
+Restore returned Conductor to 2390x1000; a corner drag requested 2126x888 and
+correctly settled to the app's minimum 2126x1000 without resizing Xcode.
+The 200% DPI trace reported equal physical client/swapchain sizes throughout.
+100%, 150%, and cross-monitor dragging were not retested in this pass.
+
+Two target-machine findings mattered:
+
+- Media Foundation returns a 2400x1008 coded surface for a 2390x1000 window.
+  Accept codec padding only when the minimum display aperture exactly matches
+  the expected native dimensions at origin zero. GPU copies and CPU NV12
+  extraction crop that padding without scaling; CPU chroma begins after the
+  coded height, not the visible height.
+- A maximized borderless HWND can have its outer origin at (-13,-13). Applying
+  Mac readback with SWP_NOMOVE repeatedly clipped another border in NCCALCSIZE,
+  causing a resize feedback loop. Place the maximized frame at the work-area
+  origin and suppress the host-originated WM_SIZE echo. Keep its restore state.
+
+ScreenCaptureKit may shrink a growing window into its old fixed output size,
+regardless of scalesToFit. Reject frames with non-unit contentScale and retain
+the last native frame until the resized generation arrives, avoiding a second
+resampling step during the transition. See Apple's
+[single-window capture explanation](https://developer.apple.com/videos/play/wwdc2022/10155/).
+
+The client-side window browser lists running apps without requiring host-side
+app selection. Electron's AXManualAccessibility opt-in exposes Conductor's text
+area; the native Windows I-beam handle was verified inside that field. Cursor
+motion remains local and the video excludes the remote pointer.
+
+On macOS 27, starting capture creates a 66x20-point AXDialog sharing badge in
+the source app. The picker excludes titlebar-height nonstandard panels so these
+controls do not appear as duplicate "Window" cards. Standard windows and normal
+dialogs remain selectable. The host no longer exposes unused tiling/preview
+settings. Installers can explicitly launch the host with `--start-sharing` to
+resume using saved settings and existing grants; ordinary launches still wait
+for Start sharing.
+
+### 0.4.10: verified focus before normal macOS input delivery
+
+Independent capture exposed an old input assumption: AXRaise plus an app
+activation request was followed immediately by a global HID event. When Xcode
+was covered by Conductor, the latter could still receive Xcode's click. The
+0.4.9 attempt to use `CGEvent.postToPid` preserved event metadata in tests but
+failed actual Xcode clicks on the target Mac. Metadata tests were not evidence
+of AppKit/Electron delivery.
+
+Use the normal HID path after reading back both AXFrontmost and AXFocusedWindow
+for the intended app/window. Only request activation, AXMain and AXRaise when
+readback differs; wait briefly for confirmation and drop the action if focus
+cannot be verified. Inactive-window motion does not hit the app covering it.
+The client protocol is unchanged. The relevant public APIs are
+[AXFrontmost](https://developer.apple.com/documentation/applicationservices/kaxfrontmostattribute),
+[AXFocusedWindow](https://developer.apple.com/documentation/applicationservices/kaxfocusedwindowattribute),
+and [CGEvent.post](https://developer.apple.com/documentation/coregraphics/cgevent/post(tap:)).
+
+AX work runs on a serial input worker instead of blocking the control server's
+receive actor. Adjacent motion for the same window coalesces, while clicks,
+keys and focus transitions remain ordered. Disconnect discards queued input
+and inserts a modifier/button reset barrier before the next session.
+
+The signed 0.4.10 host was installed on the M1 Max Mac Studio and tested with
+client 0.4.8 on the RTX 5090 PC. All 100 Swift tests pass. Live checks verified:
+
+- Xcode General/Info tab clicks, including the first click after returning from
+  Conductor while the Mac windows overlap.
+- Typing and clearing a character in Xcode's navigator filter.
+- Conductor conversation/diff tab clicks, Cmd-F via Windows Ctrl-F, typing and
+  clearing a Find query, and Escape to close Find.
+- Wheel scrolling in both apps and a Conductor scrollbar drag.
+
+No focus failures appeared in the sampled session. Five measured focus changes
+completed in 9-124 ms. Across 123 input samples in that host process, delivery
+variation above the session's minimum clock offset was median 2.0 ms, p95
+7.23 ms, max 115.24 ms (including focus changes). This is relative timing, not
+absolute network or input-to-photon latency. Steady decoder samples averaged
+0.3-0.7 ms per frame with queues generally below 0.3 ms; one startup burst
+reached 51.48 ms. Idle refresh rates are not a sustained-motion frame-rate test.

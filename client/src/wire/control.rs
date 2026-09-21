@@ -76,9 +76,32 @@ pub struct TileWindow {
     pub rect: Rect,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailableWindow {
+    pub id: u64,
+    pub title: String,
+    pub minimized: bool,
+}
+
 /// Host → client. The full set the host can push (`ControlMessage` in Swift).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerMessage {
+    WindowCatalog {
+        windows: Vec<AvailableWindow>,
+    },
+    WindowPreview {
+        id: u64,
+        jpeg: String,
+    },
+    WindowOpened {
+        id: u64,
+    },
+    CursorShape {
+        id: u64,
+        text: bool,
+        rect: Rect,
+        ts: u64,
+    },
     /// First message on a fresh connection: protocol version + the whole virtual
     /// display size, so we can sanity-check every rect we receive.
     Hello {
@@ -95,6 +118,15 @@ pub enum ServerMessage {
     WindowMoved {
         id: u64,
         rect: Rect,
+    },
+    ResizeBounds {
+        id: u64,
+        max_size: Size,
+    },
+    ResizeCompleted {
+        id: u64,
+        rect: Rect,
+        request: u64,
     },
     WindowDestroyed {
         id: u64,
@@ -120,10 +152,24 @@ pub enum ServerMessage {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientMessage {
+    OpenWindow {
+        id: u64,
+    },
+    ReleaseWindow {
+        id: u64,
+    },
+    PreviewWindow {
+        id: u64,
+    },
     RequestResize {
         id: u64,
         size: Size,
         phase: ResizePhase,
+    },
+    CommitResize {
+        id: u64,
+        size: Size,
+        request: u64,
     },
     RequestFocus {
         id: u64,
@@ -221,6 +267,38 @@ impl ServerMessage {
             .as_str()
             .ok_or_else(|| DecodeError::Shape("`type` is not a string".to_string()))?;
         match ty {
+            "windowCatalog" => {
+                let arr = field(&v, "windows")?
+                    .as_array()
+                    .ok_or_else(|| DecodeError::Shape("windows must be an array".into()))?;
+                if arr.len() > 4096 {
+                    return Err(DecodeError::Shape("too many windows".into()));
+                }
+                let windows = arr
+                    .iter()
+                    .map(|w| {
+                        Ok(AvailableWindow {
+                            id: u64_field(w, "id")?,
+                            title: str_field(w, "title")?,
+                            minimized: field(w, "minimized")?.as_bool().unwrap_or(false),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, DecodeError>>()?;
+                Ok(ServerMessage::WindowCatalog { windows })
+            }
+            "windowPreview" => Ok(ServerMessage::WindowPreview {
+                id: u64_field(&v, "id")?,
+                jpeg: str_field(&v, "jpeg")?,
+            }),
+            "windowOpened" => Ok(ServerMessage::WindowOpened {
+                id: u64_field(&v, "id")?,
+            }),
+            "cursorShape" => Ok(ServerMessage::CursorShape {
+                id: u64_field(&v, "id")?,
+                text: field(&v, "text")?.as_bool().unwrap_or(false),
+                rect: rect_field(&v, "rect")?,
+                ts: u64_field(&v, "ts")?,
+            }),
             "hello" => Ok(ServerMessage::Hello {
                 protocol: u32_field(&v, "protocol")?,
                 vds: size_field(&v, "vdsSize")?,
@@ -234,6 +312,15 @@ impl ServerMessage {
             "windowMoved" => Ok(ServerMessage::WindowMoved {
                 id: u64_field(&v, "id")?,
                 rect: rect_field(&v, "rect")?,
+            }),
+            "resizeBounds" => Ok(ServerMessage::ResizeBounds {
+                id: u64_field(&v, "id")?,
+                max_size: size_field(&v, "maxSize")?,
+            }),
+            "resizeCompleted" => Ok(ServerMessage::ResizeCompleted {
+                id: u64_field(&v, "id")?,
+                rect: rect_field(&v, "rect")?,
+                request: u64_field(&v, "request")?,
             }),
             "windowDestroyed" => Ok(ServerMessage::WindowDestroyed {
                 id: u64_field(&v, "id")?,
@@ -276,6 +363,19 @@ impl ClientMessage {
     /// Encode to a JSON `Value` matching the host's `ClientMessage` decoder.
     pub fn to_value(&self) -> Value {
         match self {
+            ClientMessage::OpenWindow { id }
+            | ClientMessage::ReleaseWindow { id }
+            | ClientMessage::PreviewWindow { id } => Value::object(vec![
+                (
+                    "type",
+                    Value::str(match self {
+                        ClientMessage::OpenWindow { .. } => "openWindow",
+                        ClientMessage::ReleaseWindow { .. } => "releaseWindow",
+                        _ => "previewWindow",
+                    }),
+                ),
+                ("id", Value::uint(*id)),
+            ]),
             ClientMessage::RequestResize { id, size, phase } => Value::object(vec![
                 ("type", Value::str("requestResize")),
                 ("id", Value::uint(*id)),
@@ -287,6 +387,19 @@ impl ClientMessage {
                     ]),
                 ),
                 ("phase", Value::str(phase.wire())),
+            ]),
+            ClientMessage::CommitResize { id, size, request } => Value::object(vec![
+                ("type", Value::str("requestResize")),
+                ("id", Value::uint(*id)),
+                (
+                    "size",
+                    Value::object(vec![
+                        ("w", Value::uint(size.w as u64)),
+                        ("h", Value::uint(size.h as u64)),
+                    ]),
+                ),
+                ("phase", Value::str("end")),
+                ("request", Value::uint(*request)),
             ]),
             ClientMessage::RequestFocus { id } => Value::object(vec![
                 ("type", Value::str("requestFocus")),
@@ -318,6 +431,23 @@ impl ClientMessage {
 mod tests {
     use super::*;
     use crate::wire::input::MouseButton;
+
+    #[test]
+    fn resize_commit_and_actual_ack_share_the_request_token() {
+        let encoded = ClientMessage::CommitResize {
+            id: 7,
+            size: Size { w: 900, h: 700 },
+            request: 19,
+        }
+        .to_value();
+        assert_eq!(
+            encoded.get("type").and_then(Value::as_str),
+            Some("requestResize")
+        );
+        assert_eq!(encoded.get("phase").and_then(Value::as_str), Some("end"));
+        assert_eq!(ServerMessage::decode(br#"{"type":"resizeCompleted","id":7,"request":19,"rect":{"x":0,"y":60,"w":898,"h":700}}"#).unwrap(),
+            ServerMessage::ResizeCompleted { id: 7, request: 19, rect: Rect { x: 0, y: 60, w: 898, h: 700 } });
+    }
 
     #[test]
     fn decodes_hello() {
@@ -467,5 +597,31 @@ mod tests {
             ClientMessage::RequestKeyframe.to_value().to_json(),
             r#"{"type":"requestKeyframe"}"#
         );
+    }
+    #[test]
+    fn browser_messages_keep_u64_identity_without_inventing_a_crop() {
+        let msg = ServerMessage::decode(br#"{"type":"windowCatalog","windows":[{"id":18446744073709551615,"title":"Editor","minimized":true}]}"#).unwrap();
+        let mut model = crate::model::WindowModel::new();
+        assert!(
+            matches!(&model.apply(msg)[0], crate::model::ModelEvent::WindowCatalog { windows } if windows[0].id == u64::MAX && windows[0].minimized)
+        );
+        assert!(model.windows().is_empty());
+        assert_eq!(
+            ClientMessage::OpenWindow { id: 42 }.to_value().to_json(),
+            r#"{"type":"openWindow","id":42}"#
+        );
+        assert_eq!(
+            ClientMessage::ReleaseWindow { id: 42 }.to_value().to_json(),
+            r#"{"type":"releaseWindow","id":42}"#
+        );
+        assert_eq!(
+            ClientMessage::PreviewWindow { id: 42 }.to_value().to_json(),
+            r#"{"type":"previewWindow","id":42}"#
+        );
+        assert_eq!(
+            ServerMessage::decode(br#"{"type":"windowOpened","id":42}"#).unwrap(),
+            ServerMessage::WindowOpened { id: 42 }
+        );
+        assert_eq!(ServerMessage::decode(br#"{"type":"cursorShape","id":42,"text":true,"rect":{"x":20,"y":100,"w":800,"h":40},"ts":12345}"#).unwrap(), ServerMessage::CursorShape { id: 42, text:true, rect:Rect { x:20,y:100,w:800,h:40 }, ts:12345 });
     }
 }

@@ -25,6 +25,8 @@ struct WireProtocolTests {
             .windowCreated(
                 id: 1, rect: WireRect(x: 0, y: 60, w: 1312, h: 844), title: "Xcode", kind: .normal),
             .windowMoved(id: 1, rect: WireRect(x: 1512, y: 60, w: 1312, h: 844)),
+            .resizeBounds(id: 1, maxSize: WireSize(w: 1800, h: 2100)),
+            .resizeCompleted(id: 1, rect: WireRect(x: 0, y: 60, w: 1312, h: 844), request: 91),
             .windowDestroyed(id: 7),
             .windowTitle(id: 1, title: "main.swift — edited"),
             .windowFocused(id: 1),
@@ -45,6 +47,7 @@ struct WireProtocolTests {
         let messages: [ClientMessage] = [
             .requestResize(id: 1, size: WireSize(w: 2560, h: 1440), phase: .live),
             .requestResize(id: 1, size: WireSize(w: 2560, h: 1440), phase: .end),
+            .commitResize(id: 1, size: WireSize(w: 2560, h: 1440), request: 91),
             .requestFocus(id: 3),
             .requestClose(id: 3),
             .requestKeyframe,

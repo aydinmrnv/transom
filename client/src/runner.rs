@@ -116,6 +116,17 @@ pub fn run(args: &[String]) -> ExitCode {
                 apply_for_display(&ev, &mut windows, &mut order, &mut vds);
                 print_control(&ev, now_ms());
             }
+            SessionEvent::Video(VideoEvent::Window {
+                id,
+                generation,
+                size,
+                ..
+            }) => {
+                println!(
+                    "window video: {id} generation {generation} {}x{}",
+                    size.w, size.h
+                );
+            }
             SessionEvent::Video(VideoEvent::Config { hvcc }) => {
                 println!(
                     "[{:>6}ms] video: hvcC config, {} bytes (decoder can now start)",
@@ -218,6 +229,11 @@ fn apply_for_display(
 
 fn print_control(ev: &ModelEvent, t: u64) {
     match ev {
+        ModelEvent::WindowCatalog { windows } => {
+            println!("[{t:>6}ms] {} available windows", windows.len())
+        }
+        ModelEvent::WindowOpened { id } => println!("[{t:>6}ms] window {id} ready"),
+        ModelEvent::WindowPreview { .. } | ModelEvent::CursorShape { .. } => {}
         ModelEvent::Connected { vds } => {
             println!("[{t:>6}ms] connected — VDS {}x{}", vds.w, vds.h)
         }
@@ -240,6 +256,18 @@ fn print_control(ev: &ModelEvent, t: u64) {
         ModelEvent::WindowTitleChanged { id, title } => {
             println!("[{t:>6}ms] ~ window {id} title \"{title}\"")
         }
+        ModelEvent::ResizeBounds { id, max_size } => println!(
+            "[{t:>6}ms] window {id} maximum {}x{}",
+            max_size.w, max_size.h
+        ),
+        ModelEvent::ResizeCompleted {
+            id,
+            source,
+            request,
+        } => println!(
+            "[{t:>6}ms] resize {request} window {id}: {}x{}",
+            source.w, source.h
+        ),
         ModelEvent::WindowFocused { id } => println!("[{t:>6}ms] * window {id} focused"),
         ModelEvent::WindowRemoved { id } => println!("[{t:>6}ms] - window {id} destroyed"),
         ModelEvent::Resynced { removed } => {
