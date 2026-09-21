@@ -66,9 +66,9 @@ public enum AppResolver {
     }
 
     /// Every regular/accessory app currently running, for pickers.
-    public static func runningApps() -> [TargetApp] {
+    public static func runningApps(includeAccessories: Bool = false) -> [TargetApp] {
         NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular }
+            .filter { $0.activationPolicy == .regular || (includeAccessories && $0.activationPolicy == .accessory) }
             .compactMap { app in
                 guard let name = app.localizedName else { return nil }
                 return TargetApp(

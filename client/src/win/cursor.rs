@@ -18,6 +18,10 @@ struct Hint {
     received: Instant,
 }
 thread_local! { static HINTS: RefCell<HashMap<isize, Hint>> = RefCell::new(HashMap::new()); }
+thread_local! {
+    static TRACE: bool = std::env::var_os("TRANSOM_CURSOR_TRACE").is_some();
+    static LAST_TRACE: RefCell<Option<(isize, bool)>> = const { RefCell::new(None) };
+}
 
 fn contains(rect: Rect, x: i32, y: i32) -> bool {
     x >= 0
@@ -74,6 +78,25 @@ pub fn apply(hwnd: HWND) {
         });
         if let Ok(cursor) = LoadCursorW(None, if text { IDC_IBEAM } else { IDC_ARROW }) {
             SetCursor(cursor);
+            if TRACE.with(|t| *t) {
+                LAST_TRACE.with(|previous| {
+                    let key = (hwnd.0 as isize, text);
+                    if *previous.borrow() != Some(key) {
+                        let mut info = CURSORINFO {
+                            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+                            ..Default::default()
+                        };
+                        let verified = GetCursorInfo(&mut info).is_ok() && info.hCursor == cursor;
+                        eprintln!(
+                            "cursor: {} at {},{}; native handle verified={verified}",
+                            if text { "ibeam" } else { "arrow" },
+                            p.x,
+                            p.y
+                        );
+                        *previous.borrow_mut() = Some(key);
+                    }
+                });
+            }
         }
     }
 }

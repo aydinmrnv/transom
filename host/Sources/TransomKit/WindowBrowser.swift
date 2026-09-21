@@ -64,7 +64,7 @@ public actor WindowBrowser {
         let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         guard !changing, !stopped else { return }
         var next: [UInt64: Candidate] = [:]
-        let apps = AppResolver.runningApps().filter { $0.pid != ProcessInfo.processInfo.processIdentifier }
+        let apps = AppResolver.runningApps(includeAccessories: true).filter { $0.pid != ProcessInfo.processInfo.processIdentifier }
         for app in apps {
             let axApp = AXWindow.application(pid: app.pid)
             AXUIElementSetMessagingTimeout(axApp, 0.08)
@@ -80,11 +80,11 @@ public actor WindowBrowser {
             for win in windows {
                 AXUIElementSetMessagingTimeout(win.element, 0.08)
                 guard win.role == kAXWindowRole as String,
-                    [kAXStandardWindowSubrole as String, kAXDialogSubrole as String].contains(win.subrole),
                     let frame = win.frame(), frame.width > 1, frame.height > 1 else { continue }
+                let match = Self.matchIndex(title: win.title, frame: frame, choices: scWindows.map { ($0.title ?? "", $0.frame) })
+                guard match != nil || [kAXStandardWindowSubrole as String, kAXDialogSubrole as String].contains(win.subrole) else { continue }
                 let id = registry.id(for: win.element).id
                 let title = win.title.isEmpty || win.title == app.name ? app.name : "\(app.name) — \(win.title)"
-                let match = Self.matchIndex(title: win.title, frame: frame, choices: scWindows.map { ($0.title ?? "", $0.frame) })
                 next[id] = Candidate(element: win.element, capture: match.map { scWindows[$0] },
                                      info: AvailableWindow(id: id, title: title, minimized: win.isMinimized))
             }

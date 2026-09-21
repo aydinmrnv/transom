@@ -598,4 +598,30 @@ mod tests {
             r#"{"type":"requestKeyframe"}"#
         );
     }
+    #[test]
+    fn browser_messages_keep_u64_identity_without_inventing_a_crop() {
+        let msg = ServerMessage::decode(br#"{"type":"windowCatalog","windows":[{"id":18446744073709551615,"title":"Editor","minimized":true}]}"#).unwrap();
+        let mut model = crate::model::WindowModel::new();
+        assert!(
+            matches!(&model.apply(msg)[0], crate::model::ModelEvent::WindowCatalog { windows } if windows[0].id == u64::MAX && windows[0].minimized)
+        );
+        assert!(model.windows().is_empty());
+        assert_eq!(
+            ClientMessage::OpenWindow { id: 42 }.to_value().to_json(),
+            r#"{"type":"openWindow","id":42}"#
+        );
+        assert_eq!(
+            ClientMessage::ReleaseWindow { id: 42 }.to_value().to_json(),
+            r#"{"type":"releaseWindow","id":42}"#
+        );
+        assert_eq!(
+            ClientMessage::PreviewWindow { id: 42 }.to_value().to_json(),
+            r#"{"type":"previewWindow","id":42}"#
+        );
+        assert_eq!(
+            ServerMessage::decode(br#"{"type":"windowOpened","id":42}"#).unwrap(),
+            ServerMessage::WindowOpened { id: 42 }
+        );
+        assert_eq!(ServerMessage::decode(br#"{"type":"cursorShape","id":42,"text":true,"rect":{"x":20,"y":100,"w":800,"h":40},"ts":12345}"#).unwrap(), ServerMessage::CursorShape { id: 42, text:true, rect:Rect { x:20,y:100,w:800,h:40 }, ts:12345 });
+    }
 }
