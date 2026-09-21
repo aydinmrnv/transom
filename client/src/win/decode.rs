@@ -665,8 +665,9 @@ mod tests {
             else {
                 panic!("frame expected")
             };
-            if let Some(bgra) = decoder.decode(&data, keyframe, pts_micros).unwrap() {
-                assert_eq!(bgra.len(), 128 * 96 * 4);
+            if let Some(frame) = decoder.decode(&data, keyframe, pts_micros).unwrap() {
+                assert!(frame.nv12.len() >= 128 * 96 * 3 / 2);
+                let bgra = nv12_to_bgra(&frame.nv12, 128, 96, frame.stride).unwrap();
                 assert!(
                     bgra.chunks_exact(4).any(|p| p[0].abs_diff(p[2]) > 100),
                     "test colors must survive decode"
