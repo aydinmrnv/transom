@@ -280,8 +280,11 @@ public final class InputInjector: @unchecked Sendable {
         var pid: pid_t = 0
         var activated = false
         if AXUIElementGetPid(element, &pid) == .success {
-            if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
-                NSRunningApplication(processIdentifier: pid)?.activate()
+            // Compare the apps, not their pids: macOS reports pid -1 for some
+            // running apps (see `LivePIDs`), which would activate on every click.
+            let app = NSRunningApplication(processIdentifier: pid)
+            if let app, NSWorkspace.shared.frontmostApplication != app {
+                app.activate()
                 activated = true
             }
         }
