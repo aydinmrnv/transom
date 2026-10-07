@@ -684,6 +684,24 @@ without refresh, a decoder's delayed final picture or keyframe recovery can stay
 stale until the next screen change. These refreshes reuse native pixels and do
 not resample an interactive frame.
 
+### `NSRunningApplication` can report pid -1 for a running app (macOS 27)
+
+On the Mac host (macOS 27.0), `NSWorkspace.runningApplications` listed Xcode,
+Device Hub and Parsec as regular, finished-launching apps with
+`processIdentifier == -1`. `ps`, AX and ScreenCaptureKit all agreed on their
+real pids. The picker and `AppResolver` passed the `-1` straight to AX, so these
+apps looked like they had no windows (`transom-host windows "Device Hub"`
+printed `pid -1 — 0 AX window(s)`), and two such apps collided on one picker id.
+
+`NSRunningApplication(processIdentifier:)` still resolves the same instance from
+the real pid, so `AppResolver` now recovers it: match the app's executable path
+against the process table, then confirm the candidate with `isEqual`. An app
+whose pid cannot be recovered is left out rather than offered with `-1`. Input
+focus compares `NSRunningApplication` objects for the same reason; comparing
+pids would re-activate such an app on every click.
+
+Why LaunchServices drops the pid for these three is not established.
+
 ## 9. Decision log
 
 | Decision | Rationale |
