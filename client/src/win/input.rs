@@ -10,6 +10,8 @@
 //!
 //! Because the process is Per-Monitor-V2 aware, the `lParam` mouse coordinates
 //! are already physical client pixels, so they *are* Client Space (I-2/I-3).
+//! `PointerGate` keeps the ones that fall outside the streamed content off the
+//! wire.
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
@@ -19,7 +21,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SYSKEYUP,
 };
 
-use crate::wire::{InputEvent, MouseButton};
+use crate::pointer::PointerGate;
+use crate::wire::{InputEvent, MouseButton, Size};
 
 pub const DISCONNECT_SHORTCUT: &str = "Ctrl + Alt + Shift + D";
 
@@ -56,35 +59,30 @@ fn hiword_signed(v: isize) -> i32 {
     ((v >> 16) & 0xFFFF) as i16 as i32
 }
 
-/// Clamp a possibly-negative client coordinate into the `u32` the wire uses,
-/// treating anything left/above the client area as the edge.
-fn clamp_cs(v: i32) -> u32 {
-    v.max(0) as u32
-}
-
 /// Translate one window message into an `InputEvent`, or `None` if it isn't an
 /// input message we forward. `hwnd` is needed only to make wheel events (which
-/// arrive in screen coordinates) client-relative.
+/// arrive in screen coordinates) client-relative. `content` is the size of the
+/// Mac window the proxy shows; `gate` drops pointer positions outside it.
 pub fn event_for_message(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
+    gate: &mut PointerGate,
+    content: Size,
 ) -> Option<InputEvent> {
+    let x = loword_signed(lparam.0);
+    let y = hiword_signed(lparam.0);
     match msg {
-        WM_MOUSEMOVE => {
-            let x = clamp_cs(loword_signed(lparam.0));
-            let y = clamp_cs(hiword_signed(lparam.0));
-            Some(InputEvent::MouseMove { x, y })
-        }
-        WM_LBUTTONDOWN => Some(mouse(lparam, MouseButton::Left, true)),
-        WM_LBUTTONUP => Some(mouse(lparam, MouseButton::Left, false)),
-        WM_RBUTTONDOWN => Some(mouse(lparam, MouseButton::Right, true)),
-        WM_RBUTTONUP => Some(mouse(lparam, MouseButton::Right, false)),
-        WM_MBUTTONDOWN => Some(mouse(lparam, MouseButton::Middle, true)),
-        WM_MBUTTONUP => Some(mouse(lparam, MouseButton::Middle, false)),
-        WM_MOUSEWHEEL => wheel(hwnd, wparam, lparam, false),
-        WM_MOUSEHWHEEL => wheel(hwnd, wparam, lparam, true),
+        WM_MOUSEMOVE => gate.motion(x, y, content),
+        WM_LBUTTONDOWN => gate.press(MouseButton::Left, x, y, content),
+        WM_LBUTTONUP => gate.release(MouseButton::Left, x, y, content),
+        WM_RBUTTONDOWN => gate.press(MouseButton::Right, x, y, content),
+        WM_RBUTTONUP => gate.release(MouseButton::Right, x, y, content),
+        WM_MBUTTONDOWN => gate.press(MouseButton::Middle, x, y, content),
+        WM_MBUTTONUP => gate.release(MouseButton::Middle, x, y, content),
+        WM_MOUSEWHEEL => wheel(hwnd, wparam, lparam, false, gate, content),
+        WM_MOUSEHWHEEL => wheel(hwnd, wparam, lparam, true, gate, content),
         WM_KEYDOWN | WM_SYSKEYDOWN => Some(InputEvent::KeyDown {
             vk: (wparam.0 & 0xFF) as u32,
         }),
@@ -95,20 +93,17 @@ pub fn event_for_message(
     }
 }
 
-fn mouse(lparam: LPARAM, button: MouseButton, down: bool) -> InputEvent {
-    let x = clamp_cs(loword_signed(lparam.0));
-    let y = clamp_cs(hiword_signed(lparam.0));
-    if down {
-        InputEvent::MouseDown { x, y, button }
-    } else {
-        InputEvent::MouseUp { x, y, button }
-    }
-}
-
 /// Wheel events carry a signed delta in `wParam`'s high word (multiples of
 /// `WHEEL_DELTA` = 120) and a **screen** position in `lParam`. Convert the
 /// position to client space and the delta to signed line steps.
-fn wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM, horizontal: bool) -> Option<InputEvent> {
+fn wheel(
+    hwnd: HWND,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    horizontal: bool,
+    gate: &PointerGate,
+    content: Size,
+) -> Option<InputEvent> {
     let delta = hiword_signed(wparam.0 as isize);
     let steps = delta / WHEEL_DELTA as i32;
     if steps == 0 {
@@ -122,22 +117,10 @@ fn wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM, horizontal: bool) -> Option
     unsafe {
         let _ = ScreenToClient(hwnd, &mut pt);
     }
-    let x = clamp_cs(pt.x);
-    let y = clamp_cs(pt.y);
     if horizontal {
-        Some(InputEvent::Scroll {
-            x,
-            y,
-            dx: steps,
-            dy: 0,
-        })
+        gate.scroll(pt.x, pt.y, steps, 0, content)
     } else {
-        Some(InputEvent::Scroll {
-            x,
-            y,
-            dx: 0,
-            dy: steps,
-        })
+        gate.scroll(pt.x, pt.y, 0, steps, content)
     }
 }
 

@@ -33,6 +33,12 @@ public final class WindowWatcher: @unchecked Sendable {
     /// Called before a newly created/restored standard window enters the stream.
     /// All watchers share one run-loop, so global admission is serialized.
     public var prepareNewWindow: (@Sendable (AXUIElement) -> Bool)?
+    /// How long a tracked window that has left the display keeps its last valid
+    /// rect before it is reported destroyed. Zero drops it at once. A session that
+    /// re-tiles (`TileService.enforceNonOverlap`) sets this so a window dragged
+    /// past the display's edge survives until it is brought back.
+    public var offDisplayGrace: TimeInterval = 0
+    private var offDisplaySince: [UInt64: TimeInterval] = [:]
     private var seeding = false
     public var onEvent: (@Sendable (WindowEvent) -> Void)?
 
@@ -143,7 +149,7 @@ public final class WindowWatcher: @unchecked Sendable {
             registerAndAnnounce(element)
         case kAXUIElementDestroyedNotification, kAXWindowMiniaturizedNotification:
             if let id = registry.remove(element: element) {
-                tracked[id] = nil
+                forget(id)
                 emit(.destroyed(id: id))
             }
         default:
@@ -177,12 +183,18 @@ public final class WindowWatcher: @unchecked Sendable {
         }
         let title = displayTitle(win.title)
         guard let r = rect(of: element) else {
-            if tracked.removeValue(forKey: id) != nil {
+            guard tracked[id] != nil else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            let since = offDisplaySince[id] ?? now
+            offDisplaySince[id] = since
+            if now - since >= offDisplayGrace {
+                forget(id)
                 _ = registry.remove(element: element)
                 emit(.destroyed(id: id))
             }
             return
         }
+        offDisplaySince[id] = nil
         let previous = registry.entry(for: id)
         tracked[id] = element
         registry.record(id: id, rect: r, title: title)
@@ -202,9 +214,14 @@ public final class WindowWatcher: @unchecked Sendable {
         }
         for (id, element) in removed {
             _ = registry.remove(element: element)
-            tracked[id] = nil
+            forget(id)
             emit(.destroyed(id: id))
         }
+    }
+
+    private func forget(_ id: UInt64) {
+        tracked[id] = nil
+        offDisplaySince[id] = nil
     }
 
     /// The window's actual AX frame converted to VDS physical pixels (I-3),

@@ -210,6 +210,28 @@ Concrete bytes on the wire (one framed control message):
   punctuation, and the numeric keypad, for the **US/ANSI** layout; the character a
   key produces depends on the Mac's active layout.
 
+**Pointer routing.** The host can only post a pointer event as a global HID
+event, so whatever window sits under the resulting point receives it. These rules
+keep an event addressed to one window from reaching another:
+
+- **Points are inside the window.** The client sends only `x < rect.w` and
+  `y < rect.h` for the window's current rect. Its proxy can be larger than that
+  rect for a moment (a clamped resize not yet snapped, a move to a monitor with
+  another DPI); the margin sends nothing. The host drops a `mouseDown`, hover or
+  `scroll` outside the rect, and reports it in the input trace.
+- **A drag is latched to the rect at the press.** From the first `mouseDown` to
+  the last `mouseUp` the host translates every event against the rect the window
+  had at that `mouseDown`, not its current one. A drag can move its own window (a
+  streamed title bar, a left or top resize edge); translating against the moving
+  origin would post the same local point further along each time and the window
+  would run away from the pointer. During a drag both sides clamp to the nearest
+  edge instead of dropping, so the release always lands.
+- **Every press is released.** The client captures the mouse while a button is
+  down, and sends `mouseUp` for each held button if capture is taken from it. The
+  host drops a `mouseUp` with no matching `mouseDown`; a `mouseDown` for another
+  window, or for a button already held, first releases what was held; a
+  disconnect releases everything.
+
 **Modifier state is tracked on the host, not sent per-event.** The client sends
 raw `keyDown`/`keyUp` for modifier keys too (e.g. `VK_CONTROL`); the host keeps a
 small modifier state machine and stamps the resulting flags onto every event it
@@ -270,6 +292,17 @@ the actual rect):
 2. **Non-overlap clamp.** Growth would collide with a neighbour on the virtual
    display, so the host stops it a gutter short (I-5; architecture.md 2.2). At one
    window this never happens.
+
+**`windowMoved` without a request.** Geometry also changes with no
+`requestResize`: the Mac app resizes itself, or a streamed drag moves or resizes
+the Mac window by its own title bar or edge. The host reports the actual rect as
+usual. If such a change settles with windows overlapping or off the display
+(I-5), a tiling host re-tiles and reports every rect that changed; meanwhile a
+window that has left the display keeps its last rect for up to 3 s rather than
+being destroyed. The client treats all of these like any other `windowMoved`. A
+proxy that was being moved when one arrived snaps to it when the move ends, and a
+move that changed the proxy's own size (another monitor's DPI, Aero Snap) ends
+with a `requestResize { phase: End }`.
 
 The host throttles `Live` to ~10Hz (a roundtrip is 30ms+, past a drag's frame
 budget); intermediate `Live` requests are coalesced, and the newest is still

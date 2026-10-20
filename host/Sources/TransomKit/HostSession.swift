@@ -293,6 +293,9 @@ public final class HostSession: @unchecked Sendable {
                 appName: target.name)
             watcher.onEvent = { event in eventSink.yield(event) }
             if config.tile {
+                // Long enough for the layout guard below to notice a window that
+                // left the display and bring it back before its proxy is closed.
+                watcher.offDisplayGrace = 3
                 let pids = targets.map(\.pid)
                 let gutter = config.gutter
                 watcher.prepareNewWindow = { [weak self] element in
@@ -343,8 +346,8 @@ public final class HostSession: @unchecked Sendable {
         await controlServer.setOnClientMessage { message in clientSink.yield(message) }
         await controlServer.setOnConnectionChange { [weak self] connected in
             self?.statsLock.withLock { self?.controlConnected = connected }
-            // A dropped client leaves no modifier held for the next one (issue #7).
-            if !connected { injector.resetModifiers() }
+            // A dropped client leaves no modifier or button held for the next one (issue #7).
+            if !connected { injector.reset() }
         }
         let controlListener = try TCPListener(
             host: config.host, port: config.controlPort, label: "control")
@@ -353,8 +356,11 @@ public final class HostSession: @unchecked Sendable {
         // Start the AX watcher on its own run-loop thread and wait until it has
         // registered + seeded the registry (same handshake the CLI used).
         let ctx = WatcherThreadBox()
+        let layoutGuard = config.tile ? LayoutGuardBox() : nil
+        let pids = targets.map(\.pid)
+        let gutter = config.gutter
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            let watcherThread = Thread {
+            let watcherThread = Thread { [weak self] in
                 ctx.runLoop = CFRunLoopGetCurrent()
                 do {
                     for watcher in watchers { try watcher.start() }
@@ -364,7 +370,34 @@ public final class HostSession: @unchecked Sendable {
                     cont.resume(throwing: error)
                     return
                 }
+                // The startup tile only holds until something on the Mac moves or
+                // resizes a window (a streamed title-bar drag, a zoom). Re-tile
+                // once such a change has settled into an overlap (I-5).
+                let layoutTimer = layoutGuard.map { layoutGuard in
+                    Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+                        let result = TileService.enforceNonOverlap(
+                            &layoutGuard.state, pids: pids, display: disp, gutter: gutter,
+                            pointerDown: injector.isPointerDown)
+                        switch result {
+                        case .success(let placements):
+                            Log.ax.notice("layout: re-tiled after a Mac-side geometry change")
+                            self?.statsLock.withLock {
+                                self?.tilePlacements = placements
+                                self?.tileError = nil
+                            }
+                        case .failure(let error):
+                            Log.ax.notice(
+                                "layout: could not restore non-overlap: \(error.description, privacy: .public)"
+                            )
+                            self?.statsLock.withLock { self?.tileError = error.description }
+                        case nil:
+                            break
+                        }
+                    }
+                }
+                if let layoutTimer { RunLoop.current.add(layoutTimer, forMode: .default) }
                 CFRunLoopRun()
+                layoutTimer?.invalidate()
                 for watcher in watchers { watcher.stop() }
             }
             watcherThread.stackSize = 1 << 20
@@ -596,4 +629,9 @@ public final class HostSession: @unchecked Sendable {
 /// that thread before the continuation resumes, so the caller reads it safely.
 private final class WatcherThreadBox: @unchecked Sendable {
     var runLoop: CFRunLoop?
+}
+
+/// The layout guard's state, touched only on the watcher run-loop thread.
+private final class LayoutGuardBox: @unchecked Sendable {
+    var state = LayoutGuard()
 }

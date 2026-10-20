@@ -113,6 +113,15 @@ public enum Tiler {
         return best.map { .success($0) } ?? natural
     }
 
+    /// True if every rect is wholly on `display` and no two share any area: the
+    /// layout I-5 requires.
+    public static func isNonOverlapping(_ rects: [TileRect], on display: TileSize) -> Bool {
+        !rects.enumerated().contains { i, r in
+            r.x < 0 || r.y < 0 || r.maxX > display.width || r.maxY > display.height
+                || rects.prefix(i).contains(where: { $0.intersects(r) })
+        }
+    }
+
     /// Default gutter in VDS pixels between tiles.
     ///
     /// A completion popup or dropdown near a window edge can overhang past its

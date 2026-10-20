@@ -24,11 +24,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, CREATESTRUCTW,
     GWLP_USERDATA, IDC_ARROW, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WM_ACTIVATE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
-    WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SIZING, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY,
+    WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCCREATE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SIZING,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 use super::connect::{Action, Dashboard};
@@ -41,6 +41,7 @@ use super::proxy::Proxy;
 use crate::model::{ModelEvent, Window};
 use crate::session::{Session, SessionEvent, VideoEvent};
 use crate::wire::{ClientMessage, InputEvent, Rect, ResizePhase, Size};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, IsIconic, IsWindowVisible, KillTimer, SetForegroundWindow, SetTimer, SW_HIDE,
     SW_RESTORE,
@@ -62,6 +63,10 @@ thread_local! {
     static IN_TICK: Cell<bool> = const { Cell::new(false) };
 }
 const CLASS_NAME: PCWSTR = w!("TransomProxyWindow");
+
+/// `MK_LBUTTON | MK_RBUTTON | MK_MBUTTON`: the mouse buttons a button message's
+/// `wParam` reports as still down.
+const MK_BUTTONS: usize = 0x0001 | 0x0002 | 0x0010;
 
 /// Reconnect backoff after the control channel drops.
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
@@ -847,18 +852,22 @@ impl App {
             }
             WM_EXITSIZEMOVE => {
                 if let Some(proxy) = self.proxies.get_mut(&id) {
-                    let resized = proxy.resizing;
-                    proxy.end_size_move();
+                    let resized = proxy.end_size_move();
                     let size = Size {
                         w: proxy.width,
                         h: proxy.height,
                     };
+                    let source = proxy.source;
                     if resized {
                         self.send(&ClientMessage::RequestResize {
                             id,
                             size,
                             phase: ResizePhase::End,
                         });
+                    } else {
+                        // The host changed the window's size while it was being
+                        // moved; the snap was deferred until now.
+                        self.update_source_rect(id, source);
                     }
                 }
                 Some(LRESULT(0))
@@ -902,17 +911,10 @@ impl App {
             }
 
             WM_MOUSEMOVE => {
-                let in_size_move = self
-                    .proxies
-                    .get(&id)
-                    .map(|proxy| proxy.in_size_move)
-                    .unwrap_or(false);
-                if !in_size_move {
-                    if let Some(event) = input::event_for_message(hwnd, msg, wparam, lparam) {
-                        // Coalesce hover motion instead of doing a synchronous TCP
-                        // write from the UI thread for every raw mouse message.
-                        self.pending_mouse_moves.insert(id, event);
-                    }
+                // Coalesce hover motion instead of doing a synchronous TCP write
+                // from the UI thread for every raw mouse message.
+                if let Some(event) = self.input_event(id, hwnd, msg, wparam, lparam) {
+                    self.pending_mouse_moves.insert(id, event);
                 }
                 // DefWindowProc must still see movement during its modal move /
                 // resize loop. We merely keep that local gesture off the wire.
@@ -921,24 +923,35 @@ impl App {
 
             WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
             | WM_MBUTTONUP | WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
-                let in_size_move = self
-                    .proxies
-                    .get(&id)
-                    .map(|proxy| proxy.in_size_move)
-                    .unwrap_or(false);
-                if !in_size_move {
+                if let Some(event) = self.input_event(id, hwnd, msg, wparam, lparam) {
                     // This event already carries its authoritative pointer
                     // coordinates, so an older queued hover can be discarded.
                     self.pending_mouse_moves.remove(&id);
-                    if let Some(event) = input::event_for_message(hwnd, msg, wparam, lparam) {
-                        self.send_input(id, event);
-                    }
+                    self.send_input(id, event);
                 }
                 None
             }
 
+            WM_CAPTURECHANGED => {
+                // Something took the mouse mid-drag (Alt+Tab, a system dialog), so
+                // the button-up will never reach this window. Release it for the
+                // host; after an ordinary button-up there is nothing left to do.
+                let releases = self
+                    .proxies
+                    .get_mut(&id)
+                    .map(|proxy| proxy.pointer.release_all())
+                    .unwrap_or_default();
+                if !releases.is_empty() {
+                    self.pending_mouse_moves.remove(&id);
+                }
+                for event in releases {
+                    self.send_input(id, event);
+                }
+                Some(LRESULT(0))
+            }
+
             WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {
-                if let Some(event) = input::event_for_message(hwnd, msg, wparam, lparam) {
+                if let Some(event) = self.input_event(id, hwnd, msg, wparam, lparam) {
                     self.send_input(id, event);
                 }
                 // Let DefWindowProc still run for system keys (Alt menu, etc.) by
@@ -965,6 +978,28 @@ impl App {
 
             _ => None,
         }
+    }
+
+    /// The wire event for one input message. `None` for a pointer message while
+    /// the proxy is being moved or resized, or outside the streamed content.
+    fn input_event(
+        &mut self,
+        id: u64,
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> Option<InputEvent> {
+        let proxy = self.proxies.get_mut(&id)?;
+        let is_key = matches!(msg, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP);
+        if proxy.in_size_move && !is_key {
+            return None;
+        }
+        let content = Size {
+            w: proxy.source.w,
+            h: proxy.source.h,
+        };
+        input::event_for_message(hwnd, msg, wparam, lparam, &mut proxy.pointer, content)
     }
 
     fn send_input(&self, id: u64, event: InputEvent) {
@@ -1030,7 +1065,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_SIZE | WM_ENTERSIZEMOVE | WM_SIZING | WM_EXITSIZEMOVE | WM_DPICHANGED | WM_PAINT
             | WM_ACTIVATE | WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN
             | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MOUSEWHEEL | WM_MOUSEHWHEEL
-            | WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP | WM_CLOSE | WM_DESTROY => {
+            | WM_CAPTURECHANGED | WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP
+            | WM_CLOSE | WM_DESTROY => {
                 let rect = if msg == WM_SIZING || msg == WM_DPICHANGED {
                     Some(*(lparam.0 as *const RECT))
                 } else {
@@ -1050,6 +1086,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         rect,
                     });
                 });
+                // Hold the mouse for the length of a drag: without capture a
+                // button released outside the window is never reported, and the
+                // Mac keeps dragging. Queued first, so the release above is
+                // handled before the WM_CAPTURECHANGED this sends.
+                match msg {
+                    WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+                        SetCapture(hwnd);
+                    }
+                    WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP
+                        if wparam.0 & MK_BUTTONS == 0 && GetCapture() == hwnd =>
+                    {
+                        let _ = ReleaseCapture();
+                    }
+                    _ => {}
+                }
                 if msg == WM_PAINT {
                     let _ = windows::Win32::Graphics::Gdi::ValidateRect(hwnd, None);
                     return LRESULT(0);

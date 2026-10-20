@@ -9,7 +9,8 @@
 //!
 //! The code is split by verifiability, not just by concern:
 //!
-//!  * **Pure protocol core** (`wire`, `model`, `net`, `session`, `runner`, `vk`) —
+//!  * **Pure protocol core** (`wire`, `model`, `net`, `session`, `runner`, `vk`,
+//!    `pointer`) —
 //!    no `windows-rs`, compiles and unit-tests on *any* host. This is the half
 //!    that must agree with the Swift host byte-for-byte, so it is kept portable
 //!    and pointed at the real host on `127.0.0.1` to verify the wire (I-7).
@@ -33,6 +34,8 @@ mod discovery;
 mod hevc;
 mod model;
 mod net;
+#[cfg(any(windows, test))]
+mod pointer;
 mod runner;
 mod session;
 mod vk;

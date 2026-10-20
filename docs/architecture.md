@@ -151,6 +151,20 @@ that case the read-back rect can still overlap a neighbour. The host reports the
 actual rect regardless (I-4) and the client copes; a fully general fix is deferred
 because it does not arise at the real target.
 
+**Changes made on the Mac side are different.** The clamp only covers a resize
+the client asked for. A window can also be moved or resized from the Mac: a
+streamed drag of its title bar or resize edge, a zoom, the app resizing itself.
+There is nothing to clamp, because the change has already happened, so here the
+host uses the exception I-4 allows: once such a change has **settled** into an
+overlap or off the display, it re-tiles and reports the new rects
+(`LayoutGuard`, a pure state machine; `TileService.enforceNonOverlap`). Settled
+means the same violating layout on two polls 0.5 s apart with no client mouse
+button held, so a drag or an animation in progress is never fought. A window that
+is merely displaced, still clear of its neighbours, is left where it is: its
+position on the virtual display is invisible to the user. A layout the re-tile
+cannot repair (an app refuses, the set no longer fits) is left alone until it
+changes.
+
 **At N=1 this whole question evaporates.** The actual primary use case is a single
 Conductor window; with no neighbours the clamp is just a display-edge clamp. This
 is deliberately not over-engineered: correct at N=1, sane at N=2–3.
@@ -607,6 +621,37 @@ one? Unknown.
 > `.cghidEventTap` is used; the real cursor moves and SCK captures it (protocol.md
 > §8), so no cursor is synthesized.
 
+> **POINTER ROUTING (2026-10-06): found by reading the code after a field report,
+> fixed, and NOT yet re-measured on the Mac Studio or the Windows PC (I-7).**
+>
+> The report: after a window is resized, moved, or misaligned, input "breaks and
+> starts registering on other windows". Three defects produce that, all the same
+> shape: a window-local point posted as a global event at the wrong place.
+>
+> 1. **A drag that moves its own window ran away.** The host translated every
+>    event against the window's *current* origin. Drag a streamed title bar 50px:
+>    the window follows, its origin is now +50, and the next event (same local
+>    point) is posted at +100. The window accelerates away from the pointer, over
+>    its neighbours or off the display, where the watcher then destroyed it. Fix:
+>    latch the rect at `mouseDown` (`PointerRouter`, protocol.md §4).
+> 2. **Nothing bounded a point to its window.** A proxy larger than its Mac
+>    window (a clamped resize, or a move to a monitor with another DPI, which never
+>    asked the host to relayout) letterboxes; a click in the margin was posted
+>    past the window's edge, onto the gutter or the next tile. Fix: the client
+>    sends no such point and the host drops one; a move that changes the proxy's
+>    size now ends with `requestResize { End }`.
+> 3. **A lost button-up left the Mac dragging.** The client did not capture the
+>    mouse, so a button released outside the proxy was never sent and every later
+>    hover, on any window, was a drag. Fix: capture, plus host-side release on the
+>    next press and on disconnect.
+>
+> After (1) a streamed title-bar drag still moves the Mac window by the drag's own
+> length, which can overlap a neighbour; 2.2 covers how the layout is restored.
+> The arithmetic of all three is unit tested (`PointerRouterTests`,
+> `LayoutGuardTests`, client `pointer`); the AX and Win32 behaviour around it
+> (capture, `WM_DPICHANGED` during a move, re-tiling a live session) is not
+> measured yet.
+
 ### Operational finding: the prototype control port 7000 collides with AirPlay Receiver
 
 > **M2 FINDING (2026-07-15, Mac Studio, macOS 26): TCP 7000 is taken by
@@ -699,6 +744,8 @@ not resample an interactive frame.
 | Physical pixels everywhere on the wire | See `invariants.md` |
 | Live resize resamples, snaps on exit | A roundtrip is 30ms+, past a drag's frame budget (2.1) |
 | Resize collision clamps, does not re-tile | Reuses I-4 readback machinery; client already tolerates clamps; re-tiling moves windows the user did not touch, growing the display invalidates the capture stream (2.2) |
+| Mac-side overlap re-tiles, once settled | Nothing to clamp after the fact; I-4's one exception. Waits for two identical polls and a released mouse so it never fights a drag (2.2, LayoutGuard) |
+| A drag is translated against the rect at its `mouseDown` | A drag can move its own window; following the moving origin makes it run away (8, PointerRouter) |
 | `Live` throttled ~10Hz, `End` authoritative | AX cannot keep up with `WM_SIZING`; the last live is coalesced and flushed, never dropped; `End` is the 1:1 snap (2.1, ResizeThrottle) |
 | Accept the DWM frame | Many-windows requirement forecloses exclusive fullscreen (5) |
 | Encoder pool deferred | Solves a problem we do not have at 2-3 windows (3.4) |

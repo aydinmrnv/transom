@@ -21,6 +21,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 
 use super::gpu::{Gpu, RenderMode, SourceTexture};
+use crate::pointer::PointerGate;
 use crate::wire::Rect;
 
 /// Client-side throttle for `Live` resize requests (~10Hz; protocol.md §5). The
@@ -40,7 +41,10 @@ pub struct Proxy {
     /// True between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`.
     pub in_size_move: bool,
     pub resizing: bool,
+    /// Client size when the current move/size gesture began.
+    size_move_start: (u32, u32),
     last_live_send: Option<Instant>,
+    pub pointer: PointerGate,
     /// M0 diagnostic: draw a 1px checkerboard instead of sampling the stream.
     pub checkerboard: bool,
 }
@@ -62,7 +66,9 @@ impl Proxy {
             source,
             in_size_move: false,
             resizing: false,
+            size_move_start: (source.w, source.h),
             last_live_send: None,
+            pointer: PointerGate::default(),
             checkerboard,
         };
         proxy.ensure_rtv(gpu)?;
@@ -226,12 +232,18 @@ impl Proxy {
     pub fn begin_size_move(&mut self) {
         self.in_size_move = true;
         self.resizing = false;
+        self.size_move_start = (self.width, self.height);
         self.last_live_send = None;
     }
 
-    pub fn end_size_move(&mut self) {
+    /// End the gesture. Returns whether it changed the client size: a resize
+    /// drag, or a move that did so without one (onto a monitor with another DPI,
+    /// into an Aero Snap zone, out of maximize).
+    pub fn end_size_move(&mut self) -> bool {
+        let changed = self.resizing || self.size_move_start != (self.width, self.height);
         self.in_size_move = false;
         self.resizing = false;
         self.last_live_send = None;
+        changed
     }
 }

@@ -103,10 +103,8 @@ public enum TileService {
             // A Mac app can refuse a move or enforce a larger minimum. Never
             // announce an overlapping sprite sheet as a successful session.
             let actual = placements.compactMap(\.actual)
-            let invalid = actual.count != placements.count || actual.enumerated().contains { i, r in
-                r.x < 0 || r.y < 0 || r.maxX > displaySize.width || r.maxY > displaySize.height
-                    || actual.prefix(i).contains(where: { $0.intersects(r) })
-            }
+            let invalid = actual.count != placements.count
+                || !Tiler.isNonOverlapping(actual, on: displaySize)
             if invalid {
                 for (item, frame) in zip(placeable, originalFrames) {
                     if let frame { _ = item.win.place(position: frame.origin, size: frame.size) }
@@ -114,6 +112,43 @@ public enum TileService {
                 return .failure(.actualGeometryRejected)
             }
             return .success(placements)
+        }
+    }
+
+    /// Poll `layoutGuard` with the live layout and re-tile if it asks (I-5). Returns
+    /// the re-tile's outcome, or nil when none was due. This is the one case where
+    /// the host moves windows on its own initiative (I-4); the watcher reports the
+    /// new rects.
+    public static func enforceNonOverlap(
+        _ layoutGuard: inout LayoutGuard, pids: [pid_t], display: DisplayInfo, gutter: Int,
+        pointerDown: Bool
+    ) -> Result<[TilePlacement], TilerError>? {
+        let displaySize = TileSize(width: display.pixelWidth, height: display.pixelHeight)
+        let due = layoutGuard.shouldRetile(
+            windows: standardWindowRects(pids: pids, display: display), display: displaySize,
+            pointerDown: pointerDown)
+        guard due else { return nil }
+        let result = layout(pids: pids, display: display, gutter: gutter, fit: true)
+        if case .failure = result {
+            layoutGuard.retileFailed(windows: standardWindowRects(pids: pids, display: display))
+        }
+        return result
+    }
+
+    /// The live VDS rect of every standard window of `pids`: the set I-5 is
+    /// enforced over. Dialogs, panels and popups are placed by their app, usually
+    /// over their parent, and are not a reason to re-tile (OQ-1).
+    private static func standardWindowRects(pids: [pid_t], display: DisplayInfo) -> [TileRect] {
+        pids.flatMap { AXWindow.windows(pid: $0) }.compactMap { win in
+            guard win.role == (kAXWindowRole as String),
+                win.subrole == (kAXStandardWindowSubrole as String),
+                !win.isMinimized, let frame = win.frame()
+            else { return nil }
+            let vds = Coordinates.displayPixels(
+                fromAXRect: frame, displayOriginPoints: display.originPoints, scale: display.scale)
+            return TileRect(
+                x: Int(vds.origin.x.rounded()), y: Int(vds.origin.y.rounded()),
+                width: Int(vds.size.width.rounded()), height: Int(vds.size.height.rounded()))
         }
     }
 

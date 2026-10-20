@@ -11,8 +11,8 @@ import Foundation
 /// (I-7).
 ///
 /// **Threading.** `ControlServer` calls `handle` from its per-connection receive
-/// loop, in message order. A lock serialises the mutable state (modifier + mouse
-/// button tracking) and the posting so events land in the order the client sent
+/// loop, in message order. A lock serialises the mutable state (modifier + pointer
+/// tracking) and the posting so events land in the order the client sent
 /// them; `@unchecked Sendable` is on that confinement, not to hide a race.
 public final class InputInjector: @unchecked Sendable {
 
@@ -24,7 +24,7 @@ public final class InputInjector: @unchecked Sendable {
 
     // Mutable state, all under `lock`.
     private var modifiers = ModifierState()
-    private var mouseButtonsDown: Set<MouseButton> = []
+    private var pointer = PointerRouter()
 
     /// Optional human-readable trace of the full translation chain, one line per
     /// event. `serve --log-input` and the `inject` command wire this to `print`;
@@ -53,10 +53,20 @@ public final class InputInjector: @unchecked Sendable {
         }
     }
 
-    /// Drop all modifier state. Called when a client disconnects so a ⌘ left held
-    /// by a dropped session cannot wedge into the next one.
-    public func resetModifiers() {
-        lock.withLock { modifiers.reset() }
+    /// Let go of everything the client was holding. Called when a client
+    /// disconnects so neither a ⌘ nor a mouse button left held by a dropped
+    /// session can wedge into the next one.
+    public func reset() {
+        lock.withLock {
+            for post in pointer.releaseAll() { self.post(post, id: 0, ts: 0) }
+            modifiers.reset()
+        }
+    }
+
+    /// True while the client holds a mouse button down. A drag can be moving or
+    /// resizing a window, so the layout guard waits for it to end.
+    public var isPointerDown: Bool {
+        lock.withLock { pointer.isDragging }
     }
 
     // MARK: - Injection
@@ -64,14 +74,8 @@ public final class InputInjector: @unchecked Sendable {
     public func inject(id: UInt64, event: InputEvent, ts: UInt64) {
         lock.withLock {
             switch event {
-            case .mouseDown(let x, let y, let button):
-                postMouse(id: id, x: x, y: y, button: button, down: true, ts: ts)
-            case .mouseUp(let x, let y, let button):
-                postMouse(id: id, x: x, y: y, button: button, down: false, ts: ts)
-            case .mouseMove(let x, let y):
-                postMouseMove(id: id, x: x, y: y, ts: ts)
-            case .scroll(let x, let y, let dx, let dy):
-                postScroll(id: id, x: x, y: y, dx: dx, dy: dy, ts: ts)
+            case .mouseDown, .mouseUp, .mouseMove, .scroll:
+                routePointer(id: id, event: event, ts: ts)
             case .keyDown(let vk):
                 postKey(vk: vk, down: true, ts: ts)
             case .keyUp(let vk):
@@ -124,88 +128,85 @@ public final class InputInjector: @unchecked Sendable {
 
     // MARK: - Mouse
 
+    /// Route one pointer event through `PointerRouter` and post what it allows.
     /// Assumes `lock` is held.
-    private func postMouse(
-        id: UInt64, x: UInt32, y: UInt32, button: MouseButton, down: Bool, ts: UInt64
-    ) {
-        guard let point = axPoint(id: id, x: x, y: y, label: down ? "mouseDown" : "mouseUp") else {
-            return
-        }
+    private func routePointer(id: UInt64, event: InputEvent, ts: UInt64) {
+        // A press decides where the whole drag lands, so it reads the window's
+        // frame live rather than trusting a rect that may lag a move by a tick.
+        var rect = registry.entry(for: id)?.rect
+        if case .mouseDown = event, rect != nil, let live = liveRect(id: id) { rect = live }
 
-        // A click on a window that is not frontmost must raise it *before* the
-        // event lands, or the click goes to the wrong place (issue #7).
-        var raiseNote = ""
-        if down, let element = registry.element(for: id) {
-            let outcome = raise(element)
-            if outcome.activatedApp || outcome.raised {
-                raiseNote = " raised=\(outcome.raised) activatedApp=\(outcome.activatedApp)"
+        let route = pointer.route(event, id: id, rect: rect)
+        for post in route.posts { self.post(post, id: id, ts: ts) }
+        if let reason = route.dropped {
+            trace("input id=\(id) \(event): \(reason), dropped")
+        }
+    }
+
+    /// Post one routed event. Assumes `lock` is held.
+    private func post(_ post: PointerRouter.Post, id: UInt64, ts: UInt64) {
+        let point = Coordinates.axGlobalPoint(
+            fromWindowLocalPixels: CGPoint(x: Double(post.x), y: Double(post.y)),
+            windowOriginVDS: CGPoint(x: Double(post.rect.x), y: Double(post.rect.y)),
+            displayOriginPoints: display.originPoints,
+            scale: display.scale)
+        let flags = modifiers.flags(using: modifierMap)
+
+        let event: CGEvent?
+        let label: String
+        var extra = "flags=\(describe(flags))"
+        switch post.kind {
+        case .down(let button):
+            // A click on a window that is not frontmost must raise it *before* the
+            // event lands, or the click goes to the wrong place (issue #7).
+            if let element = registry.element(for: id) {
+                let outcome = raise(element)
+                if outcome.activatedApp || outcome.raised {
+                    extra += " raised=\(outcome.raised) activatedApp=\(outcome.activatedApp)"
+                }
             }
-        }
-
-        if down { mouseButtonsDown.insert(button) } else { mouseButtonsDown.remove(button) }
-
-        let types = mouseTypes(button)
-        let flags = modifiers.flags(using: modifierMap)
-        guard
-            let event = CGEvent(
-                mouseEventSource: source, mouseType: down ? types.down : types.up,
-                mouseCursorPosition: point, mouseButton: types.cg)
-        else {
-            trace("mouse: CGEvent creation failed")
-            return
-        }
-        event.flags = flags
-        event.post(tap: .cghidEventTap)
-        traceChain(
-            id: id, label: down ? "mouseDown" : "mouseUp",
-            x: x, y: y, point: point,
-            extra: "button=\(button.rawValue) flags=\(describe(flags))\(raiseNote)",
-            ts: ts)
-    }
-
-    /// Assumes `lock` is held.
-    private func postMouseMove(id: UInt64, x: UInt32, y: UInt32, ts: UInt64) {
-        guard let point = axPoint(id: id, x: x, y: y, label: "mouseMove") else { return }
-        // If a button is held this is a drag, which apps treat very differently
-        // from a hover (text selection, window drags).
-        let dragButton = mouseButtonsDown.first
-        let type: CGEventType
-        let cgButton: CGMouseButton
-        if let dragButton {
-            let t = mouseTypes(dragButton)
-            type = t.drag
-            cgButton = t.cg
-        } else {
-            type = .mouseMoved
-            cgButton = .left
-        }
-        let flags = modifiers.flags(using: modifierMap)
-        guard
-            let event = CGEvent(
-                mouseEventSource: source, mouseType: type, mouseCursorPosition: point,
-                mouseButton: cgButton)
-        else { return }
-        event.flags = flags
-        event.post(tap: .cghidEventTap)
-        traceChain(
-            id: id, label: dragButton == nil ? "mouseMove" : "mouseDrag",
-            x: x, y: y, point: point, extra: "flags=\(describe(flags))", ts: ts)
-    }
-
-    /// Assumes `lock` is held.
-    private func postScroll(id: UInt64, x: UInt32, y: UInt32, dx: Int32, dy: Int32, ts: UInt64) {
-        guard let point = axPoint(id: id, x: x, y: y, label: "scroll") else { return }
-        // wheel1 = vertical, wheel2 = horizontal (CoreGraphics ordering).
-        guard
-            let event = CGEvent(
+            let types = mouseTypes(button)
+            event = CGEvent(
+                mouseEventSource: source, mouseType: types.down, mouseCursorPosition: point,
+                mouseButton: types.cg)
+            label = "mouseDown"
+            extra = "button=\(button.rawValue) " + extra
+        case .up(let button):
+            let types = mouseTypes(button)
+            event = CGEvent(
+                mouseEventSource: source, mouseType: types.up, mouseCursorPosition: point,
+                mouseButton: types.cg)
+            label = "mouseUp"
+            extra = "button=\(button.rawValue) " + extra
+        case .drag(let button):
+            // With a button held this is a drag, which apps treat very differently
+            // from a hover (text selection, window drags).
+            let types = mouseTypes(button)
+            event = CGEvent(
+                mouseEventSource: source, mouseType: types.drag, mouseCursorPosition: point,
+                mouseButton: types.cg)
+            label = "mouseDrag"
+        case .move:
+            event = CGEvent(
+                mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point,
+                mouseButton: .left)
+            label = "mouseMove"
+        case .scroll(let dx, let dy):
+            // wheel1 = vertical, wheel2 = horizontal (CoreGraphics ordering).
+            event = CGEvent(
                 scrollWheelEvent2Source: source, units: .line, wheelCount: 2,
                 wheel1: dy, wheel2: dx, wheel3: 0)
-        else { return }
-        event.location = point
-        event.flags = modifiers.flags(using: modifierMap)
+            event?.location = point
+            label = "scroll"
+            extra = "dx=\(dx) dy=\(dy)"
+        }
+        guard let event else {
+            trace("\(label): CGEvent creation failed")
+            return
+        }
+        event.flags = flags
         event.post(tap: .cghidEventTap)
-        traceChain(
-            id: id, label: "scroll", x: x, y: y, point: point, extra: "dx=\(dx) dy=\(dy)", ts: ts)
+        traceChain(id: id, label: label, x: post.x, y: post.y, point: point, extra: extra, ts: ts)
     }
 
     private func mouseTypes(_ button: MouseButton)
@@ -253,20 +254,19 @@ public final class InputInjector: @unchecked Sendable {
             ts: ts)
     }
 
-    // MARK: - Coordinate translation (the whole risk)
+    // MARK: - Geometry
 
-    /// Window-local physical pixels → AX global point, or nil (with a trace) if
-    /// the id is unknown. Assumes `lock` is held.
-    private func axPoint(id: UInt64, x: UInt32, y: UInt32, label: String) -> CGPoint? {
-        guard let entry = registry.entry(for: id) else {
-            trace("\(label) id=\(id): unknown window id, dropped")
-            return nil
-        }
-        return Coordinates.axGlobalPoint(
-            fromWindowLocalPixels: CGPoint(x: Double(x), y: Double(y)),
-            windowOriginVDS: CGPoint(x: Double(entry.rect.x), y: Double(entry.rect.y)),
-            displayOriginPoints: display.originPoints,
-            scale: display.scale)
+    /// The window's frame as AX reports it right now, in VDS pixels, or nil if AX
+    /// will not say or the window is not wholly on the display. Assumes `lock` is
+    /// held.
+    private func liveRect(id: UInt64) -> WireRect? {
+        guard let element = registry.element(for: id),
+            let frame = AXWindow(element: element, index: -1).frame()
+        else { return nil }
+        return WindowWatcher.captureRect(
+            Coordinates.displayPixels(
+                fromAXRect: frame, displayOriginPoints: display.originPoints, scale: display.scale),
+            displayWidth: display.pixelWidth, displayHeight: display.pixelHeight)
     }
 
     // MARK: - Focus / raise
