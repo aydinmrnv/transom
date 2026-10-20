@@ -25,6 +25,11 @@ struct Serve: AsyncParsableCommand {
     var display: UInt32
 
     @Option(
+        name: .customLong("also"),
+        help: "Share another app in the same session (repeatable), as the host app does.")
+    var additionalApps: [String] = []
+
+    @Option(
         name: .long,
         help: "Private address to bind (default localhost). Use the LAN IP for a real client.")
     var host: String = "127.0.0.1"
@@ -40,6 +45,11 @@ struct Serve: AsyncParsableCommand {
 
     @Flag(inversion: .prefixedNo, help: "Tile the app's windows at startup (I-5).")
     var tile: Bool = true
+
+    @Flag(
+        inversion: .prefixedNo,
+        help: "Show the app if hidden and bring minimized/full-screen windows onto the display first.")
+    var restoreWindows: Bool = true
 
     @Flag(
         inversion: .prefixedNo,
@@ -90,6 +100,12 @@ struct Serve: AsyncParsableCommand {
         case .success(let t): target = t
         case .failure(let e): throw e
         }
+        let additional = try additionalApps.map { token -> TargetApp in
+            switch AppResolver.resolve(token) {
+            case .success(let t): return t
+            case .failure(let e): throw e
+            }
+        }
         guard let disp = TransomKit.Displays.byID(display) else {
             throw ProbeError("no active display with id \(display). See `displays`.")
         }
@@ -103,15 +119,17 @@ struct Serve: AsyncParsableCommand {
         }
 
         let config = HostConfig(
-            target: target, display: disp, host: host, controlPort: controlPort,
+            target: target, additionalTargets: additional, display: disp, host: host,
+            controlPort: controlPort,
             videoPort: videoPort, gutter: gutter, tile: tile, video: video,
             bitrateMbps: bitrate, fps: fps, videoFormat: videoFormat,
-            namesakeModifiers: namesakeModifiers, logInput: logInput, inputDelivery: delivery
+            namesakeModifiers: namesakeModifiers, logInput: logInput, inputDelivery: delivery,
+            restoreWindows: restoreWindows
         )
         let session = HostSession(config: config)
 
         print(
-            "serve: \(target.name) on display \(display) (\(disp.pixelWidth)x\(disp.pixelHeight) px)"
+            "serve: \(([target] + additional).map(\.name).joined(separator: ", ")) on display \(display) (\(disp.pixelWidth)x\(disp.pixelHeight) px)"
         )
         print(
             "  control: \(host):\(controlPort)   video: \(video ? "\(host):\(videoPort)" : "off")")
@@ -121,6 +139,7 @@ struct Serve: AsyncParsableCommand {
 
         // Report the startup tiling result (requested-vs-actual deltas, I-4/OQ-2).
         let started = session.status()
+        for notice in started.notices { print("  note: \(notice)") }
         if let tileError = started.tileError {
             print("  tiling failed: \(tileError)")
         } else if started.tilePlacements.isEmpty {

@@ -24,6 +24,49 @@ struct TilerTests {
             == Tiler.layout(windows: sizes, display: TileSize(width: 1920, height: 1080), gutter: 100).get())
     }
 
+    @Test func fittedLayoutRespectsALearnedMinimum() throws {
+        // Xcode at 2800x1800 and Device Hub at 2240x1704 on a 4K display: the
+        // natural layout cannot fit, so the cells shrink them. A minimum learned
+        // from an AX clamp must never be proposed below.
+        let sizes = [TileSize(width: 2800, height: 1800), TileSize(width: 2240, height: 1704)]
+        let display = TileSize(width: 3840, height: 2160)
+        let minimums: [TileSize?] = [TileSize(width: 1900, height: 1200), nil]
+        let rects = try Tiler.fittedLayout(
+            windows: sizes, minimums: minimums, display: display, gutter: 0
+        ).get()
+        #expect(rects[0].width >= 1900 && rects[0].height >= 1200)
+        #expect(Tiler.isNonOverlapping(rects, on: display))
+    }
+
+    @Test func fittedLayoutSkipsGridsAMinimumCannotFit() {
+        // Two windows whose minimums are each wider than half the display cannot
+        // sit side by side; stacked they do not fit vertically either.
+        let sizes = Array(repeating: TileSize(width: 3000, height: 2000), count: 2)
+        let display = TileSize(width: 3840, height: 2160)
+        let minimums: [TileSize?] = Array(repeating: TileSize(width: 2500, height: 1500), count: 2)
+        let result = Tiler.fittedLayout(windows: sizes, minimums: minimums, display: display, gutter: 0)
+        if case .success(let rects) = result {
+            #expect(!Tiler.isNonOverlapping(rects, on: display) || rects.allSatisfy { $0.width >= 2500 })
+        }
+        #expect(Tiler.admittedCount(windows: sizes, minimums: minimums, display: display, gutter: 0) == 1)
+    }
+
+    @Test func admittedCountKeepsEverythingThatFits() {
+        let sizes = Array(repeating: TileSize(width: 800, height: 600), count: 4)
+        let display = TileSize(width: 3840, height: 2160)
+        #expect(
+            Tiler.admittedCount(
+                windows: sizes, minimums: Array(repeating: nil, count: 4), display: display,
+                gutter: 200) == 4)
+        #expect(Tiler.admittedCount(windows: [], minimums: [], display: display, gutter: 200) == 0)
+    }
+
+    @Test func priorityOrderPutsEveryAppsFrontWindowFirst() {
+        // Xcode (3 windows), Device Hub (1), Music (2), in selection order.
+        let ranks = [0, 1, 2, 0, 0, 1]
+        #expect(Tiler.priorityOrder(ranks: ranks) == [0, 3, 4, 1, 5, 2])
+    }
+
     // MARK: helpers
 
     /// Unwrap a success or fail the test with the error.

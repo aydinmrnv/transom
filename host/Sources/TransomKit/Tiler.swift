@@ -92,6 +92,18 @@ public enum Tiler {
     public static func fittedLayout(windows: [TileSize], display: TileSize, gutter: Int)
         -> Result<[TileRect], TilerError>
     {
+        fittedLayout(
+            windows: windows, minimums: Array(repeating: nil, count: windows.count),
+            display: display, gutter: gutter)
+    }
+
+    /// `fittedLayout`, but never proposing a window smaller than `minimums[i]`:
+    /// the size its app clamped it to on an earlier attempt (OQ-2). Xcode, for
+    /// one, will not shrink below its own minimum, so an equal-cell proposal it
+    /// cannot honour is skipped instead of being written and rejected again.
+    public static func fittedLayout(
+        windows: [TileSize], minimums: [TileSize?], display: TileSize, gutter: Int
+    ) -> Result<[TileRect], TilerError> {
         let natural = layout(windows: windows, display: display, gutter: gutter)
         if case .success = natural { return natural }
         guard !windows.isEmpty, gutter >= 0, windows.allSatisfy({ $0.width > 0 && $0.height > 0 }) else { return natural }
@@ -102,15 +114,53 @@ public enum Tiler {
             let cellW = (display.width - (columns - 1) * gutter) / columns
             let cellH = (display.height - (rows - 1) * gutter) / rows
             guard cellW > 0, cellH > 0 else { continue }
+            let fits = windows.indices.allSatisfy { i in
+                guard i < minimums.count, let minimum = minimums[i] else { return true }
+                return minimum.width <= cellW && minimum.height <= cellH
+            }
+            guard fits else { continue }
             let rects = windows.enumerated().map { i, size in
-                TileRect(x: (i % columns) * (cellW + gutter),
+                let minimum = i < minimums.count ? minimums[i] : nil
+                return TileRect(x: (i % columns) * (cellW + gutter),
                     y: (i / columns) * (cellH + gutter),
-                    width: min(size.width, cellW), height: min(size.height, cellH))
+                    width: max(min(size.width, cellW), minimum?.width ?? 0),
+                    height: max(min(size.height, cellH), minimum?.height ?? 0))
             }
             let area = rects.reduce(0) { $0 + $1.width * $1.height }
             if area > bestArea { best = rects; bestArea = area }
         }
         return best.map { .success($0) } ?? natural
+    }
+
+    /// How many of `windows`, taken in order, fit on `display` at once: the
+    /// largest prefix `fittedLayout` can place. Zero only if even the first
+    /// window's minimum is larger than the display.
+    ///
+    /// Callers order `windows` by priority, so what is left out is the least
+    /// important. Sharing what fits beats refusing to share at all; what does not
+    /// fit must still be kept off the display, never overlapped (I-5).
+    public static func admittedCount(
+        windows: [TileSize], minimums: [TileSize?], display: TileSize, gutter: Int
+    ) -> Int {
+        guard !windows.isEmpty else { return 0 }
+        for count in stride(from: windows.count, through: 1, by: -1) {
+            let result = fittedLayout(
+                windows: Array(windows.prefix(count)), minimums: Array(minimums.prefix(count)),
+                display: display, gutter: gutter)
+            if case .success(let rects) = result, isNonOverlapping(rects, on: display) {
+                return count
+            }
+        }
+        return 0
+    }
+
+    /// Order windows so each app's frontmost window comes before any app's
+    /// second one. `ranks[i]` is window `i`'s position in its own app's AX list
+    /// (front to back). Stable, so apps keep their selection order within a rank.
+    public static func priorityOrder(ranks: [Int]) -> [Int] {
+        ranks.indices.sorted { a, b in
+            ranks[a] != ranks[b] ? ranks[a] < ranks[b] : a < b
+        }
     }
 
     /// True if every rect is wholly on `display` and no two share any area: the

@@ -30,6 +30,10 @@ public struct HostConfig: Sendable {
     /// (`.background`, the default) or by raising them and driving the real
     /// cursor (`.foreground`). See `InputDelivery`.
     public var inputDelivery: InputDelivery
+    /// Show hidden apps and bring minimized and full-screen windows onto the
+    /// display before tiling, so every window of a selected app is shared
+    /// (`WindowRestorer`). Off shares only what is already on the display.
+    public var restoreWindows: Bool
 
     public init(
         target: TargetApp,
@@ -46,7 +50,8 @@ public struct HostConfig: Sendable {
         videoFormat: HEVCEncoder.Format = .hevc420_8bit,
         namesakeModifiers: Bool = false,
         logInput: Bool = false,
-        inputDelivery: InputDelivery = .background
+        inputDelivery: InputDelivery = .background,
+        restoreWindows: Bool = true
     ) {
         self.target = target
         var seen: Set<pid_t> = [target.pid]
@@ -64,6 +69,7 @@ public struct HostConfig: Sendable {
         self.namesakeModifiers = namesakeModifiers
         self.logInput = logInput
         self.inputDelivery = inputDelivery
+        self.restoreWindows = restoreWindows
     }
 }
 
@@ -104,6 +110,9 @@ public struct HostStatus: Sendable {
     public var tileError: String?
     /// Live count of windows the AX watcher currently tracks.
     public var liveWindowCount = 0
+    /// Things the session did to the Mac's windows that the person at the Mac
+    /// should know about: windows it restored, windows it left out.
+    public var notices: [String] = []
 
     public init() {}
 
@@ -192,6 +201,7 @@ public final class HostSession: @unchecked Sendable {
     private var usingHardware = false
     private var tilePlacements: [TilePlacement] = []
     private var tileError: String?
+    private var notices: [String] = []
     private var videoEnabled = false
     /// (uptimeNanos, compressedBytes) of recently encoded frames, trimmed to a
     /// short window so fps/bitrate reflect *now*, not the whole session.
@@ -225,6 +235,7 @@ public final class HostSession: @unchecked Sendable {
             s.encoderFormatSummary = encoderFormatSummary
             s.tilePlacements = tilePlacements
             s.tileError = tileError
+            s.notices = notices
             let (fps, mbps) = rateLocked()
             s.measuredFPS = fps
             s.measuredBitrateMbps = mbps
@@ -277,14 +288,25 @@ public final class HostSession: @unchecked Sendable {
         self.registry = registry
         let vdsSize = WireSize(w: UInt32(disp.pixelWidth), h: UInt32(disp.pixelHeight))
 
+        let targets = [config.target] + config.additionalTargets
+        if config.restoreWindows {
+            let report = await WindowRestorer.restore(pids: targets.map(\.pid))
+            if let summary = report.summary { statsLock.withLock { notices.append(summary) } }
+        }
+
         // Tile once at startup so streamed windows are non-overlapping (I-5), and
         // keep the requested-vs-actual placements for the Status view (I-4/OQ-2).
-        let targets = [config.target] + config.additionalTargets
+        // Whatever does not fit is minimized rather than refusing the session,
+        // the same treatment a window opened mid-session gets.
         if config.tile {
-            switch TileService.layout(pids: targets.map(\.pid), display: disp, gutter: config.gutter, fit: true)
-            {
-            case .success(let placements):
-                statsLock.withLock { tilePlacements = placements }
+            switch TileService.admit(pids: targets.map(\.pid), display: disp, gutter: config.gutter) {
+            case .success(let admission):
+                statsLock.withLock { tilePlacements = admission.placements }
+                if !admission.overflow.isEmpty {
+                    let notice = Self.overflowNotice(admission.overflow)
+                    Log.ax.notice("tile: \(notice, privacy: .public)")
+                    statsLock.withLock { notices.append(notice) }
+                }
             case .failure(let error):
                 statsLock.withLock { tileError = error.description }
                 throw ProbeError("The selected windows do not fit on the sharing display. Choose fewer apps or a larger display. \(error.description)")
@@ -554,10 +576,22 @@ public final class HostSession: @unchecked Sendable {
             controlConnected = false
             videoConnected = false
             videoEnabled = false
+            notices = []
             frameSamples = []
             pendingEncodeStarts = []
             latencySamplesMs = []
         }
+    }
+
+    /// Minimize the windows the startup layout had no room for, and say which.
+    private static func overflowNotice(_ overflow: [AXWindow]) -> String {
+        let minimized = overflow.filter { $0.setMinimized(true) == .success }
+        let titles = overflow.map { $0.title.isEmpty ? "Untitled" : $0.title }
+        let shown = titles.prefix(3).map { "“\($0)”" }.joined(separator: ", ")
+            + (titles.count > 3 ? " and \(titles.count - 3) more" : "")
+        let verb = minimized.count == overflow.count ? "were minimized" : "could not all be minimized"
+        return "\(overflow.count) window\(overflow.count == 1 ? "" : "s") did not fit on the sharing display and \(verb): \(shown). "
+            + "Close some windows, lower the gutter, or use a larger display to share them."
     }
 
     // MARK: - Preconditions

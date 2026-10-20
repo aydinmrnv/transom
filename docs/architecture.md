@@ -813,6 +813,57 @@ pids would re-activate such an app on every click.
 
 Why LaunchServices drops the pid for these three is not established.
 
+### Hidden, minimized and full-screen windows are listed but not drawn (macOS 27)
+
+Sharing Xcode and Device Hub from the host app gave the PC nothing, even with
+the pid fix above. On the Mac host (macOS 27.0, 2026-10-20), Xcode's only window
+was minimized, Device Hub was hidden (⌘H), and Music and Icon Composer were
+minimized. AX lists all of these windows with real frames, but the WindowServer
+draws none of them on the display (`CGWindowList` reports `onscreen false`), so:
+
+- the tiler and watcher skipped the minimized windows, and the app shared 0;
+- the hidden app's window was tiled and announced, but its crop showed what
+  was behind it, because there was nothing to capture.
+
+A full-screen window is the same case: it lives in its own Space, not on the
+sharing display.
+
+The session now restores them before tiling (`WindowRestorer`): it sets the
+app's `AXHidden` to false, the window's `AXMinimized` to false, and
+`AXFullScreen` to false, then waits for the change to settle. Measured with
+`serve` and `mock-client --list-only`: Device Hub went from hidden to one
+shared window at `(0,60) 2240x1704 px`, and Xcode's minimized window went to
+`(0,60) 2800x1800 px`. Mid-session, hiding the app or minimizing the window
+removes it from the stream (0 windows), and showing or restoring it adds it
+back with a fresh id. This is the same as minimizing already did. An app
+that quits now drops its windows. Before, a failed AX read kept them forever.
+
+**The subrole changes with visibility.** While minimized or hidden, the main
+windows of Device Hub, Music and Icon Composer report `AXDialog`, which is the
+subrole of an alert. On screen they report `AXStandardWindow`. Xcode's window
+stays `AXStandardWindow` either way. Finder's copy-progress window is
+`AXDialog` while visible. The overlap guard and new-window admission used to
+look only at `AXStandardWindow`, so a just-restored Device Hub window could
+skip them. They now use `AXWindow.isAppWindow`: a standard window, or a dialog
+with an enabled minimize button. Alerts, panels and popovers cannot be
+minimized.
+
+**Minimum sizes (OQ-2).** With Xcode, Device Hub, Music and Icon Composer
+written to a 2x2 grid of 910x490 pt cells, Xcode and Device Hub took the size
+exactly. Music refused to go below 980x600 pt and Icon Composer below 990 pt
+wide. A failed startup layout used to refuse the whole session. It now learns
+those clamped sizes and lays out again, a few times at most. If the windows
+still do not fit, it shares the largest set that does, taking every app's
+frontmost window before any app's second one. It minimizes the rest and says
+so in the host app (`HostStatus.notices`). With the 200 px gutter, this
+selection shared Xcode and Device Hub and minimized Music and Icon Composer.
+
+A size write is also limited by the window's **current** position. Growing
+Icon Composer to 960 pt tall while it sat at y=590 pt came back 490 pt tall,
+because macOS keeps the window on screen. The tiler's size-then-position order
+can therefore read back smaller than requested. That stays inside the tile, so
+it cannot overlap, but it is not exact.
+
 ## 9. Decision log
 
 | Decision | Rationale |

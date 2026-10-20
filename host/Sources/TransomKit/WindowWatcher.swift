@@ -55,6 +55,8 @@ public final class WindowWatcher: @unchecked Sendable {
     private static let appNotifications = [
         kAXWindowCreatedNotification,
         kAXFocusedWindowChangedNotification,
+        kAXApplicationHiddenNotification,
+        kAXApplicationShownNotification,
     ]
     /// Registered per window element: these are about a specific window.
     private static let windowNotifications = [
@@ -152,6 +154,13 @@ public final class WindowWatcher: @unchecked Sendable {
                 forget(id)
                 emit(.destroyed(id: id))
             }
+        case kAXApplicationHiddenNotification:
+            // A hidden app's windows are not drawn, so their crops would show
+            // whatever is behind them. They leave the stream, as a minimized
+            // window does, and come back when the app is shown.
+            removeAll()
+        case kAXApplicationShownNotification:
+            refreshWindows()
         default:
             break
         }
@@ -161,9 +170,16 @@ public final class WindowWatcher: @unchecked Sendable {
     /// geometry, and emit `created`.
     private func registerAndAnnounce(_ element: AXUIElement) {
         let win = AXWindow(element: element, index: -1)
-        guard win.role == (kAXWindowRole as String), !win.isMinimized,
-            let frame = win.frame(), frame.width > 0, frame.height > 0
-        else { return }
+        guard Self.isOnDisplay(win), let frame = win.frame(), frame.width > 0, frame.height > 0
+        else {
+            // Full screen moves a window into its own Space, off the shared
+            // display, without a miniaturize or destroy notification.
+            if win.isFullScreen, let id = registry.remove(element: element) {
+                forget(id)
+                emit(.destroyed(id: id))
+            }
+            return
+        }
         let id = registry.id(for: element).id
         if tracked[id] == nil, let observer {
             let refcon = Unmanaged.passUnretained(self).toOpaque()
@@ -175,7 +191,7 @@ public final class WindowWatcher: @unchecked Sendable {
                 }
             }
         }
-        if !seeding && registry.entry(for: id) == nil && win.subrole == (kAXStandardWindowSubrole as String) {
+        if !seeding && registry.entry(for: id) == nil && win.isAppWindow {
             guard prepareNewWindow?(element) ?? true else {
                 _ = registry.remove(element: element)
                 return
@@ -207,12 +223,40 @@ public final class WindowWatcher: @unchecked Sendable {
     }
 
     private func refreshWindows() {
-        guard let windows = AXWindow.availableWindows(pid: pid) else { return }
+        guard let windows = AXWindow.availableWindows(pid: pid) else {
+            // A failed read is usually a busy app, so keep its windows. A quit
+            // (or crashed) app fails every read forever; drop its windows then,
+            // or the client keeps proxies for windows that no longer exist.
+            if !Self.processIsAlive(pid) { removeAll() }
+            return
+        }
+        guard !AXWindow.isApplicationHidden(pid: pid) else {
+            removeAll()
+            return
+        }
         for win in windows { registerAndAnnounce(win.element) }
         let removed = tracked.filter { _, element in
-            !windows.contains { CFEqual($0.element, element) && !$0.isMinimized }
+            !windows.contains { CFEqual($0.element, element) && Self.isOnDisplay($0) }
         }
         for (id, element) in removed {
+            _ = registry.remove(element: element)
+            forget(id)
+            emit(.destroyed(id: id))
+        }
+    }
+
+    /// A window the WindowServer draws on the shared display: a real window,
+    /// not minimized and not in a full-screen Space of its own.
+    private static func isOnDisplay(_ win: AXWindow) -> Bool {
+        win.role == (kAXWindowRole as String) && !win.isMinimized && !win.isFullScreen
+    }
+
+    private static func processIsAlive(_ pid: pid_t) -> Bool {
+        kill(pid, 0) == 0 || errno != ESRCH
+    }
+
+    private func removeAll() {
+        for (id, element) in tracked {
             _ = registry.remove(element: element)
             forget(id)
             emit(.destroyed(id: id))

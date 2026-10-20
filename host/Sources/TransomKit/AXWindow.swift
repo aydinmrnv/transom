@@ -75,9 +75,67 @@ public struct AXWindow {
     public var role: String { stringAttribute(kAXRoleAttribute) ?? "?" }
     public var subrole: String { stringAttribute(kAXSubroleAttribute) ?? "-" }
 
-    public var isMinimized: Bool {
+    public var isMinimized: Bool { boolAttribute(kAXMinimizedAttribute) }
+
+    /// A full-screen window lives in its own Space, not on the sharing display.
+    public var isFullScreen: Bool { boolAttribute("AXFullScreen") }
+
+    /// Whether this is one of the app's own top-level windows (a document, a
+    /// browser window, a device window) rather than a panel, alert or popup the
+    /// app positions itself.
+    ///
+    /// The subrole alone cannot say: on macOS 27, Device Hub, Music and Icon
+    /// Composer report their main windows as `AXDialog`, the subrole an alert
+    /// has (architecture.md §8). What separates them is the minimize button: an
+    /// alert, panel or popover cannot be minimized; an app window can.
+    public var isAppWindow: Bool {
+        guard role == (kAXWindowRole as String) else { return false }
+        let subrole = self.subrole
+        if subrole == (kAXStandardWindowSubrole as String) { return true }
+        return subrole == (kAXDialogSubrole as String) && hasEnabledMinimizeButton
+    }
+
+    private var hasEnabledMinimizeButton: Bool {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXMinimizedAttribute as CFString, &value) == .success else { return false }
+        guard
+            AXUIElementCopyAttributeValue(
+                element, kAXMinimizeButtonAttribute as CFString, &value) == .success,
+            let value, CFGetTypeID(value) == AXUIElementGetTypeID()
+        else { return false }
+        // swift-format-ignore: NeverForceUnwrap
+        let button = value as! AXUIElement
+        var enabled: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(button, kAXEnabledAttribute as CFString, &enabled)
+                == .success
+        else { return true }
+        return (enabled as? Bool) ?? true
+    }
+
+    /// Whether the app is hidden (⌘H). AX still lists a hidden app's windows
+    /// with their frames, but the WindowServer does not draw them, so there is
+    /// nothing to capture.
+    public static func isApplicationHidden(pid: pid_t) -> Bool {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                application(pid: pid), kAXHiddenAttribute as CFString, &value) == .success
+        else { return false }
+        return (value as? Bool) ?? false
+    }
+
+    @discardableResult
+    public static func setApplicationHidden(pid: pid_t, _ hidden: Bool) -> AXError {
+        AXUIElementSetAttributeValue(
+            application(pid: pid), kAXHiddenAttribute as CFString,
+            hidden ? kCFBooleanTrue : kCFBooleanFalse)
+    }
+
+    private func boolAttribute(_ attr: String) -> Bool {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attr as CFString, &value) == .success else {
+            return false
+        }
         return (value as? Bool) ?? false
     }
 
@@ -140,6 +198,19 @@ public struct AXWindow {
         guard let value = AXValueCreate(.cgSize, &s) else { return .failure }
         return AXUIElementSetAttributeValue(
             element, kAXSizeAttribute as CFString, value)
+    }
+
+    @discardableResult
+    public func setMinimized(_ minimized: Bool) -> AXError {
+        AXUIElementSetAttributeValue(
+            element, kAXMinimizedAttribute as CFString,
+            minimized ? kCFBooleanTrue : kCFBooleanFalse)
+    }
+
+    @discardableResult
+    public func setFullScreen(_ fullScreen: Bool) -> AXError {
+        AXUIElementSetAttributeValue(
+            element, "AXFullScreen" as CFString, fullScreen ? kCFBooleanTrue : kCFBooleanFalse)
     }
 
     // MARK: - Private
