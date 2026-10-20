@@ -26,6 +26,10 @@ public struct HostConfig: Sendable {
     public var namesakeModifiers: Bool
     /// Print the full coordinate/keycode chain for each injected input event.
     public var logInput: Bool
+    /// Whether client input is delivered to the shared windows in place
+    /// (`.background`, the default) or by raising them and driving the real
+    /// cursor (`.foreground`). See `InputDelivery`.
+    public var inputDelivery: InputDelivery
 
     public init(
         target: TargetApp,
@@ -41,7 +45,8 @@ public struct HostConfig: Sendable {
         fps: Int = 60,
         videoFormat: HEVCEncoder.Format = .hevc420_8bit,
         namesakeModifiers: Bool = false,
-        logInput: Bool = false
+        logInput: Bool = false,
+        inputDelivery: InputDelivery = .background
     ) {
         self.target = target
         var seen: Set<pid_t> = [target.pid]
@@ -58,6 +63,7 @@ public struct HostConfig: Sendable {
         self.videoFormat = videoFormat
         self.namesakeModifiers = namesakeModifiers
         self.logInput = logInput
+        self.inputDelivery = inputDelivery
     }
 }
 
@@ -329,12 +335,14 @@ public final class HostSession: @unchecked Sendable {
             emit: { event in eventSink.yield(event) })
 
         // Phase 5 (issue #7): input injection. Client Input/RequestFocus become
-        // CGEvents + AX raises, translating window-local pixels through the one
-        // coordinate function (I-3). Modifier mapping is the Cmd-vs-Ctrl decision
-        // (default swaps Ctrl→Command). Shared by the CLI and the host app.
+        // CGEvents, translating window-local pixels through the one coordinate
+        // function (I-3). Modifier mapping is the Cmd-vs-Ctrl decision (default
+        // swaps Ctrl→Command). `inputDelivery` decides whether they reach the
+        // window in place or by raising it. Shared by the CLI and the host app.
         let injector = InputInjector(
             display: disp, registry: registry,
-            modifierMap: config.namesakeModifiers ? .namesake : .swap)
+            modifierMap: config.namesakeModifiers ? .namesake : .swap,
+            delivery: config.inputDelivery)
         if config.logInput { injector.onTrace = { line in print("  \(line)") } }
         self.injector = injector
 
@@ -346,8 +354,12 @@ public final class HostSession: @unchecked Sendable {
         await controlServer.setOnClientMessage { message in clientSink.yield(message) }
         await controlServer.setOnConnectionChange { [weak self] connected in
             self?.statsLock.withLock { self?.controlConnected = connected }
-            // A dropped client leaves no modifier or button held for the next one (issue #7).
-            if !connected { injector.reset() }
+            // A dropped client leaves no modifier or button held for the next one
+            // (issue #7), and no shared app still believing it is the active one.
+            if !connected {
+                injector.reset()
+                injector.releaseFocus()
+            }
         }
         let controlListener = try TCPListener(
             host: config.host, port: config.controlPort, label: "control")
@@ -461,7 +473,10 @@ public final class HostSession: @unchecked Sendable {
 
         let cap = DisplayCapture(display: disp, fps: config.fps,
             applicationPIDs: Set(([config.target] + config.additionalTargets).map(\.pid)),
-            pixelFormat: config.videoFormat.capturePixelFormat)
+            pixelFormat: config.videoFormat.capturePixelFormat,
+            // Background input never moves the Mac's cursor, so the one SCK would
+            // draw belongs to whoever is at the Mac, not to the client.
+            showsCursor: config.inputDelivery == .foreground)
         self.capture = cap
 
         let videoServer = VideoServer(hvccProvider: { enc.parameterSetsHVCC })
@@ -511,6 +526,7 @@ public final class HostSession: @unchecked Sendable {
         await controlServer?.stop()
         await videoServer?.stop()
         if let capture { await capture.stop() }
+        injector?.releaseFocus()
         encoder?.finish()
         eventSink?.finish()
         clientSink?.finish()

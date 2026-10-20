@@ -19,6 +19,7 @@ enum HostDefaults {
     static let chroma = "host.chroma"
     static let namesakeModifiers = "host.namesakeModifiers"
     static let logInput = "host.logInput"
+    static let foregroundInput = "host.foregroundInput"
     static let previewOutlines = "host.previewOutlines"
     static let previewLabels = "host.previewLabels"
 
@@ -224,9 +225,25 @@ private struct LayoutSettings: View {
 private struct InputSettings: View {
     @AppStorage(HostDefaults.namesakeModifiers) private var namesakeModifiers = false
     @AppStorage(HostDefaults.logInput) private var logInput = false
+    @AppStorage(HostDefaults.foregroundInput) private var foregroundInput = false
 
     var body: some View {
         Form {
+            Section("Delivery") {
+                Picker("Client input goes to", selection: $foregroundInput) {
+                    Text("The shared window, in the background (default)").tag(false)
+                    Text("The frontmost window, after raising it").tag(true)
+                }
+                .pickerStyle(.radioGroup)
+                Text(
+                    "In the background, clicks and keys reach the shared window even when "
+                        + "another window is on top of it: nothing is raised and this Mac's "
+                        + "cursor does not move, so you can keep working here. Raising "
+                        + "behaves like a person at the Mac and takes the cursor and focus. "
+                        + "Applies at the next Start."
+                )
+                .font(.caption2).foregroundStyle(.secondary)
+            }
             Section("Modifier mapping") {
                 Picker("Windows Ctrl maps to", selection: $namesakeModifiers) {
                     Text("⌘ Command (swap — default)").tag(false)

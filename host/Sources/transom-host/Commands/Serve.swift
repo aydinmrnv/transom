@@ -73,6 +73,13 @@ struct Serve: AsyncParsableCommand {
     @Flag(name: .long, help: "Print the full translation chain for every injected input event.")
     var logInput: Bool = false
 
+    @Option(
+        name: .long,
+        help:
+            "How client input reaches the Mac: background (sent to the shared window in place; it is never raised and the Mac's cursor does not move — default) or foreground (raise the window and drive the real cursor)."
+    )
+    var inputDelivery: String = InputDelivery.background.rawValue
+
     func run() async throws {
         // Stream output live: stdout is block-buffered to a pipe/file, so without
         // this the status lines never appear while the long-running server runs.
@@ -90,11 +97,16 @@ struct Serve: AsyncParsableCommand {
             throw ProbeError("unknown --chroma \"\(chroma)\"; expected 420 or 444.")
         }
 
+        guard let delivery = InputDelivery(rawValue: inputDelivery) else {
+            throw ProbeError(
+                "unknown --input-delivery \"\(inputDelivery)\"; expected background or foreground.")
+        }
+
         let config = HostConfig(
             target: target, display: disp, host: host, controlPort: controlPort,
             videoPort: videoPort, gutter: gutter, tile: tile, video: video,
             bitrateMbps: bitrate, fps: fps, videoFormat: videoFormat,
-            namesakeModifiers: namesakeModifiers, logInput: logInput
+            namesakeModifiers: namesakeModifiers, logInput: logInput, inputDelivery: delivery
         )
         let session = HostSession(config: config)
 

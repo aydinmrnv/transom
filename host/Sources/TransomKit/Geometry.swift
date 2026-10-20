@@ -150,4 +150,37 @@ public enum Coordinates {
             y: displayOriginPoints.y + vdsY / scale
         )
     }
+
+    /// The `location` to hand `NSEvent.mouseEvent(with:location:…windowNumber:…)`
+    /// so that an event posted to **another process** lands at `local` inside that
+    /// process's window (`InputDelivery.background`).
+    ///
+    /// This is the one sanctioned Y flip in the package, and it exists only
+    /// because it is the Cocoa boundary I-3 warns about. `NSEvent` takes a
+    /// bottom-left-origin, Y-up location; converting it to a `CGEvent` flips it
+    /// against the **main display's height** (it cannot know a foreign window's
+    /// height), and that flipped value is what the receiving AppKit reads as the
+    /// top-left-origin window-local point. Pre-flipping against the same height
+    /// cancels it:
+    ///
+    /// ```
+    /// window-local pt (top-left, Y down)
+    ///   -> (x, mainDisplayHeight - y)        this function
+    ///   -> NSEvent -> CGEvent flips it back  -> (x, y) window-local in the target
+    /// ```
+    ///
+    /// Measured on the Mac (architecture.md §8, background input finding): a
+    /// window-local `(164,255)` arrived as `locationInWindow (164,199)` in a
+    /// 454pt-tall window, i.e. exactly `454 - 255`.
+    ///
+    /// - Parameters:
+    ///   - local: the point relative to the receiving window's top-left, in
+    ///     points, Y down.
+    ///   - mainDisplayHeightPoints: `CGDisplayBounds(CGMainDisplayID()).height`.
+    public static func foreignWindowEventLocation(
+        fromWindowLocalPoints local: CGPoint,
+        mainDisplayHeightPoints: CGFloat
+    ) -> CGPoint {
+        CGPoint(x: local.x, y: mainDisplayHeightPoints - local.y)
+    }
 }

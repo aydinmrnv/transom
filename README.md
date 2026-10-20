@@ -151,9 +151,9 @@ private network and do not port-forward it.
 | `capture` | **real** | run the shared ScreenCaptureKit stream, verify no scaling (I-1) |
 | `encodeprobe` | **real** | probe HEVC 4:4:4 hardware encode (OQ-4) |
 | `encode` | **real** | capture + HEVC 4:4:4 10-bit hardware encode; report fps/bitrate |
-| `serve` | **real** | tile + watch an app, serve rects + video by default, drive the resize roundtrip (throttled AX writes, readback, I-4), and **inject client input** over TCP |
+| `serve` | **real** | tile + watch an app, serve rects + video by default, drive the resize roundtrip (throttled AX writes, readback, I-4), and **inject client input** over TCP. Input reaches shared windows in the background by default (no raise, the Mac's cursor stays put); `--input-delivery foreground` restores raise-and-click |
 | `mockresize` | **real** | mock client: drive a Live/End resize drag against `serve` and measure the ~10Hz throttle |
-| `inject` | **real** | post a click/text/chord into a window locally; log the full coordinate chain |
+| `inject` | **real** | post a click/text/chord/scroll into a window locally; log the full coordinate chain. `--delivery background` (default) leaves the window where it is; `foreground` raises it |
 | `mock-client` | **real** | stand-in client: connect to `serve` and post input events (issue #7 verification) |
 | `probe` | **real** | architecture de-risking experiments |
 | `menuwatch` | **real** | stream the focused app's windows/menus (answers OQ-1) |

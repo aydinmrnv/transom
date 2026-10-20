@@ -652,6 +652,72 @@ one? Unknown.
 > (capture, `WM_DPICHANGED` during a move, re-tiling a live session) is not
 > measured yet.
 
+> **BACKGROUND INPUT FINDING (2026-10-06, Mac host, macOS 27): input can be
+> delivered to a window that is neither frontmost nor visible, with public API
+> only.** The trigger: using the Mac while it is shared. The capture is filtered
+> to the shared apps (see "Selected apps must be filtered" below), so another
+> app's window on top of a shared one does not appear in the stream — but
+> `CGEventPost` at the HID tap is hit-tested by the WindowServer, so the click
+> landed on the window on top, and the `mouseDown` raise pulled the shared
+> window over what the person at the Mac was doing. Input now defaults to
+> `InputDelivery.background`; the old path is `foreground`.
+>
+> Measured against a scratch AppKit + `WKWebView` app kept behind another app's
+> window (so: covered, not frontmost), reading back what it received:
+>
+> 1. **`CGEvent.postToPid` keys work as-is.** They reach the app's key window
+>    while the app is inactive.
+> 2. **A plain `CGEvent` mouse event does not.** It arrives with
+>    `windowNumber == 0` and a screen location, and is dropped. The documented
+>    `mouseEventWindowUnderMousePointer` fields (91/92) do not change that.
+> 3. **`NSEvent.mouseEvent(…windowNumber:…).cgEvent`, posted to the pid, does.**
+>    It is the public way to address an event to a window. Its location is
+>    window-local; converting it to a `CGEvent` flips Y against the **main
+>    display height**, so the host pre-flips by the same height
+>    (`Coordinates.foreignWindowEventLocation`, the one sanctioned Y flip, at the
+>    Cocoa boundary I-3 names). Window-local `(164,255)` arrived as
+>    `locationInWindow (164,199)` in a 454pt-tall window — exact. Setting
+>    `location` on the event afterwards discards the window-local position.
+> 4. **Scroll has no `NSEvent` constructor.** An addressed mouse-moved event
+>    retyped to `.scrollWheel`, with the scroll deltas written through the public
+>    field setters, is delivered at the right point (`scroll dy=-3`; a web div
+>    scrolled 160px for 4 lines).
+> 5. **An inactive app's web content ignores the click.** `WKWebView` does not
+>    accept first mouse, so the click on a non-key window is spent making it key.
+>    Posting an `.appKitDefined` / `.applicationActivated` event makes the app
+>    believe it is active (`NSApp.isActive`, and AX `AXFrontmost`, turn true) while
+>    `NSWorkspace.frontmostApplication` and the WindowServer z-order are
+>    unchanged. A left click far outside the window then makes it key without
+>    hitting a view. After that: `mousedown`/`focus`/`click`/`input` all fired in
+>    the page, `document.hasFocus()` was true, and typed text landed.
+> 6. **That key-making click must clear the resize band.** At `(-1,-1)` AppKit's
+>    edge-resize gesture holds it and replays it ~0.5s later into the last view
+>    clicked — a stray DOM `click` on `<html>`. At `(-10000,-10000)` there is no
+>    replay.
+> 7. **Posting order is not delivery order across event kinds.** With 1ms between
+>    events, mouse events posted *after* the activation were handled *before* it
+>    and swallowed. The host waits for `AXFrontmost` to turn true (≤0.3s) before
+>    the click.
+> 8. **Activation is not idempotent** (each one fires `didBecomeActive`), so it is
+>    sent only when `AXFrontmost` is false, and undone with
+>    `.applicationDeactivated` when client focus leaves or the client drops —
+>    never for an app that really is frontmost.
+> 9. **A native menu is its own window.** A click on an item addressed to the
+>    parent window dismisses the menu; addressed to the menu's window it picks the
+>    item. So events are hit-tested against the target app's windows
+>    (`WindowServerWindows.topmost`), which is also the input-side mirror of the
+>    app-filtered capture. Opening a menu did bring its parent window forward.
+> 10. **OQ-3, for this purpose:** the shared AX window is matched to its
+>     `CGWindowID` by pid + frame (+ title on a tie). I-5 makes that unambiguous.
+>
+> Not solved, and worth knowing: a `WKWebView` window that is **fully** occluded
+> reports `visibilityState == "hidden"` and its content process stops servicing
+> input and paints until something wakes it — the reason I-5 exists. Partial
+> overlap does not trigger it. Hover is delivered only to the first responder;
+> the WindowServer's enter/exit tracking follows the real cursor. Verified through
+> `inject` and `serve` + `mock-client` on the Mac; **not** yet through the Windows
+> client, and not against Conductor or Xcode themselves.
+
 ### Operational finding: the prototype control port 7000 collides with AirPlay Receiver
 
 > **M2 FINDING (2026-07-15, Mac Studio, macOS 26): TCP 7000 is taken by
@@ -766,6 +832,7 @@ Why LaunchServices drops the pid for these three is not established.
 | A drag is translated against the rect at its `mouseDown` | A drag can move its own window; following the moving origin makes it run away (8, PointerRouter) |
 | `Live` throttled ~10Hz, `End` authoritative | AX cannot keep up with `WM_SIZING`; the last live is coalesced and flushed, never dropped; `End` is the 1:1 snap (2.1, ResizeThrottle) |
 | Accept the DWM frame | Many-windows requirement forecloses exclusive fullscreen (5) |
+| Input is delivered in the background by default | The Mac stays usable while shared: no raise, no cursor grab, and a window on top of a shared one does not steal the click (8, background input finding) |
 | Encoder pool deferred | Solves a problem we do not have at 2-3 windows (3.4) |
 
 ## Window gallery and native chrome (0.4.0)

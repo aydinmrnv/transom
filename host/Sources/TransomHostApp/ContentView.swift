@@ -27,6 +27,7 @@ struct ContentView: View {
     @AppStorage(HostDefaults.chroma) private var chroma = HEVCEncoder.Format.hevc420_8bit.rawValue
     @AppStorage(HostDefaults.namesakeModifiers) private var namesakeModifiers = false
     @AppStorage(HostDefaults.logInput) private var logInput = false
+    @AppStorage(HostDefaults.foregroundInput) private var foregroundInput = false
     private let timer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
     private let accent = Color(red: 0.15, green: 0.36, blue: 0.86)
     private var effectiveAddress: String { activeAddress ?? (automaticAddress ? detectedAddress : bindAddress) }
@@ -325,6 +326,7 @@ struct ContentView: View {
             videoPort: UInt16(clamping: videoPort), gutter: gutter, tile: true,
             video: videoEnabled, bitrateMbps: bitrateMbps, fps: fps,
             videoFormat: HEVCEncoder.Format(rawValue: chroma) ?? .hevc420_8bit,
-            namesakeModifiers: namesakeModifiers, logInput: logInput))
+            namesakeModifiers: namesakeModifiers, logInput: logInput,
+            inputDelivery: foregroundInput ? .foreground : .background))
     }
 }

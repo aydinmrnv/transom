@@ -30,6 +30,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     private let display: DisplayInfo
     private let fps: Int
     private let applicationPIDs: Set<pid_t>?
+    private let showsCursor: Bool
     private let pixelFormat: OSType
     private let queue = DispatchQueue(label: "one.transom.host.capture")
     // Accessed only on the capture queue, including explicit refreshes.
@@ -57,12 +58,13 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
     public init(
         display: DisplayInfo, fps: Int = 60, applicationPIDs: Set<pid_t>? = nil,
-        pixelFormat: OSType = kCVPixelFormatType_32BGRA
+        pixelFormat: OSType = kCVPixelFormatType_32BGRA, showsCursor: Bool = true
     ) {
         self.display = display
         self.fps = fps
         self.applicationPIDs = applicationPIDs
         self.pixelFormat = pixelFormat
+        self.showsCursor = showsCursor
         super.init()
     }
 
@@ -100,7 +102,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         config.pixelFormat = pixelFormat
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         config.queueDepth = 5
-        config.showsCursor = true
+        config.showsCursor = showsCursor
         config.scalesToFit = false
         // ScreenCaptureKit declares backgroundColor as unowned(unsafe). Keep the
         // CGColor alive through SCStream's configuration copy; releasing the

@@ -15,7 +15,7 @@ import TransomKit
 /// uses. `mock-client` exercises the same path *over the wire*.
 ///
 /// Actions run in this order when combined: `--focus`, click (`--x`/`--y`),
-/// `--type`, `--chord`.
+/// `--scroll`, `--type`, `--chord`.
 struct Inject: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "inject",
@@ -40,6 +40,14 @@ struct Inject: ParsableCommand {
     @Option(name: .long, help: "Mouse button for the click: left | right | middle.")
     var button: String = "left"
 
+    @Option(name: .long, help: "How many times to click at --x/--y (2 = a double-click).")
+    var clicks: Int = 1
+
+    @Option(
+        name: .long,
+        help: "After any click, scroll this many lines at --x/--y (negative = down; --scroll=-3).")
+    var scroll: Int32?
+
     @Option(name: .long, help: "Type this text into the window.")
     var type: String?
 
@@ -54,6 +62,13 @@ struct Inject: ParsableCommand {
         name: .long,
         help: "Map modifiers namesake (Ctrl→Control) instead of the default swap (Ctrl→Command).")
     var namesakeModifiers: Bool = false
+
+    @Option(
+        name: .long,
+        help:
+            "background (post to the app in place; no raise, the real cursor stays put) or foreground (raise + HID tap, the path the cursor readback measures)."
+    )
+    var delivery: String = InputDelivery.background.rawValue
 
     /// Inter-event delay so the target app registers each event (mouse down/up
     /// pacing, key repeat). CGEventPost is synchronous but delivery is not.
@@ -75,6 +90,10 @@ struct Inject: ParsableCommand {
         }
         guard let disp = TransomKit.Displays.byID(display) else {
             throw ProbeError("no active display with id \(display). See `displays`.")
+        }
+        guard let delivery = InputDelivery(rawValue: delivery) else {
+            throw ProbeError(
+                "unknown --delivery \"\(self.delivery)\"; expected background or foreground.")
         }
 
         let windows = AXWindow.windows(pid: target.pid)
@@ -101,7 +120,7 @@ struct Inject: ParsableCommand {
 
         let injector = InputInjector(
             display: disp, registry: registry,
-            modifierMap: namesakeModifiers ? .namesake : .swap)
+            modifierMap: namesakeModifiers ? .namesake : .swap, delivery: delivery)
         injector.onTrace = { line in print("  \(line)") }
 
         print("inject: \(target.name) window[\(index)] \"\(window.title)\" on display \(display)")
@@ -111,6 +130,7 @@ struct Inject: ParsableCommand {
         print("  window VDS rect (px): x=\(rect.x) y=\(rect.y) w=\(rect.w) h=\(rect.h)")
         print(
             "  modifiers: \(namesakeModifiers ? "namesake (Ctrl→Control)" : "swap (Ctrl→Command)")")
+        print("  delivery: \(delivery.rawValue)")
         print(String(repeating: "-", count: 60))
 
         var didSomething = false
@@ -130,10 +150,16 @@ struct Inject: ParsableCommand {
             let uy = UInt32(clamping: y)
             injector.inject(id: id, event: .mouseMove(x: ux, y: uy), ts: ts)
             step()
-            injector.inject(id: id, event: .mouseDown(x: ux, y: uy, button: mb), ts: ts)
-            step()
-            injector.inject(id: id, event: .mouseUp(x: ux, y: uy, button: mb), ts: ts)
-            step()
+            for _ in 0..<max(clicks, 1) {
+                injector.inject(id: id, event: .mouseDown(x: ux, y: uy, button: mb), ts: ts)
+                step()
+                injector.inject(id: id, event: .mouseUp(x: ux, y: uy, button: mb), ts: ts)
+                step()
+            }
+            if let scroll {
+                injector.inject(id: id, event: .scroll(x: ux, y: uy, dx: 0, dy: scroll), ts: ts)
+                step()
+            }
             didSomething = true
 
             // Empirical coordinate-space check (issue #7): after posting, the real
@@ -144,7 +170,11 @@ struct Inject: ParsableCommand {
                 fromWindowLocalPixels: CGPoint(x: Double(ux), y: Double(uy)),
                 windowOriginVDS: CGPoint(x: Double(rect.x), y: Double(rect.y)),
                 displayOriginPoints: disp.originPoints, scale: disp.scale)
-            if let actual = CGEvent(source: nil)?.location {
+            // Only the foreground path moves the cursor; in the background the
+            // proof is that it did NOT move, and the target app shows the effect.
+            if delivery == .background {
+                print("  cursor: left alone (background delivery does not move it)")
+            } else if let actual = CGEvent(source: nil)?.location {
                 let dx = actual.x - expected.x
                 let dy = actual.y - expected.y
                 let ok = abs(dx) <= 1 && abs(dy) <= 1

@@ -210,9 +210,11 @@ Concrete bytes on the wire (one framed control message):
   punctuation, and the numeric keypad, for the **US/ANSI** layout; the character a
   key produces depends on the Mac's active layout.
 
-**Pointer routing.** The host can only post a pointer event as a global HID
-event, so whatever window sits under the resulting point receives it. These rules
-keep an event addressed to one window from reaching another:
+**Pointer routing.** With `foreground` delivery (below) the host posts a pointer
+event as a global HID event, so whatever window sits under the resulting point
+receives it; `background` delivery addresses the event to a window but still
+translates it through the window's rect. These rules keep an event addressed to
+one window from reaching another:
 
 - **Points are inside the window.** The client sends only `x < rect.w` and
   `y < rect.h` for the window's current rect. Its proxy can be larger than that
@@ -248,11 +250,35 @@ The host does **not** synthesize repeats. Pick one, not both — this is the one
 ⌘). This is a **host-side policy**: the wire always carries raw Windows VK codes,
 so the client is unaffected by the choice and needs no changes if it flips.
 
-**Focus/raise.** `RequestFocus` raises the target Mac window (AX raise + activate
-its app). A `mouseDown` on a window that is not frontmost also raises it first, so
-the click lands in the right place. Raising changes the Mac's one frontmost app
-and key window; a client-"focused" window may still render unfocused until the
-raise happens (accepted, see issue #7 / invariants I-4).
+**Focus and delivery.** How input reaches the Mac window is a **host-side policy**
+(`serve --input-delivery`, the host app's Input settings); the wire is identical
+either way and the client needs no changes.
+
+- **`background` (default).** Each event is sent straight to the app that owns the
+  window, addressed to that window. **Nothing is raised, the Mac's frontmost app
+  does not change, and the Mac's real cursor does not move** — so input reaches a
+  shared window that is behind, or covered by, some other app's window, and a
+  person can keep using the Mac. `RequestFocus` (and a `mouseDown`, and a key
+  event for a window that did not have client focus) makes the target app treat
+  itself as active and the window as key *in place*, so the window renders
+  focused in the stream and accepts the click. Key events go to the app owning
+  the `id` they carry, so the client must send the focused proxy's `id` on
+  `keyDown`/`keyUp` (it does). The click is hit-tested against **that app's
+  windows only** — an open menu or sheet of the app takes it, another app's
+  window on top does not — mirroring the app-filtered capture.
+- **`foreground`.** `RequestFocus` raises the Mac window (AX raise + activate its
+  app), a `mouseDown` on a window that is not frontmost raises it first, and
+  events are posted as real HID input. This changes the Mac's one frontmost app
+  and moves its cursor; a client-"focused" window may render unfocused until the
+  raise happens (issue #7 / invariants I-4).
+
+Limits of `background`, measured on the Mac (architecture.md §8): hover reaches a
+view only once it is first responder (the WindowServer's enter/exit tracking
+follows the real cursor); dragging a window by its Mac title bar does nothing
+(the client owns geometry anyway, I-4); opening a native menu can bring its
+window forward; and a shared window that is **completely** covered may stop
+painting and handling input, because the app is told it is hidden — partial
+overlap is fine.
 
 ### Types
 
@@ -403,12 +429,21 @@ best-effort may be fine and timestamp correlation can be dropped.
 
 ## 8. Cursor (resolved) and what is still deferred
 
-**Cursor: captured, not synthesized.** The host sets
-`SCStreamConfiguration.showsCursor = true`, so the real Mac cursor is already in
-the captured frame, pixel-correct, for free. Input posts `CGEvent`s (Phase 5),
-the real cursor moves, SCK captures it. **The client hides its own OS cursor when
-it is over a proxy window** so there are not two cursors. Simplest correct answer
-for v1.
+**Cursor: the client's own.** The pointer the user steers is the Windows cursor,
+which the client leaves visible over a proxy window. What the stream adds depends
+on the input delivery mode (§4):
+
+- **`background` (default):** the Mac's cursor is neither moved nor captured
+  (`SCStreamConfiguration.showsCursor = false`). It belongs to whoever is at the
+  Mac; drawing it would put a second pointer in the stream that the client does
+  not control. The cost is that the Mac cursor's *shape* (I-beam, resize arrows)
+  is not visible to the client.
+- **`foreground`:** input moves the real Mac cursor and the host captures it
+  (`showsCursor = true`), so it appears in the frame, pixel-correct, under the
+  client's own.
+
+This section used to say the client hides its OS cursor over a proxy. It never
+did, and with `background` delivery it must not: there would be no pointer left.
 
 Still deferred:
 
