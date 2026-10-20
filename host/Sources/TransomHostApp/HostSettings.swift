@@ -1,3 +1,4 @@
+import ServiceManagement
 import SwiftUI
 import TransomKit
 
@@ -22,6 +23,70 @@ enum HostDefaults {
     static let foregroundInput = "host.foregroundInput"
     static let previewOutlines = "host.previewOutlines"
     static let previewLabels = "host.previewLabels"
+    static let restoreWindows = "host.restoreWindows"
+    static let showAccessoryApps = "host.showAccessoryApps"
+    /// Newline-separated bundle ids of the apps chosen for sharing.
+    static let sharedApps = "sharedAppBundleIDs"
+
+    // App behaviour: the menu bar, the Dock icon, launch.
+    static let showMenuBarIcon = "app.showMenuBarIcon"
+    static let minimizeToMenuBar = "app.minimizeToMenuBar"
+    static let keepRunningWhenClosed = "app.keepRunningWhenClosed"
+    static let hideDockIconInMenuBar = "app.hideDockIconInMenuBar"
+    static let openWindowOnLaunch = "app.openWindowOnLaunch"
+    static let startSharingOnLaunch = "app.startSharingOnLaunch"
+    static let confirmQuitWhileSharing = "app.confirmQuitWhileSharing"
+
+    // Appearance. See `Appearance.swift`.
+    static let accentColor = "appearance.accentColor"
+    static let theme = "appearance.theme"
+    static let cardSize = "appearance.cardSize"
+    static let menuBarSymbol = "appearance.menuBarSymbol"
+    static let menuBarShowsCount = "appearance.menuBarShowsCount"
+    static let showSidebar = "appearance.showSidebar"
+    static let tintSidebar = "appearance.tintSidebar"
+    static let showThumbnails = "appearance.showThumbnails"
+
+    static let defaultBitrateMbps = 40
+    static let defaultFPS = 60
+
+    /// The one place defaults live. Registered at launch, so `UserDefaults`
+    /// reads in the model and `@AppStorage` in the views agree on an unset key.
+    static func register() {
+        UserDefaults.standard.register(defaults: [
+            automaticAddress: true,
+            bindAddress: "127.0.0.1",
+            controlPort: defaultControlPort,
+            videoPort: defaultVideoPort,
+            bitrateMbps: defaultBitrateMbps,
+            fps: defaultFPS,
+            gutter: Tiler.defaultGutter,
+            video: true,
+            chroma: HEVCEncoder.Format.hevc420_8bit.rawValue,
+            namesakeModifiers: false,
+            logInput: false,
+            foregroundInput: false,
+            previewOutlines: true,
+            previewLabels: true,
+            restoreWindows: true,
+            showAccessoryApps: true,
+            showMenuBarIcon: true,
+            minimizeToMenuBar: true,
+            keepRunningWhenClosed: true,
+            hideDockIconInMenuBar: true,
+            openWindowOnLaunch: true,
+            startSharingOnLaunch: false,
+            confirmQuitWhileSharing: true,
+            accentColor: AccentChoice.defaultID,
+            theme: AppTheme.system.rawValue,
+            cardSize: CardSize.regular.rawValue,
+            menuBarSymbol: MenuBarSymbol.defaultSymbol,
+            menuBarShowsCount: true,
+            showSidebar: true,
+            tintSidebar: false,
+            showThumbnails: true,
+        ])
+    }
 
     /// Valid TCP port range. Start is gated on both ports falling inside it so a
     /// value never gets silently clamped into a different endpoint at serve time.
@@ -69,18 +134,106 @@ enum HostDefaults {
 /// toggles live. This is where the knobs that used to crowd the main window now
 /// live, leaving the main window to the act of *starting a session*.
 struct HostSettingsView: View {
+    @AppStorage(HostDefaults.accentColor) private var accentID = AccentChoice.defaultID
+
     var body: some View {
         TabView {
+            GeneralSettings()
+                .tabItem { Label("General", systemImage: "gearshape") }
+            AppearanceSettings()
+                .tabItem { Label("Appearance", systemImage: "paintpalette") }
             ConnectionSettings()
                 .tabItem { Label("Connection", systemImage: "network") }
             VideoSettings()
                 .tabItem { Label("Video", systemImage: "video") }
             LayoutSettings()
-                .tabItem { Label("Layout", systemImage: "rectangle.3.group") }
+                .tabItem { Label("Windows", systemImage: "rectangle.3.group") }
             InputSettings()
                 .tabItem { Label("Input", systemImage: "keyboard") }
         }
-        .frame(width: 460, height: 380)
+        .frame(width: 520, height: 500)
+        .tint(AccentChoice.color(for: accentID))
+    }
+}
+
+// MARK: - General
+
+private struct GeneralSettings: View {
+    @AppStorage(HostDefaults.showMenuBarIcon) private var showMenuBarIcon = true
+    @AppStorage(HostDefaults.minimizeToMenuBar) private var minimizeToMenuBar = true
+    @AppStorage(HostDefaults.keepRunningWhenClosed) private var keepRunningWhenClosed = true
+    @AppStorage(HostDefaults.hideDockIconInMenuBar) private var hideDockIcon = true
+    @AppStorage(HostDefaults.openWindowOnLaunch) private var openWindowOnLaunch = true
+    @AppStorage(HostDefaults.startSharingOnLaunch) private var startSharingOnLaunch = false
+    @AppStorage(HostDefaults.confirmQuitWhileSharing) private var confirmQuit = true
+    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var loginItemStatus = SMAppService.mainApp.status
+    @State private var loginItemError: String?
+
+    var body: some View {
+        Form {
+            Section("Menu bar") {
+                Toggle("Show Transom in the menu bar", isOn: $showMenuBarIcon)
+                Group {
+                    Toggle("Minimize the window to the menu bar", isOn: $minimizeToMenuBar)
+                    Toggle("Keep running in the menu bar when the window is closed", isOn: $keepRunningWhenClosed)
+                    Toggle("Hide the Dock icon while only in the menu bar", isOn: $hideDockIcon)
+                }
+                .disabled(!showMenuBarIcon)
+                Text(
+                    "The menu bar icon starts and stops sharing and shows what your PC can see, "
+                        + "so the window can stay out of the way."
+                )
+                .font(.caption2).foregroundStyle(.secondary)
+            }
+            Section("Launch") {
+                Toggle("Open at login", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { _, enabled in setLaunchAtLogin(enabled) }
+                if loginItemStatus == .requiresApproval {
+                    HStack {
+                        Text("Approve Transom Host in Login Items to finish.")
+                            .font(.caption).foregroundStyle(.orange)
+                        Spacer()
+                        Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
+                            .controlSize(.small)
+                    }
+                }
+                if let loginItemError {
+                    Text(loginItemError).font(.caption).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Toggle("Show the window at launch", isOn: $openWindowOnLaunch)
+                    .disabled(!showMenuBarIcon)
+                Toggle("Start sharing the chosen apps at launch", isOn: $startSharingOnLaunch)
+                Text(
+                    "Starts as soon as the apps you last chose are running and permissions and "
+                        + "the network are ready."
+                )
+                .font(.caption2).foregroundStyle(.secondary)
+            }
+            Section("Quit") {
+                Toggle("Ask before quitting while sharing", isOn: $confirmQuit)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { loginItemStatus = SMAppService.mainApp.status }
+    }
+
+    private func setLaunchAtLogin(_ enabled: Bool) {
+        let service = SMAppService.mainApp
+        loginItemError = nil
+        do {
+            if enabled {
+                if service.status != .enabled { try service.register() }
+            } else if service.status == .enabled || service.status == .requiresApproval {
+                try service.unregister()
+            }
+        } catch {
+            loginItemError = "Could not change the login item: \(error.localizedDescription)"
+        }
+        loginItemStatus = service.status
+        let effective = service.status == .enabled || service.status == .requiresApproval
+        if effective != enabled { launchAtLogin = effective }
     }
 }
 
@@ -152,8 +305,8 @@ private struct ConnectionSettings: View {
 private struct VideoSettings: View {
     @AppStorage(HostDefaults.video) private var videoEnabled = true
     @AppStorage(HostDefaults.chroma) private var chroma = HEVCEncoder.Format.hevc420_8bit.rawValue
-    @AppStorage(HostDefaults.fps) private var fps = 60
-    @AppStorage(HostDefaults.bitrateMbps) private var bitrateMbps = 40
+    @AppStorage(HostDefaults.fps) private var fps = HostDefaults.defaultFPS
+    @AppStorage(HostDefaults.bitrateMbps) private var bitrateMbps = HostDefaults.defaultBitrateMbps
 
     var body: some View {
         Form {
@@ -198,14 +351,29 @@ private struct LayoutSettings: View {
     @AppStorage(HostDefaults.gutter) private var gutter = Tiler.defaultGutter
     @AppStorage(HostDefaults.previewOutlines) private var previewOutlines = true
     @AppStorage(HostDefaults.previewLabels) private var previewLabels = true
+    @AppStorage(HostDefaults.restoreWindows) private var restoreWindows = true
+    @AppStorage(HostDefaults.showAccessoryApps) private var showAccessoryApps = true
 
     var body: some View {
         Form {
+            Section("Which windows") {
+                Toggle("Bring hidden, minimized and full-screen windows to the display", isOn: $restoreWindows)
+                Text(
+                    "When sharing starts, hidden apps are shown and their minimized and full-screen "
+                        + "windows are restored, so every window of a chosen app reaches your PC. "
+                        + "Off shares only windows already on the display."
+                )
+                .font(.caption2).foregroundStyle(.secondary)
+                Toggle("List menu bar apps that have a window open", isOn: $showAccessoryApps)
+                Text("Utilities that live in the menu bar can be shared while one of their windows is open.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             Section("Tiling") {
                 TextField("Gutter (px)", value: $gutter, format: .number.grouping(.never))
                 Text(
-                    "Space left between tiled windows when the session starts. Windows are laid out "
-                        + "once, non-overlapping (I-5). Applies at the next Start."
+                    "Space left between tiled windows, so menus and popovers that overhang a window "
+                        + "do not land on its neighbour. A smaller gutter fits more windows; any that "
+                        + "do not fit are minimized and listed. Applies at the next Start."
                 )
                 .font(.caption2).foregroundStyle(.secondary)
             }

@@ -110,7 +110,7 @@ run from a terminal has those grants attributed to the *terminal*, not the binar
 
 | App | Bundle id | What it is |
 | --- | --- | --- |
-| **Transom Host** | `one.nullstack.transom.host` | One-window control panel over `serve`: permissions, pick a display + app, Start, and live status (client connected, fps/bitrate, encoder mode, tile layout with post-clamp deltas). |
+| **Transom Host** | `one.nullstack.transom.host` | Control panel over `serve`: permissions, pick a display + apps, Start, and live status (client connected, fps/bitrate, encoder mode, tile layout with post-clamp deltas). Lives in the menu bar too: start/stop sharing there, and minimize or close the window into it. Settings cover launch at login, auto-start, theme, accent color, card size and the menu bar icon. |
 | **Transom Probe** | `one.nullstack.transom.probe` | The M0 diagnostic probe (OQ-1/OQ-2/OQ-5). |
 
 Build and package both signed bundles (hardened runtime), then run one:

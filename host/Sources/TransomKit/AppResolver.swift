@@ -72,13 +72,30 @@ public enum AppResolver {
         }
     }
 
-    /// Every regular/accessory app currently running, for pickers.
-    public static func runningApps() -> [TargetApp] {
+    /// Every regular app currently running, for pickers.
+    ///
+    /// With `includingAccessoryApps`, also menu bar and background apps
+    /// (`.accessory`) that have a real window on screen right now, such as a
+    /// utility's settings window. Without a window there is nothing to share, so
+    /// the dozens of windowless agents stay out of the picker.
+    public static func runningApps(includingAccessoryApps: Bool = false) -> [TargetApp] {
         var pids = LivePIDs()
+        let withWindows: Set<pid_t> =
+            includingAccessoryApps
+            ? Set(
+                WindowServerWindows.onScreen().filter {
+                    $0.layer == 0 && $0.alpha > 0 && $0.bounds.width >= 100
+                        && $0.bounds.height >= 100
+                }.map(\.pid))
+            : []
         return NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular }
+            .filter {
+                $0.activationPolicy == .regular
+                    || (includingAccessoryApps && $0.activationPolicy == .accessory)
+            }
             .compactMap { app in
                 guard let name = app.localizedName, let pid = pids.pid(of: app) else { return nil }
+                if app.activationPolicy == .accessory && !withWindows.contains(pid) { return nil }
                 return TargetApp(
                     pid: pid,
                     name: name,

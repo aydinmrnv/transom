@@ -6,52 +6,36 @@ import TransomKit
 
 struct ContentView: View {
     @ObservedObject var host: HostAppModel
-    @State private var displays: [DisplayInfo] = []
-    @State private var apps: [TargetApp] = []
-    @State private var selectedPIDs: Set<pid_t> = []
-    @State private var selectedDisplayID: CGDirectDisplayID = 0
-    @State private var screenRecording = false
-    @State private var accessibility = false
-    @State private var detectedAddress = HostDiscovery.localAddresses().first ?? ""
-    @State private var activeAddress: String?
     @State private var search = ""
-    @AppStorage("sharedAppBundleIDs") private var savedApps = ""
-    @AppStorage(HostDefaults.bindAddress) private var bindAddress = "127.0.0.1"
-    @AppStorage(HostDefaults.automaticAddress) private var automaticAddress = true
     @AppStorage(HostDefaults.controlPort) private var controlPort = HostDefaults.defaultControlPort
     @AppStorage(HostDefaults.videoPort) private var videoPort = HostDefaults.defaultVideoPort
-    @AppStorage(HostDefaults.bitrateMbps) private var bitrateMbps = 40
-    @AppStorage(HostDefaults.fps) private var fps = 60
-    @AppStorage(HostDefaults.gutter) private var gutter = Tiler.defaultGutter
     @AppStorage(HostDefaults.video) private var videoEnabled = true
-    @AppStorage(HostDefaults.chroma) private var chroma = HEVCEncoder.Format.hevc420_8bit.rawValue
-    @AppStorage(HostDefaults.namesakeModifiers) private var namesakeModifiers = false
-    @AppStorage(HostDefaults.logInput) private var logInput = false
-    @AppStorage(HostDefaults.foregroundInput) private var foregroundInput = false
-    private let timer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
-    private let accent = Color(red: 0.15, green: 0.36, blue: 0.86)
-    private var effectiveAddress: String { activeAddress ?? (automaticAddress ? detectedAddress : bindAddress) }
-    private var hostIsAssigned: Bool {
-        effectiveAddress.hasPrefix("127.") || HostDiscovery.localAddresses().contains(effectiveAddress)
-    }
-    private var permissionsReady: Bool { accessibility && (!videoEnabled || screenRecording) }
-    private var portsValid: Bool {
-        HostDefaults.portRange.contains(controlPort) && HostDefaults.portRange.contains(videoPort)
-            && (!videoEnabled || controlPort != videoPort)
-    }
-    private var canStart: Bool {
-        permissionsReady && !selectedPIDs.isEmpty && selectedDisplayID != 0
-            && PrivateAddress.isPrivateIPv4(effectiveAddress) && hostIsAssigned && portsValid && !host.starting
-    }
+    @AppStorage(HostDefaults.automaticAddress) private var automaticAddress = true
+    @AppStorage(HostDefaults.bindAddress) private var bindAddress = "127.0.0.1"
+    @AppStorage(HostDefaults.showAccessoryApps) private var showAccessoryApps = true
+    @AppStorage(HostDefaults.restoreWindows) private var restoreWindows = true
+    @AppStorage(HostDefaults.accentColor) private var accentID = AccentChoice.defaultID
+    @AppStorage(HostDefaults.cardSize) private var cardSizeRaw = CardSize.regular.rawValue
+    @AppStorage(HostDefaults.showSidebar) private var showSidebar = true
+    @AppStorage(HostDefaults.tintSidebar) private var tintSidebar = false
+    @AppStorage(HostDefaults.showThumbnails) private var showThumbnails = true
+    @AppStorage(HostDefaults.showMenuBarIcon) private var showMenuBarIcon = true
+    @AppStorage(HostDefaults.minimizeToMenuBar) private var minimizeToMenuBar = true
+    @Environment(\.openWindow) private var openWindow
+
+    private var accent: Color { AccentChoice.color(for: accentID) }
+    private var cardSize: CardSize { CardSize(rawValue: cardSizeRaw) ?? .regular }
 
     var body: some View {
         HStack(spacing: 0) {
-            sidebar
-            Divider()
+            if showSidebar {
+                sidebar
+                Divider()
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
                     header
-                    if !permissionsReady { permissionSetup }
+                    if !host.permissionsReady { permissionSetup }
                     if let error = host.startError {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.callout).foregroundStyle(.red).textSelection(.enabled)
@@ -66,14 +50,15 @@ struct ContentView: View {
             .background(Color(nsColor: .controlBackgroundColor))
         }
         .tint(accent)
-        .onAppear(perform: refreshAll)
-        .onReceive(timer) { _ in
-            refreshPermissions()
-            if !host.running && !host.starting {
-                activeAddress = nil
-                detectedAddress = HostDiscovery.localAddresses().first ?? ""
-            }
+        .background(WindowAccessor())
+        .onAppear {
+            host.refreshAll()
+            host.previewVisible = true
+            MainWindowController.shared.openWindowAction = openWindow
         }
+        .onChange(of: showAccessoryApps) { _, _ in host.refreshApps() }
+        .onChange(of: minimizeToMenuBar) { _, _ in MainWindowController.shared.applyButtonBehaviour() }
+        .onChange(of: showMenuBarIcon) { _, _ in MainWindowController.shared.applyButtonBehaviour() }
     }
 
     private var sidebar: some View {
@@ -91,15 +76,24 @@ struct ContentView: View {
                 .font(.callout)
             Divider()
             VStack(alignment: .leading, spacing: 12) {
-                Label(accessibility ? "Control ready" : "Control permission needed",
-                    systemImage: accessibility ? "checkmark.circle" : "exclamationmark.circle")
-                Label(screenRecording ? "Video ready" : "Video permission needed",
-                    systemImage: screenRecording ? "checkmark.circle" : "exclamationmark.circle")
+                Label(host.accessibility ? "Control ready" : "Control permission needed",
+                    systemImage: host.accessibility ? "checkmark.circle" : "exclamationmark.circle")
+                Label(host.screenRecording ? "Video ready" : "Video permission needed",
+                    systemImage: host.screenRecording ? "checkmark.circle" : "exclamationmark.circle")
             }
             .font(.caption).foregroundStyle(.secondary)
             Spacer()
-            Text("Keep this app open while using your Mac windows on Windows.")
+            Text(showMenuBarIcon
+                ? "Sharing keeps running from the menu bar when this window is closed."
+                : "Keep this app open while using your Mac windows on Windows.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if showMenuBarIcon {
+                Button { MainWindowController.shared.hideToMenuBar() } label: {
+                    Label("Hide to menu bar", systemImage: "menubar.arrow.up.rectangle")
+                }
+                .buttonStyle(.borderless)
+                .help("Hide this window. Transom stays in the menu bar (⌃⌘M).")
+            }
             SettingsLink { Label("Settings", systemImage: "gearshape") }
                 .buttonStyle(.borderless)
             Text("Transom \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")")
@@ -108,7 +102,14 @@ struct ContentView: View {
         .padding(24)
         .frame(width: 220)
         .frame(maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(sidebarBackground)
+    }
+
+    private var sidebarBackground: some View {
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
+            if tintSidebar { accent.opacity(0.10) }
+        }
     }
 
     private var header: some View {
@@ -127,9 +128,10 @@ struct ContentView: View {
                     .controlSize(.large).buttonStyle(.bordered)
                     .help("Stop sharing (⇧⌥⌘D). Your Mac windows stay open.")
             } else {
-                Button(host.starting ? "Starting…" : "Start sharing", action: startSharing)
+                Button(host.starting ? "Starting…" : "Start sharing") { host.startSharing() }
                     .controlSize(.large).buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction).disabled(!canStart)
+                    .keyboardShortcut(.defaultAction).disabled(!host.canStart)
+                    .help(host.startBlocker ?? "Start sharing (⇧⌥⌘S)")
             }
         }
     }
@@ -137,29 +139,32 @@ struct ContentView: View {
     private var appSelection: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Picker("Sharing display", selection: $selectedDisplayID) {
+                Picker("Sharing display", selection: $host.selectedDisplayID) {
                     Text("Choose a display").tag(CGDirectDisplayID(0))
-                    ForEach(displays, id: \.id) { display in
+                    ForEach(host.displays, id: \.id) { display in
                         Text("\(display.pixelWidth) × \(display.pixelHeight)\(display.isMain ? " (main)" : "")")
                             .tag(display.id)
                     }
                 }.frame(maxWidth: 330)
                 Spacer()
-                Button(action: refreshAll) { Label("Refresh", systemImage: "arrow.clockwise") }
+                Button(action: host.refreshAll) { Label("Refresh", systemImage: "arrow.clockwise") }
             }
             Text("Use your virtual display. Shared windows move there while you work on the PC.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
-                Text("\(selectedPIDs.count) apps selected").font(.callout.weight(.medium))
+                Text("\(host.selectedPIDs.count) apps selected").font(.callout.weight(.medium))
                 Spacer()
                 TextField("Find an app", text: $search).textFieldStyle(.roundedBorder).frame(width: 220)
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 14)], spacing: 14) {
-                ForEach(apps.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }, id: \.pid) { app in
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: cardSize.appCardMinWidth), spacing: 14)],
+                spacing: 14
+            ) {
+                ForEach(host.apps.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }, id: \.pid) { app in
                     appCard(app)
                 }
             }
-            if apps.isEmpty {
+            if host.apps.isEmpty {
                 ContentUnavailableView("No apps available", systemImage: "macwindow",
                     description: Text("Open an app on this Mac, then choose Refresh."))
             }
@@ -168,15 +173,14 @@ struct ContentView: View {
     }
 
     private func appCard(_ app: TargetApp) -> some View {
-        let selected = selectedPIDs.contains(app.pid)
+        let selected = host.isSelected(app)
         return Button {
-            if selected { selectedPIDs.remove(app.pid) } else { selectedPIDs.insert(app.pid) }
-            savedApps = apps.filter { selectedPIDs.contains($0.pid) }.compactMap(\.bundleID).joined(separator: "\n")
+            host.toggle(app)
         } label: {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: cardSize == .compact ? 8 : 14) {
                 HStack {
                     if let icon = NSRunningApplication(processIdentifier: app.pid)?.icon {
-                        Image(nsImage: icon).resizable().frame(width: 44, height: 44)
+                        Image(nsImage: icon).resizable().frame(width: cardSize.iconSize, height: cardSize.iconSize)
                     } else { Image(systemName: "macwindow").font(.largeTitle) }
                     Spacer()
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
@@ -185,16 +189,37 @@ struct ContentView: View {
                 }
                 Text(app.name).font(.headline).lineLimit(1)
                     .foregroundStyle(.primary)
-                Text(selected ? "Ready to share" : "Select app")
+                Text(cardDetail(app, selected: selected))
                     .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(2, reservesSpace: true)
             }
-            .padding(18).frame(maxWidth: .infinity, alignment: .leading)
+            .padding(cardSize.padding).frame(maxWidth: .infinity, alignment: .leading)
             .background(selected ? accent.opacity(0.06) : Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(selected ? accent : Color.secondary.opacity(0.18), lineWidth: selected ? 2 : 1))
             .contentShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(app.name).accessibilityValue(selected ? "Selected" : "Not selected")
+    }
+
+    /// What will happen to this app's windows, so a hidden or minimized app
+    /// does not look like it has nothing to share.
+    private func cardDetail(_ app: TargetApp, selected: Bool) -> String {
+        guard let summary = host.summaries[app.pid] else {
+            return selected ? "Ready to share" : "Select app"
+        }
+        if summary.windows == 0 { return "No windows open" }
+        let count = "\(summary.windows) window\(summary.windows == 1 ? "" : "s")"
+        if summary.hidden {
+            return restoreWindows ? "\(count) · hidden, shown when sharing" : "\(count) · hidden, not shared"
+        }
+        if summary.offDisplay > 0 {
+            let what = summary.fullScreen > 0 && summary.minimized == 0 ? "full screen" : "minimized"
+            return restoreWindows
+                ? "\(count) · \(summary.offDisplay) \(what), restored when sharing"
+                : "\(count) · \(summary.offDisplay) \(what), not shared"
+        }
+        return selected ? "\(count) · ready to share" : count
     }
 
     private var sharedWindows: some View {
@@ -205,21 +230,37 @@ struct ContentView: View {
                 Spacer()
                 Text("\(host.previewWindows.count) windows").foregroundStyle(.secondary)
             }.font(.callout)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 16)], spacing: 16) {
+            ForEach(host.status.notices, id: \.self) { notice in
+                Label(notice, systemImage: "info.circle.fill")
+                    .font(.callout)
+                    .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: cardSize.windowCardMinWidth), spacing: 16)],
+                spacing: 16
+            ) {
                 ForEach(host.previewWindows) { window in
                     VStack(alignment: .leading, spacing: 12) {
-                        ZStack {
-                            Color(nsColor: .windowBackgroundColor)
-                            if let cg = host.previewImage?.cgImage(forProposedRect: nil, context: nil, hints: nil),
-                                let crop = cg.cropping(to: window.rect) {
-                                Image(decorative: crop, scale: 1).resizable().scaledToFit()
-                            } else {
-                                Label(videoEnabled ? "Waiting for video" : "Video is off", systemImage: "macwindow")
-                                    .foregroundStyle(.secondary)
-                            }
-                        }.frame(height: 170).clipShape(RoundedRectangle(cornerRadius: 6))
-                        Text(window.title.isEmpty ? "Untitled window" : window.title)
-                            .font(.headline).lineLimit(1)
+                        if showThumbnails {
+                            ZStack {
+                                Color(nsColor: .windowBackgroundColor)
+                                if let cg = host.previewImage?.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                                    let crop = cg.cropping(to: window.rect) {
+                                    Image(decorative: crop, scale: 1).resizable().scaledToFit()
+                                } else {
+                                    Label(videoEnabled ? "Waiting for video" : "Video is off", systemImage: "macwindow")
+                                        .foregroundStyle(.secondary)
+                                }
+                            }.frame(height: cardSize.thumbnailHeight).clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        Label {
+                            Text(window.title.isEmpty ? "Untitled window" : window.title)
+                                .font(.headline).lineLimit(1)
+                        } icon: {
+                            if !showThumbnails { Image(systemName: "macwindow").foregroundStyle(accent) }
+                        }
                         Text("Available on your PC").font(.caption).foregroundStyle(.secondary)
                     }
                     .padding(12)
@@ -249,10 +290,10 @@ struct ContentView: View {
     private var permissionSetup: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Allow Transom to share your windows").font(.headline)
-            if !screenRecording && videoEnabled {
+            if !host.screenRecording && videoEnabled {
                 permission("Screen Recording", detail: "Lets your PC see the shared app windows.", path: "Privacy_ScreenCapture")
             }
-            if !accessibility {
+            if !host.accessibility {
                 permission("Accessibility", detail: "Lets you control and resize shared windows from your PC.", path: "Privacy_Accessibility")
             }
         }.padding(18).background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
@@ -274,13 +315,13 @@ struct ContentView: View {
     private var diagnostics: some View {
         DisclosureGroup("Connection details and diagnostics") {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Address: \(effectiveAddress)   Control: \(controlPort)   Video: \(videoPort)")
+                Text("Address: \(host.effectiveAddress)   Control: \(controlPort)   Video: \(videoPort)")
                     .textSelection(.enabled)
-                if !PrivateAddress.isPrivateIPv4(effectiveAddress) {
+                if !PrivateAddress.isPrivateIPv4(host.effectiveAddress) {
                     Text("Connect this Mac to Ethernet or Wi-Fi, or select a private address in Settings.").foregroundStyle(.red)
                 }
-                if !hostIsAssigned { Text("This address is no longer assigned to the Mac. Choose a current address in Settings.").foregroundStyle(.red) }
-                if !portsValid { Text("Choose valid, different control and video ports in Settings.").foregroundStyle(.red) }
+                if !host.hostIsAssigned { Text("This address is no longer assigned to the Mac. Choose a current address in Settings.").foregroundStyle(.red) }
+                if !host.portsValid { Text("Choose valid, different control and video ports in Settings.").foregroundStyle(.red) }
                 if host.running {
                     Text("\(Int(host.status.measuredFPS)) fps   \(String(format: "%.1f", host.status.measuredBitrateMbps)) Mbps")
                     Text(host.status.encoderFormatSummary).textSelection(.enabled)
@@ -293,40 +334,5 @@ struct ContentView: View {
                 SettingsLink { Text("Advanced settings…") }
             }.font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12)
         }.foregroundStyle(.secondary)
-    }
-
-    private func refreshAll() {
-        HostDefaults.repairStaleBindAddress()
-        displays = Displays.all()
-        apps = AppResolver.runningApps().filter { $0.pid != ProcessInfo.processInfo.processIdentifier }
-        if selectedPIDs.isEmpty {
-            let saved = Set(savedApps.split(separator: "\n").map(String.init))
-            selectedPIDs = Set(apps.filter { saved.contains($0.bundleID ?? "") }.map(\.pid))
-        } else { selectedPIDs.formIntersection(Set(apps.map(\.pid))) }
-        if selectedDisplayID == 0 || !displays.contains(where: { $0.id == selectedDisplayID }) {
-            selectedDisplayID = displays.first(where: { $0.isMain })?.id ?? displays.first?.id ?? 0
-        }
-        refreshPermissions()
-    }
-    private func refreshPermissions() {
-        screenRecording = CGPreflightScreenCaptureAccess()
-        accessibility = AXIsProcessTrusted()
-    }
-    private func startSharing() {
-        let targets = apps.filter { selectedPIDs.contains($0.pid) }
-        guard let first = targets.first, let display = displays.first(where: { $0.id == selectedDisplayID }) else { return }
-        let address = automaticAddress ? (HostDiscovery.localAddresses().first ?? "") : bindAddress
-        guard PrivateAddress.isPrivateIPv4(address) else {
-            host.startError = "Connect this Mac to Ethernet or Wi-Fi before sharing."
-            return
-        }
-        activeAddress = address
-        host.start(config: HostConfig(target: first, additionalTargets: Array(targets.dropFirst()),
-            display: display, host: address, controlPort: UInt16(clamping: controlPort),
-            videoPort: UInt16(clamping: videoPort), gutter: gutter, tile: true,
-            video: videoEnabled, bitrateMbps: bitrateMbps, fps: fps,
-            videoFormat: HEVCEncoder.Format(rawValue: chroma) ?? .hevc420_8bit,
-            namesakeModifiers: namesakeModifiers, logInput: logInput,
-            inputDelivery: foregroundInput ? .foreground : .background))
     }
 }
